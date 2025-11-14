@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import { supabase } from "../lib/supabaseClient";
 
 type ChatMessage = {
@@ -50,8 +51,12 @@ export default function Home() {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    null
+  );
+  const [selectedConversationId, setSelectedConversationId] = useState<
+    string | null
+  >(null);
 
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
@@ -176,7 +181,10 @@ export default function Home() {
   // ------------------------------------------------------------
   // CREATE CONVERSATION
   // ------------------------------------------------------------
-  async function createConversation(initialTitle: string, projectId: string | null) {
+  async function createConversation(
+    initialTitle: string,
+    projectId: string | null
+  ) {
     const { data, error } = await supabase
       .from("conversations")
       .insert({
@@ -281,7 +289,10 @@ export default function Home() {
           updated[idx].content = "Error contacting GPT. Try again.";
           return updated;
         }
-        return [...prev, { role: "assistant", content: "Error contacting GPT." }];
+        return [
+          ...prev,
+          { role: "assistant", content: "Error contacting GPT. Try again." },
+        ];
       });
     } finally {
       setIsSending(false);
@@ -296,7 +307,7 @@ export default function Home() {
   }
 
   // ------------------------------------------------------------
-  // PROJECTS
+  // PROJECTS + CHAT MGMT
   // ------------------------------------------------------------
   async function handleNewChat(global = false) {
     const projectId = global ? null : selectedProjectId;
@@ -306,7 +317,9 @@ export default function Home() {
       setMessages([]);
       setViewMode("chat");
       if (!global) setSelectedProjectId(projectId);
-    } catch {}
+    } catch {
+      // noop
+    }
   }
 
   async function handleCreateProject() {
@@ -402,7 +415,9 @@ export default function Home() {
 
         <div className="mt-1 flex flex-col gap-1 px-2">
           {sortedProjects.length === 0 && (
-            <div className="text-[11px] text-zinc-500 px-1 py-2">No projects yet.</div>
+            <div className="text-[11px] text-zinc-500 px-1 py-2">
+              No projects yet.
+            </div>
           )}
 
           {sortedProjects.map((p) => (
@@ -502,7 +517,9 @@ export default function Home() {
         {inProjectView && currentProject ? (
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <div className="max-w-3xl mx-auto">
-              <h1 className="text-lg font-semibold mb-4">{currentProject.name}</h1>
+              <h1 className="text-lg font-semibold mb-4">
+                {currentProject.name}
+              </h1>
 
               <button
                 onClick={() => handleNewChat(false)}
@@ -512,7 +529,9 @@ export default function Home() {
               </button>
 
               {projectChats.length === 0 && (
-                <div className="text-sm text-zinc-500">No chats in this project yet.</div>
+                <div className="text-sm text-zinc-500">
+                  No chats in this project yet.
+                </div>
               )}
 
               <div className="space-y-2">
@@ -574,7 +593,6 @@ export default function Home() {
                 ))}
               </div>
 
-              {/* Spacer */}
               <div className="h-10" />
             </div>
           </div>
@@ -611,9 +629,13 @@ export default function Home() {
                       }`}
                     >
                       {m.role === "assistant" ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {m.content}
-                        </ReactMarkdown>
+                        <div className="markdown-body">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkBreaks]}
+                          >
+                            {m.content}
+                          </ReactMarkdown>
+                        </div>
                       ) : (
                         m.content
                       )}
