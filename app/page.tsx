@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { supabase } from "../lib/supabaseClient";
 
 type ChatMessage = {
@@ -25,10 +27,7 @@ type ViewMode = "chat" | "project";
 
 const TEST_USER_ID = "test-user-1";
 
-function latestConvTimeForProject(
-  projectId: string,
-  convs: ConversationMeta[]
-): string | null {
+function latestConvTimeForProject(projectId: string, convs: ConversationMeta[]) {
   const filtered = convs.filter(
     (c) => c.project_id === projectId && c.created_at
   );
@@ -41,32 +40,35 @@ function latestConvTimeForProject(
 }
 
 export default function Home() {
+  // ------------------------------------------------------------
+  // STATE
+  // ------------------------------------------------------------
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    null
-  );
-  const [selectedConversationId, setSelectedConversationId] = useState<
-    string | null
-  >(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
 
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
 
-  // Autoscroll anchor
+  // autoscroll anchor
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   function scrollToBottom() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
-  // Load projects + conversations on mount
+  // ------------------------------------------------------------
+  // INITIAL LOAD: projects + conversations
+  // ------------------------------------------------------------
   useEffect(() => {
     (async () => {
       const { data: projData } = await supabase
@@ -83,9 +85,10 @@ export default function Home() {
       setConversations((convData || []) as ConversationMeta[]);
 
       if (convData && convData.length > 0) {
-        const newest = [...(convData as ConversationMeta[])].sort((a, b) =>
+        const newest = [...convData].sort((a, b) =>
           (b.created_at || "").localeCompare(a.created_at || "")
         )[0];
+
         setSelectedConversationId(newest.id);
         setSelectedProjectId(newest.project_id);
         setViewMode("chat");
@@ -93,7 +96,9 @@ export default function Home() {
     })();
   }, []);
 
-  // Load messages when conversation changes
+  // ------------------------------------------------------------
+  // LOAD MESSAGES
+  // ------------------------------------------------------------
   useEffect(() => {
     if (!selectedConversationId) {
       setMessages([]);
@@ -116,49 +121,62 @@ export default function Home() {
           (data || []).map((m) => ({
             role: m.role,
             content: m.content,
-          })) as ChatMessage[]
+          }))
         );
       }
       setIsLoadingMessages(false);
     })();
   }, [selectedConversationId]);
 
-  // Autoscroll whenever messages change (including streaming tokens)
+  // ------------------------------------------------------------
+  // AUTOSCROLL WHEN MESSAGES CHANGE
+  // ------------------------------------------------------------
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  // Derived sorted lists
-  const sortedConversations = useMemo(() => {
-    return [...conversations].sort((a, b) =>
-      (b.created_at || "").localeCompare(a.created_at || "")
-    );
-  }, [conversations]);
-
-  const sortedProjects = useMemo(() => {
-    return [...projects].sort((a, b) => {
-      const lastA =
-        latestConvTimeForProject(a.id, conversations) || a.created_at || "";
-      const lastB =
-        latestConvTimeForProject(b.id, conversations) || b.created_at || "";
-      return lastB.localeCompare(lastA);
-    });
-  }, [projects, conversations]);
-
-  const currentConversation = useMemo(
-    () => conversations.find((c) => c.id === selectedConversationId) || null,
-    [conversations, selectedConversationId]
+  // ------------------------------------------------------------
+  // MEMOIZED SORTED LISTS
+  // ------------------------------------------------------------
+  const sortedConversations = useMemo(
+    () =>
+      [...conversations].sort((a, b) =>
+        (b.created_at || "").localeCompare(a.created_at || "")
+      ),
+    [conversations]
   );
 
-  const currentProject = useMemo(
-    () => projects.find((p) => p.id === selectedProjectId) || null,
-    [projects, selectedProjectId]
+  const sortedProjects = useMemo(
+    () =>
+      [...projects].sort((a, b) => {
+        const lastA =
+          latestConvTimeForProject(a.id, conversations) || a.created_at || "";
+        const lastB =
+          latestConvTimeForProject(b.id, conversations) || b.created_at || "";
+        return lastB.localeCompare(lastA);
+      }),
+    [projects, conversations]
   );
 
-  async function createConversation(
-    initialTitle: string,
-    projectId: string | null
-  ) {
+  const currentConversation = conversations.find(
+    (c) => c.id === selectedConversationId
+  );
+  const currentProject = projects.find((p) => p.id === selectedProjectId);
+
+  const projectChats = useMemo(
+    () =>
+      selectedProjectId
+        ? sortedConversations.filter((c) => c.project_id === selectedProjectId)
+        : [],
+    [sortedConversations, selectedProjectId]
+  );
+
+  const inProjectView = viewMode === "project" && selectedProjectId;
+
+  // ------------------------------------------------------------
+  // CREATE CONVERSATION
+  // ------------------------------------------------------------
+  async function createConversation(initialTitle: string, projectId: string | null) {
     const { data, error } = await supabase
       .from("conversations")
       .insert({
@@ -169,16 +187,15 @@ export default function Home() {
       .select("id, title, project_id, created_at")
       .single();
 
-    if (error || !data) {
-      console.error("Create conversation error", error);
-      throw error || new Error("No conversation created");
-    }
+    if (error || !data) throw error || new Error("Conversation not created");
 
-    setConversations((prev) => [data as ConversationMeta, ...prev]);
-    return data as ConversationMeta;
+    setConversations((prev) => [data, ...prev]);
+    return data;
   }
 
-  // STREAMING VERSION + send history
+  // ------------------------------------------------------------
+  // SEND MESSAGE — STREAMING
+  // ------------------------------------------------------------
   async function sendMessage() {
     if (!input.trim() || isSending) return;
 
@@ -187,22 +204,20 @@ export default function Home() {
     setInput("");
     setIsSending(true);
 
-    // snapshot of history BEFORE adding the new user message
+    // history snapshot BEFORE adding new user message
     const historySnapshot = messages;
 
     try {
-      // Ensure there is a conversation
       if (!conversationId) {
         const conv = await createConversation("New chat", selectedProjectId);
         conversationId = conv.id;
         setSelectedConversationId(conv.id);
       }
 
-      // Add user message + empty assistant message for streaming
-      const userMessage: ChatMessage = { role: "user", content: text };
+      // user msg + empty assistant bubble for streaming
       setMessages((prev) => [
         ...prev,
-        userMessage,
+        { role: "user", content: text },
         { role: "assistant", content: "" },
       ]);
 
@@ -216,33 +231,25 @@ export default function Home() {
         }),
       });
 
-      if (!res.ok || !res.body) {
-        throw new Error("No streaming body from server");
-      }
+      if (!res.ok || !res.body) throw new Error("Stream failed");
 
       const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      const decoder = new TextDecoder();
       let done = false;
 
       while (!done) {
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
-
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
-
           if (chunk) {
-            // Append streamed chunk to the last assistant message
             setMessages((prev) => {
               const updated = [...prev];
-              const lastIndex = updated.length - 1;
-              if (
-                lastIndex >= 0 &&
-                updated[lastIndex].role === "assistant"
-              ) {
-                updated[lastIndex] = {
-                  ...updated[lastIndex],
-                  content: updated[lastIndex].content + chunk,
+              const idx = updated.length - 1;
+              if (idx >= 0 && updated[idx].role === "assistant") {
+                updated[idx] = {
+                  ...updated[idx],
+                  content: updated[idx].content + chunk,
                 };
               }
               return updated;
@@ -251,7 +258,7 @@ export default function Home() {
         }
       }
 
-      // bump conversation "activity" locally by updating created_at to now string
+      // bump last activity timestamp
       if (conversationId) {
         setConversations((prev) =>
           prev.map((c) =>
@@ -261,30 +268,20 @@ export default function Home() {
           )
         );
       }
-    } catch (err) {
-      console.error(err);
-      // Replace the empty assistant bubble with an error, or append a new one
+    } catch (error) {
+      console.error(error);
       setMessages((prev) => {
         const updated = [...prev];
-        const lastIndex = updated.length - 1;
+        const idx = updated.length - 1;
         if (
-          lastIndex >= 0 &&
-          updated[lastIndex].role === "assistant" &&
-          updated[lastIndex].content === ""
+          idx >= 0 &&
+          updated[idx].role === "assistant" &&
+          updated[idx].content === ""
         ) {
-          updated[lastIndex] = {
-            ...updated[lastIndex],
-            content: "Error talking to GPT. Please try again.",
-          };
+          updated[idx].content = "Error contacting GPT. Try again.";
           return updated;
         }
-        return [
-          ...updated,
-          {
-            role: "assistant",
-            content: "Error talking to GPT. Please try again.",
-          },
-        ];
+        return [...prev, { role: "assistant", content: "Error contacting GPT." }];
       });
     } finally {
       setIsSending(false);
@@ -298,19 +295,18 @@ export default function Home() {
     }
   }
 
+  // ------------------------------------------------------------
+  // PROJECTS
+  // ------------------------------------------------------------
   async function handleNewChat(global = false) {
+    const projectId = global ? null : selectedProjectId;
     try {
-      const projectId = global ? null : selectedProjectId;
       const conv = await createConversation("New chat", projectId);
       setSelectedConversationId(conv.id);
-      setViewMode("chat");
       setMessages([]);
-      if (!global) {
-        setSelectedProjectId(projectId);
-      }
-    } catch (e) {
-      // already logged
-    }
+      setViewMode("chat");
+      if (!global) setSelectedProjectId(projectId);
+    } catch {}
   }
 
   async function handleCreateProject() {
@@ -319,58 +315,38 @@ export default function Home() {
 
     const { data, error } = await supabase
       .from("projects")
-      .insert({
-        user_id: TEST_USER_ID,
-        name,
-      })
+      .insert({ user_id: TEST_USER_ID, name })
       .select("id, name, created_at")
       .single();
 
-    if (error || !data) {
-      console.error("Create project error", error);
-      return;
+    if (!error && data) {
+      setProjects((prev) => [data, ...prev]);
+      setSelectedProjectId(data.id);
+      setViewMode("project");
+      setShowProjectModal(false);
+      setNewProjectName("");
     }
-
-    setProjects((prev) => [data as Project, ...prev]);
-    setSelectedProjectId(data.id);
-    setShowProjectModal(false);
-    setNewProjectName("");
-    setViewMode("project");
   }
 
   async function renameConversation(id: string) {
-    const target =
+    const oldTitle =
       conversations.find((c) => c.id === id)?.title || "Untitled chat";
-    const nextTitle =
-      typeof window !== "undefined"
-        ? window.prompt("Rename chat:", target)
-        : null;
+
+    const nextTitle = window.prompt("Rename chat:", oldTitle);
     if (!nextTitle || !nextTitle.trim()) return;
 
-    const title = nextTitle.trim();
-
-    const { error } = await supabase
+    await supabase
       .from("conversations")
-      .update({ title })
+      .update({ title: nextTitle.trim() })
       .eq("id", id);
 
-    if (error) {
-      console.error("Rename conversation error", error);
-      return;
-    }
-
     setConversations((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, title } : c))
+      prev.map((c) => (c.id === id ? { ...c, title: nextTitle.trim() } : c))
     );
   }
 
   async function deleteConversation(id: string) {
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm("Delete this chat and its messages?")
-    ) {
-      return;
-    }
+    if (!window.confirm("Delete this chat?")) return;
 
     await supabase.from("messages").delete().eq("conversation_id", id);
     await supabase.from("conversations").delete().eq("id", id);
@@ -384,15 +360,10 @@ export default function Home() {
   }
 
   async function moveConversation(id: string, newProjectId: string | null) {
-    const { error } = await supabase
+    await supabase
       .from("conversations")
       .update({ project_id: newProjectId })
       .eq("id", id);
-
-    if (error) {
-      console.error("Move conversation error", error);
-      return;
-    }
 
     setConversations((prev) =>
       prev.map((c) =>
@@ -401,24 +372,15 @@ export default function Home() {
     );
   }
 
-  const projectChats = useMemo(
-    () =>
-      selectedProjectId
-        ? sortedConversations.filter((c) => c.project_id === selectedProjectId)
-        : [],
-    [sortedConversations, selectedProjectId]
-  );
-
-  const inProjectView = viewMode === "project" && selectedProjectId;
-
+  // ------------------------------------------------------------
+  // RENDER
+  // ------------------------------------------------------------
   return (
     <div className="flex h-screen bg-[#212121] text-zinc-100">
       {/* Sidebar */}
       <aside className="hidden md:flex w-64 flex-col border-r border-[#202123] bg-[#181818]">
-        {/* Top new chat button (global) */}
         <div className="px-3 py-3">
           <button
-            type="button"
             onClick={() => handleNewChat(true)}
             className="flex items-center gap-2 w-full rounded-md bg-[#202123] hover:bg-[#26272b] px-3 py-2 text-sm text-zinc-100"
           >
@@ -427,11 +389,10 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Projects header */}
-        <div className="px-3 mt-1 flex items-center justify-between text-[11px] font-semibold text-zinc-500 tracking-wide uppercase">
+        {/* Projects */}
+        <div className="px-3 mt-1 flex items-center justify-between text-[11px] font-semibold text-zinc-500 uppercase">
           <span>Projects</span>
           <button
-            type="button"
             onClick={() => setShowProjectModal(true)}
             className="text-xs text-zinc-400 hover:text-zinc-200"
           >
@@ -439,13 +400,11 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Projects list */}
         <div className="mt-1 flex flex-col gap-1 px-2">
           {sortedProjects.length === 0 && (
-            <div className="text-[11px] text-zinc-500 px-1 py-2">
-              No projects yet.
-            </div>
+            <div className="text-[11px] text-zinc-500 px-1 py-2">No projects yet.</div>
           )}
+
           {sortedProjects.map((p) => (
             <button
               key={p.id}
@@ -464,16 +423,18 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Chats section (always "All chats") */}
-        <div className="px-3 mt-4 text-[11px] font-semibold text-zinc-500 tracking-wide uppercase">
+        {/* All chats */}
+        <div className="px-3 mt-4 text-[11px] font-semibold text-zinc-500 uppercase">
           All chats
         </div>
+
         <div className="mt-1 flex-1 overflow-y-auto px-2 pb-4 space-y-1">
           {sortedConversations.length === 0 && (
             <div className="text-[11px] text-zinc-500 px-1 py-2">
-              No chats yet. Click &ldquo;New chat&rdquo; to start.
+              No chats yet.
             </div>
           )}
+
           {sortedConversations.map((c) => (
             <button
               key={c.id}
@@ -497,19 +458,19 @@ export default function Home() {
         </div>
       </aside>
 
-      {/* Main area */}
+      {/* Main Content */}
       <main className="flex-1 flex flex-col bg-[#212121]">
         {/* Header */}
-        <header className="flex items-center justify-between px-4 py-3 border-b border-[#202123] bg-[#212121]">
+        <header className="flex items-center justify-between px-4 py-3 border-b border-[#202123]">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-zinc-100">
-              LLM Client
-            </span>
+            <span className="text-sm font-semibold">LLM Client</span>
+
             {viewMode === "chat" && currentConversation && (
               <span className="hidden sm:inline text-xs text-zinc-500">
                 {currentConversation.title || "Untitled chat"}
               </span>
             )}
+
             {inProjectView && currentProject && (
               <span className="hidden sm:inline text-xs text-zinc-500">
                 Project · {currentProject.name}
@@ -517,60 +478,44 @@ export default function Home() {
             )}
           </div>
 
-          <div className="flex items-center gap-3">
-            {viewMode === "chat" && currentConversation && (
-              <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-400">
-                <button
-                  type="button"
-                  onClick={() => renameConversation(currentConversation.id)}
-                  className="hover:text-zinc-200"
-                >
-                  Rename
-                </button>
-                <span>·</span>
-                <button
-                  type="button"
-                  onClick={() => deleteConversation(currentConversation.id)}
-                  className="hover:text-red-400"
-                >
-                  Delete
-                </button>
-              </div>
-            )}
-            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-300">
-              GPT-5.1 chat · streaming
-            </span>
-          </div>
+          {/* Rename/Delete in header */}
+          {viewMode === "chat" && currentConversation && (
+            <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-400">
+              <button
+                onClick={() => renameConversation(currentConversation.id)}
+                className="hover:text-zinc-200"
+              >
+                Rename
+              </button>
+              <span>·</span>
+              <button
+                onClick={() => deleteConversation(currentConversation.id)}
+                className="hover:text-red-400"
+              >
+                Delete
+              </button>
+            </div>
+          )}
         </header>
 
-        {/* Main content: project view OR chat view */}
+        {/* PROJECT VIEW */}
         {inProjectView && currentProject ? (
-          // PROJECT VIEW
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <div className="max-w-3xl mx-auto">
-              <h1 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <span className="text-zinc-100">{currentProject.name}</span>
-              </h1>
+              <h1 className="text-lg font-semibold mb-4">{currentProject.name}</h1>
 
-              <div className="mb-6">
-                <button
-                  type="button"
-                  onClick={() => handleNewChat(false)}
-                  className="flex items-center justify-between w-full rounded-2xl bg-[#181818] px-4 py-3 text-sm text-zinc-300 hover:bg-[#202123]"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg leading-none">＋</span>
-                    <span>New chat in {currentProject.name}</span>
-                  </div>
-                </button>
-              </div>
+              <button
+                onClick={() => handleNewChat(false)}
+                className="w-full rounded-2xl bg-[#181818] px-4 py-3 text-sm text-zinc-300 hover:bg-[#202123] mb-6"
+              >
+                ＋ New chat in {currentProject.name}
+              </button>
+
+              {projectChats.length === 0 && (
+                <div className="text-sm text-zinc-500">No chats in this project yet.</div>
+              )}
 
               <div className="space-y-2">
-                {projectChats.length === 0 && (
-                  <div className="text-sm text-zinc-500">
-                    No chats in this project yet.
-                  </div>
-                )}
                 {projectChats.map((c) => (
                   <div
                     key={c.id}
@@ -587,37 +532,38 @@ export default function Home() {
                         {c.title || "Untitled chat"}
                       </div>
                     </button>
+
                     <div className="flex items-center gap-2 text-[11px] text-zinc-400">
                       <button
-                        type="button"
                         onClick={() => renameConversation(c.id)}
                         className="hover:text-zinc-200"
                       >
                         Rename
                       </button>
+
                       <span>·</span>
-                      <div className="relative">
-                        <select
-                          className="bg-transparent text-[11px] border border-[#3f3f46] rounded-md px-1 py-0.5"
-                          value={c.project_id || ""}
-                          onChange={(e) =>
-                            moveConversation(
-                              c.id,
-                              e.target.value === "" ? null : e.target.value
-                            )
-                          }
-                        >
-                          <option value="">No project</option>
-                          {sortedProjects.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+
+                      <select
+                        className="bg-transparent border border-[#3f3f46] rounded-md px-1 py-0.5"
+                        value={c.project_id || ""}
+                        onChange={(e) =>
+                          moveConversation(
+                            c.id,
+                            e.target.value === "" ? null : e.target.value
+                          )
+                        }
+                      >
+                        <option value="">No project</option>
+                        {sortedProjects.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+
                       <span>·</span>
+
                       <button
-                        type="button"
                         onClick={() => deleteConversation(c.id)}
                         className="hover:text-red-400"
                       >
@@ -627,11 +573,15 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+
+              {/* Spacer */}
+              <div className="h-10" />
             </div>
           </div>
         ) : (
-          // CHAT VIEW
+          /* CHAT VIEW */
           <>
+            {/* Messages */}
             <div className="flex-1 overflow-y-auto px-4 py-6">
               <div className="max-w-2xl mx-auto flex flex-col space-y-3">
                 {isLoadingMessages && (
@@ -642,12 +592,7 @@ export default function Home() {
 
                 {!isLoadingMessages && messages.length === 0 && (
                   <div className="text-sm text-zinc-400 text-center mt-10">
-                    Start chatting with your LLM client. Messages are answered
-                    by{" "}
-                    <span className="font-semibold text-zinc-200">
-                      GPT-5.1 chat
-                    </span>{" "}
-                    using your own API key and saved into Supabase.
+                    Start chatting — GPT-5.1 chat is streaming live.
                   </div>
                 )}
 
@@ -665,86 +610,81 @@ export default function Home() {
                           : "bg-[#202123] text-zinc-100"
                       }`}
                     >
-                      {m.content}
+                      {m.role === "assistant" ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {m.content}
+                        </ReactMarkdown>
+                      ) : (
+                        m.content
+                      )}
                     </div>
                   </div>
                 ))}
 
-                {/* Autoscroll anchor */}
-                <div ref={messagesEndRef}></div>
+                {/* Auto-scroll anchor */}
+                <div ref={messagesEndRef} />
               </div>
             </div>
 
             {/* Input */}
             <div className="border-t border-[#202123] bg-[#212121] px-4 py-3">
-              <div className="max-w-2xl mx-auto">
-                <div className="flex gap-2 items-center">
-                  <input
-                    className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type a message..."
-                  />
-                  <button
-                    onClick={sendMessage}
-                    disabled={isSending || !input.trim()}
-                    className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[#2658e4]"
-                  >
-                    Send
-                  </button>
-                </div>
-                <p className="mt-2 text-[11px] text-center text-zinc-500">
-                  Powered by OpenAI GPT-5.1 chat. Messages are stored in
-                  Supabase for this test user.
-                </p>
+              <div className="max-w-2xl mx-auto flex items-center gap-2">
+                <input
+                  className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type a message…"
+                />
+
+                <button
+                  onClick={sendMessage}
+                  disabled={isSending || !input.trim()}
+                  className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50 hover:bg-[#2658e4]"
+                >
+                  Send
+                </button>
               </div>
             </div>
           </>
         )}
       </main>
 
-      {/* New Project modal */}
+      {/* PROJECT MODAL */}
       {showProjectModal && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
-          <div className="w-full max-w-md rounded-xl bg-[#181818] border border-[#3f3f46] p-4 shadow-lg">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="w-full max-w-md bg-[#181818] border border-[#3f3f46] rounded-xl p-4">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-zinc-100">
-                New project
-              </h2>
+              <h2 className="text-sm font-semibold">New project</h2>
               <button
-                type="button"
                 onClick={() => setShowProjectModal(false)}
-                className="text-zinc-400 hover:text-zinc-200 text-lg leading-none"
+                className="text-zinc-400 hover:text-zinc-200 text-lg"
               >
                 ×
               </button>
             </div>
+
             <input
-              className="w-full rounded-md border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
-              placeholder="Project name"
+              className="w-full rounded-md border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
               value={newProjectName}
               onChange={(e) => setNewProjectName(e.target.value)}
+              placeholder="Project name"
             />
-            <p className="mt-2 text-[11px] text-zinc-500">
-              Projects keep related chats together. You can add more features
-              later like files and custom settings.
-            </p>
+
             <div className="mt-4 flex justify-end gap-2">
               <button
-                type="button"
                 onClick={() => setShowProjectModal(false)}
-                className="px-3 py-1.5 text-xs rounded-md text-zinc-300 hover:bg-[#26272b]"
+                className="px-3 py-1.5 rounded-md text-xs text-zinc-300 hover:bg-[#26272b]"
               >
                 Cancel
               </button>
+
               <button
-                type="button"
                 onClick={handleCreateProject}
                 disabled={!newProjectName.trim()}
-                className="px-3 py-1.5 text-xs rounded-md bg-[#1e4fd8] text-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[#2658e4]"
+                className="px-3 py-1.5 rounded-md bg-[#1e4fd8] text-white text-xs disabled:opacity-50 hover:bg-[#2658e4]"
               >
-                Create project
+                Create
               </button>
             </div>
           </div>
