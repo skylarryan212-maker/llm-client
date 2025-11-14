@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
 type ChatMessage = {
@@ -59,6 +59,13 @@ export default function Home() {
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
 
+  // Autoscroll anchor
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  function scrollToBottom() {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
+
   // Load projects + conversations on mount
   useEffect(() => {
     (async () => {
@@ -116,6 +123,11 @@ export default function Home() {
     })();
   }, [selectedConversationId]);
 
+  // Autoscroll whenever messages change (including streaming tokens)
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
   // Derived sorted lists
   const sortedConversations = useMemo(() => {
     return [...conversations].sort((a, b) =>
@@ -166,6 +178,7 @@ export default function Home() {
     return data as ConversationMeta;
   }
 
+  // STREAMING VERSION + send history
   async function sendMessage() {
     if (!input.trim() || isSending) return;
 
@@ -173,6 +186,9 @@ export default function Home() {
     const text = input.trim();
     setInput("");
     setIsSending(true);
+
+    // snapshot of history BEFORE adding the new user message
+    const historySnapshot = messages;
 
     try {
       // Ensure there is a conversation
@@ -182,41 +198,94 @@ export default function Home() {
         setSelectedConversationId(conv.id);
       }
 
+      // Add user message + empty assistant message for streaming
       const userMessage: ChatMessage = { role: "user", content: text };
-      setMessages((prev) => [...prev, userMessage]);
+      setMessages((prev) => [
+        ...prev,
+        userMessage,
+        { role: "assistant", content: "" },
+      ]);
 
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, conversationId }),
+        body: JSON.stringify({
+          message: text,
+          conversationId,
+          history: historySnapshot,
+        }),
       });
 
-      const data = await res.json();
+      if (!res.ok || !res.body) {
+        throw new Error("No streaming body from server");
+      }
 
-      const assistantMessage: ChatMessage = {
-        role: "assistant",
-        content: data.reply ?? "Test mode reply — no GPT yet.",
-      };
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let done = false;
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      while (!done) {
+        const { value, done: doneReading } = await reader.read();
+        done = doneReading;
+
+        if (value) {
+          const chunk = decoder.decode(value, { stream: true });
+
+          if (chunk) {
+            // Append streamed chunk to the last assistant message
+            setMessages((prev) => {
+              const updated = [...prev];
+              const lastIndex = updated.length - 1;
+              if (
+                lastIndex >= 0 &&
+                updated[lastIndex].role === "assistant"
+              ) {
+                updated[lastIndex] = {
+                  ...updated[lastIndex],
+                  content: updated[lastIndex].content + chunk,
+                };
+              }
+              return updated;
+            });
+          }
+        }
+      }
 
       // bump conversation "activity" locally by updating created_at to now string
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === conversationId
-            ? { ...c, created_at: new Date().toISOString() }
-            : c
-        )
-      );
+      if (conversationId) {
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === conversationId
+              ? { ...c, created_at: new Date().toISOString() }
+              : c
+          )
+        );
+      }
     } catch (err) {
       console.error(err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Error talking to backend (still in test mode).",
-        },
-      ]);
+      // Replace the empty assistant bubble with an error, or append a new one
+      setMessages((prev) => {
+        const updated = [...prev];
+        const lastIndex = updated.length - 1;
+        if (
+          lastIndex >= 0 &&
+          updated[lastIndex].role === "assistant" &&
+          updated[lastIndex].content === ""
+        ) {
+          updated[lastIndex] = {
+            ...updated[lastIndex],
+            content: "Error talking to GPT. Please try again.",
+          };
+          return updated;
+        }
+        return [
+          ...updated,
+          {
+            role: "assistant",
+            content: "Error talking to GPT. Please try again.",
+          },
+        ];
+      });
     } finally {
       setIsSending(false);
     }
@@ -447,9 +516,31 @@ export default function Home() {
               </span>
             )}
           </div>
-          <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-[11px] font-medium text-amber-300">
-            Test mode · no GPT calls
-          </span>
+
+          <div className="flex items-center gap-3">
+            {viewMode === "chat" && currentConversation && (
+              <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-400">
+                <button
+                  type="button"
+                  onClick={() => renameConversation(currentConversation.id)}
+                  className="hover:text-zinc-200"
+                >
+                  Rename
+                </button>
+                <span>·</span>
+                <button
+                  type="button"
+                  onClick={() => deleteConversation(currentConversation.id)}
+                  className="hover:text-red-400"
+                >
+                  Delete
+                </button>
+              </div>
+            )}
+            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-300">
+              GPT-5.1 chat · streaming
+            </span>
+          </div>
         </header>
 
         {/* Main content: project view OR chat view */}
@@ -506,7 +597,6 @@ export default function Home() {
                       </button>
                       <span>·</span>
                       <div className="relative">
-                        {/* Move options as simple dropdown-ish list */}
                         <select
                           className="bg-transparent text-[11px] border border-[#3f3f46] rounded-md px-1 py-0.5"
                           value={c.project_id || ""}
@@ -552,12 +642,12 @@ export default function Home() {
 
                 {!isLoadingMessages && messages.length === 0 && (
                   <div className="text-sm text-zinc-400 text-center mt-10">
-                    Start chatting with your future LLM client. Right now
-                    everything runs in{" "}
+                    Start chatting with your LLM client. Messages are answered
+                    by{" "}
                     <span className="font-semibold text-zinc-200">
-                      test mode
+                      GPT-5.1 chat
                     </span>{" "}
-                    with fake replies and Supabase logging.
+                    using your own API key and saved into Supabase.
                   </div>
                 )}
 
@@ -579,6 +669,9 @@ export default function Home() {
                     </div>
                   </div>
                 ))}
+
+                {/* Autoscroll anchor */}
+                <div ref={messagesEndRef}></div>
               </div>
             </div>
 
@@ -602,8 +695,8 @@ export default function Home() {
                   </button>
                 </div>
                 <p className="mt-2 text-[11px] text-center text-zinc-500">
-                  This build logs messages to Supabase and returns a fixed test
-                  reply. OpenAI models and routing come later.
+                  Powered by OpenAI GPT-5.1 chat. Messages are stored in
+                  Supabase for this test user.
                 </p>
               </div>
             </div>

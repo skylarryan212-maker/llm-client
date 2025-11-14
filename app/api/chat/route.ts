@@ -1,18 +1,22 @@
+export const runtime = "edge";
+
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { supabase } from "c:/Users/sdsry/llm-client/lib/supabaseClient"
 
-const openai = new OpenAI({
+const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// TEMP: single fake user
-const TEST_USER_ID = "test-user-1";
+type HistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const userText = (body.message ?? "").toString().trim();
+    const history = Array.isArray(body.history) ? (body.history as HistoryMessage[]) : [];
 
     if (!userText) {
       return NextResponse.json(
@@ -21,98 +25,58 @@ export async function POST(req: Request) {
       );
     }
 
-    // --- 1) Find or create a conversation for this user ---
-    const { data: convRow, error: convSelectError } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("user_id", TEST_USER_ID)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    // Build the message list with recent history
+    const historyForModel = history
+      .filter(
+        (m) =>
+          m &&
+          typeof m.content === "string" &&
+          (m.role === "user" || m.role === "assistant")
+      )
+      .slice(-20); // last 20 messages
 
-    if (convSelectError) {
-      console.error("Supabase select conversation error:", convSelectError);
-    }
+    const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+      {
+        role: "system",
+        content:
+          "You are a helpful assistant inside a custom LLM client. Use the conversation history to respond naturally. Be concise by default unless the user asks for detail.",
+      },
+      ...historyForModel,
+      { role: "user", content: userText },
+    ];
 
-    let conversationId = convRow?.id;
-
-    if (!conversationId) {
-      const { data: newConv, error: convInsertError } = await supabase
-        .from("conversations")
-        .insert({
-          user_id: TEST_USER_ID,
-          title: userText.slice(0, 60) || "New chat",
-        })
-        .select("id")
-        .single();
-
-      if (convInsertError) {
-        console.error("Supabase create conversation error:", convInsertError);
-      }
-
-      conversationId = newConv?.id;
-    }
-
-    // --- 2) Log user message ---
-    if (conversationId) {
-      const { error: msgInsertError } = await supabase.from("messages").insert([
-        {
-          user_id: TEST_USER_ID,
-          conversation_id: conversationId,
-          role: "user",
-          content: userText,
-        },
-      ]);
-
-      if (msgInsertError) {
-        console.error("Supabase insert user message error:", msgInsertError);
-      }
-    }
-
-    // --- 3) Call OpenAI (non-streaming for now) ---
-    const completion = await openai.chat.completions.create({
-      // Use a model that actually exists for you:
-      // e.g. "gpt-4.1-mini" or "gpt-4o-mini"
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are a helpful assistant.",
-        },
-        {
-          role: "user",
-          content: userText,
-        },
-      ],
+    // ⚡ Fast streaming GPT-5.1 chat model
+    const stream = await client.chat.completions.create({
+      model: "gpt-5-mini-2025-08-07",
+      messages,
+      stream: true,
     });
 
-    const replyText =
-      completion.choices[0]?.message?.content ??
-      "I couldn't generate a reply.";
+    const encoder = new TextEncoder();
 
-    // --- 4) Log assistant message ---
-    if (conversationId) {
-      const { error: assistantInsertError } = await supabase
-        .from("messages")
-        .insert([
-          {
-            user_id: TEST_USER_ID,
-            conversation_id: conversationId,
-            role: "assistant",
-            content: replyText,
-          },
-        ]);
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream) {
+            const token = chunk.choices[0]?.delta?.content;
+            if (token) {
+              controller.enqueue(encoder.encode(token));
+            }
+          }
+        } catch (err) {
+          console.error("Stream error:", err);
+        } finally {
+          controller.close();
+        }
+      },
+    });
 
-      if (assistantInsertError) {
-        console.error(
-          "Supabase insert assistant message error:",
-          assistantInsertError
-        );
-      }
-    }
-
-    // --- 5) Return JSON to the frontend ---
-    return NextResponse.json({ reply: replyText });
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+      },
+    });
   } catch (error: any) {
     console.error("Chat API error:", error);
     return NextResponse.json(
