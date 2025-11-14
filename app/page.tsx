@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import { supabase } from "../lib/supabaseClient";
@@ -40,6 +40,79 @@ function latestConvTimeForProject(projectId: string, convs: ConversationMeta[]) 
   }, filtered[0].created_at!);
 }
 
+function getNewestConversation(conversations: ConversationMeta[]) {
+  if (conversations.length === 0) return null;
+  return [...conversations].sort((a, b) =>
+    (b.created_at || "").localeCompare(a.created_at || "")
+  )[0];
+}
+
+const markdownComponents: Components = {
+  h1: ({ children }) => (
+    <h1 className="mt-4 mb-2 text-xl font-semibold text-zinc-100">{children}</h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mt-4 mb-2 text-lg font-semibold text-zinc-100">{children}</h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mt-3 mb-2 text-base font-semibold text-zinc-100">{children}</h3>
+  ),
+  p: ({ children }) => (
+    <p className="my-2 leading-relaxed text-zinc-100">{children}</p>
+  ),
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="text-[#8ab4ff] underline decoration-[#8ab4ff]/60"
+    >
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => (
+    <ul className="my-3 list-disc space-y-1 pl-6 text-zinc-200">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="my-3 list-decimal space-y-1 pl-6 text-zinc-200">{children}</ol>
+  ),
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  code({ inline, children }) {
+    if (inline) {
+      return (
+        <code className="rounded-md bg-[#2d2d30] px-1.5 py-0.5 text-[13px] text-zinc-100">
+          {children}
+        </code>
+      );
+    }
+    return (
+      <pre className="mt-3 overflow-x-auto rounded-xl border border-[#2e2e32] bg-[#151515] p-4 text-[13px] leading-relaxed text-zinc-100">
+        <code>{children}</code>
+      </pre>
+    );
+  },
+  blockquote: ({ children }) => (
+    <blockquote className="my-3 border-l-4 border-[#3b3b3f] pl-4 text-zinc-300">
+      {children}
+    </blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="my-4 overflow-x-auto rounded-xl border border-[#2e2e32]">
+      <table className="w-full border-collapse text-left text-sm text-zinc-200">
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-[#2e2e32] bg-[#1f1f23] px-3 py-2 text-sm font-medium text-zinc-100">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border border-[#2e2e32] px-3 py-2 text-sm text-zinc-200">{children}</td>
+  ),
+};
+
 export default function Home() {
   // ------------------------------------------------------------
   // STATE
@@ -63,9 +136,11 @@ export default function Home() {
 
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // autoscroll anchor
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const skipAutoLoadRef = useRef<string | null>(null);
 
   function scrollToBottom() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -104,19 +179,27 @@ export default function Home() {
   // ------------------------------------------------------------
   // LOAD MESSAGES
   // ------------------------------------------------------------
-  useEffect(() => {
-    if (!selectedConversationId) {
-      setMessages([]);
-      return;
-    }
+  const loadMessages = useCallback(
+    async (conversationId: string, opts: { silent?: boolean } = {}) => {
+      if (!conversationId) return;
+      if (!opts.silent) setIsLoadingMessages(true);
 
-    (async () => {
-      setIsLoadingMessages(true);
       const { data, error } = await supabase
         .from("messages")
         .select("role, content, created_at")
-        .eq("conversation_id", selectedConversationId)
+        .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
+
+      if (selectedConversationId !== conversationId) {
+        if (!opts.silent) setIsLoadingMessages(false);
+        return;
+      }
+
+      if (skipAutoLoadRef.current === conversationId) {
+        skipAutoLoadRef.current = null;
+        if (!opts.silent) setIsLoadingMessages(false);
+        return;
+      }
 
       if (error) {
         console.error("Load messages error", error);
@@ -129,9 +212,20 @@ export default function Home() {
           }))
         );
       }
-      setIsLoadingMessages(false);
-    })();
-  }, [selectedConversationId]);
+
+      if (!opts.silent) setIsLoadingMessages(false);
+    },
+    [selectedConversationId]
+  );
+
+  useEffect(() => {
+    if (!selectedConversationId) {
+      setMessages([]);
+      return;
+    }
+
+    loadMessages(selectedConversationId);
+  }, [selectedConversationId, loadMessages]);
 
   // ------------------------------------------------------------
   // AUTOSCROLL WHEN MESSAGES CHANGE
@@ -176,7 +270,24 @@ export default function Home() {
     [sortedConversations, selectedProjectId]
   );
 
-  const inProjectView = viewMode === "project" && selectedProjectId;
+  const inProjectView = viewMode === "project" && !!selectedProjectId;
+
+  // ------------------------------------------------------------
+  // HELPERS
+  // ------------------------------------------------------------
+  const handleConversationSelect = (id: string) => {
+    const convo = conversations.find((c) => c.id === id);
+    setSelectedConversationId(id);
+    setSelectedProjectId(convo?.project_id ?? null);
+    setViewMode("chat");
+    setSidebarOpen(false);
+  };
+
+  const handleProjectSelect = (id: string) => {
+    setSelectedProjectId(id);
+    setViewMode("project");
+    setSidebarOpen(false);
+  };
 
   // ------------------------------------------------------------
   // CREATE CONVERSATION
@@ -212,14 +323,14 @@ export default function Home() {
     setInput("");
     setIsSending(true);
 
-    // history snapshot BEFORE adding new user message
-    const historySnapshot = messages;
-
     try {
       if (!conversationId) {
         const conv = await createConversation("New chat", selectedProjectId);
         conversationId = conv.id;
         setSelectedConversationId(conv.id);
+        setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
+        setViewMode("chat");
+        skipAutoLoadRef.current = conv.id;
       }
 
       // user msg + empty assistant bubble for streaming
@@ -235,7 +346,6 @@ export default function Home() {
         body: JSON.stringify({
           message: text,
           conversationId,
-          history: historySnapshot,
         }),
       });
 
@@ -249,7 +359,7 @@ export default function Home() {
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
         if (value) {
-          const chunk = decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(value, { stream: !doneReading });
           if (chunk) {
             setMessages((prev) => {
               const updated = [...prev];
@@ -275,6 +385,7 @@ export default function Home() {
               : c
           )
         );
+        await loadMessages(conversationId, { silent: true });
       }
     } catch (error) {
       console.error(error);
@@ -314,9 +425,10 @@ export default function Home() {
     try {
       const conv = await createConversation("New chat", projectId);
       setSelectedConversationId(conv.id);
+      setSelectedProjectId(conv.project_id ?? projectId ?? null);
       setMessages([]);
       setViewMode("chat");
-      if (!global) setSelectedProjectId(projectId);
+      setSidebarOpen(false);
     } catch {
       // noop
     }
@@ -364,12 +476,21 @@ export default function Home() {
     await supabase.from("messages").delete().eq("conversation_id", id);
     await supabase.from("conversations").delete().eq("id", id);
 
-    setConversations((prev) => prev.filter((c) => c.id !== id));
-
-    if (selectedConversationId === id) {
-      setSelectedConversationId(null);
-      setMessages([]);
-    }
+    setConversations((prev) => {
+      const filtered = prev.filter((c) => c.id !== id);
+      if (selectedConversationId === id) {
+        const fallback = getNewestConversation(filtered);
+        if (fallback) {
+          setSelectedConversationId(fallback.id);
+          setSelectedProjectId(fallback.project_id);
+          setViewMode("chat");
+        } else {
+          setSelectedConversationId(null);
+          setMessages([]);
+        }
+      }
+      return filtered;
+    });
   }
 
   async function moveConversation(id: string, newProjectId: string | null) {
@@ -383,119 +504,170 @@ export default function Home() {
         c.id === id ? { ...c, project_id: newProjectId } : c
       )
     );
+
+    if (selectedConversationId === id) {
+      setSelectedProjectId(newProjectId);
+    }
   }
+
+  // ------------------------------------------------------------
+  // SIDEBAR CONTENT (shared between desktop + mobile)
+  // ------------------------------------------------------------
+  const SidebarSections = () => (
+    <>
+      <div className="px-3 py-3">
+        <button
+          onClick={() => handleNewChat(true)}
+          className="flex w-full items-center gap-2 rounded-md bg-[#202123] px-3 py-2 text-sm text-zinc-100 hover:bg-[#26272b]"
+        >
+          <span className="text-lg leading-none">＋</span>
+          <span>New chat</span>
+        </button>
+      </div>
+
+      {/* Projects */}
+      <div className="mt-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase text-zinc-500">
+        <span>Projects</span>
+        <button
+          onClick={() => setShowProjectModal(true)}
+          className="text-xs text-zinc-400 hover:text-zinc-200"
+        >
+          + New
+        </button>
+      </div>
+
+      <div className="mt-1 flex flex-col gap-1 px-2">
+        {sortedProjects.length === 0 && (
+          <div className="px-1 py-2 text-[11px] text-zinc-500">No projects yet.</div>
+        )}
+
+        {sortedProjects.map((p) => (
+          <button
+            key={p.id}
+            className={`w-full rounded-md px-3 py-2 text-left text-sm ${
+              selectedProjectId === p.id && viewMode === "project"
+                ? "bg-[#202123] text-zinc-100"
+                : "text-zinc-300 hover:bg-[#202123]"
+            }`}
+            onClick={() => handleProjectSelect(p.id)}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+
+      {/* All chats */}
+      <div className="mt-4 px-3 text-[11px] font-semibold uppercase text-zinc-500">
+        All chats
+      </div>
+
+      <div className="mt-1 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
+        {sortedConversations.length === 0 && (
+          <div className="px-1 py-2 text-[11px] text-zinc-500">No chats yet.</div>
+        )}
+
+        {sortedConversations.map((c) => (
+          <button
+            key={c.id}
+            className={`w-full rounded-md px-3 py-2 text-left text-sm ${
+              selectedConversationId === c.id && viewMode === "chat"
+                ? "bg-[#202123] text-zinc-100"
+                : "text-zinc-300 hover:bg-[#202123]"
+            }`}
+            onClick={() => handleConversationSelect(c.id)}
+          >
+            <div className="truncate">
+              {c.title || "Untitled chat"}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="border-t border-[#202123] px-3 py-3 text-xs text-zinc-500">
+        LLM Client · dev build
+      </div>
+    </>
+  );
 
   // ------------------------------------------------------------
   // RENDER
   // ------------------------------------------------------------
   return (
     <div className="flex h-screen bg-[#212121] text-zinc-100">
-      {/* Sidebar */}
-      <aside className="hidden md:flex w-64 flex-col border-r border-[#202123] bg-[#181818]">
-        <div className="px-3 py-3">
-          <button
-            onClick={() => handleNewChat(true)}
-            className="flex items-center gap-2 w-full rounded-md bg-[#202123] hover:bg-[#26272b] px-3 py-2 text-sm text-zinc-100"
-          >
-            <span className="text-lg leading-none">＋</span>
-            <span>New chat</span>
-          </button>
-        </div>
-
-        {/* Projects */}
-        <div className="px-3 mt-1 flex items-center justify-between text-[11px] font-semibold text-zinc-500 uppercase">
-          <span>Projects</span>
-          <button
-            onClick={() => setShowProjectModal(true)}
-            className="text-xs text-zinc-400 hover:text-zinc-200"
-          >
-            + New
-          </button>
-        </div>
-
-        <div className="mt-1 flex flex-col gap-1 px-2">
-          {sortedProjects.length === 0 && (
-            <div className="text-[11px] text-zinc-500 px-1 py-2">
-              No projects yet.
-            </div>
-          )}
-
-          {sortedProjects.map((p) => (
-            <button
-              key={p.id}
-              className={`w-full text-left rounded-md px-3 py-2 text-sm ${
-                selectedProjectId === p.id && viewMode === "project"
-                  ? "bg-[#202123] text-zinc-100"
-                  : "text-zinc-300 hover:bg-[#202123]"
-              }`}
-              onClick={() => {
-                setSelectedProjectId(p.id);
-                setViewMode("project");
-              }}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-
-        {/* All chats */}
-        <div className="px-3 mt-4 text-[11px] font-semibold text-zinc-500 uppercase">
-          All chats
-        </div>
-
-        <div className="mt-1 flex-1 overflow-y-auto px-2 pb-4 space-y-1">
-          {sortedConversations.length === 0 && (
-            <div className="text-[11px] text-zinc-500 px-1 py-2">
-              No chats yet.
-            </div>
-          )}
-
-          {sortedConversations.map((c) => (
-            <button
-              key={c.id}
-              className={`w-full text-left rounded-md px-3 py-2 text-sm ${
-                selectedConversationId === c.id && viewMode === "chat"
-                  ? "bg-[#202123] text-zinc-100"
-                  : "text-zinc-300 hover:bg-[#202123]"
-              }`}
-              onClick={() => {
-                setSelectedConversationId(c.id);
-                setViewMode("chat");
-              }}
-            >
-              {c.title || "Untitled chat"}
-            </button>
-          ))}
-        </div>
-
-        <div className="px-3 py-3 border-t border-[#202123] text-xs text-zinc-500">
-          LLM Client · dev build
-        </div>
+      {/* Desktop Sidebar */}
+      <aside className="hidden w-64 flex-col border-r border-[#202123] bg-[#181818] md:flex">
+        <SidebarSections />
       </aside>
 
+      {/* Mobile sidebar */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-40 flex md:hidden">
+          <div className="flex w-64 flex-col border-r border-[#202123] bg-[#181818]">
+            <div className="flex items-center justify-between border-b border-[#202123] px-3 py-3">
+              <span className="text-sm font-semibold">Menu</span>
+              <button
+                onClick={() => setSidebarOpen(false)}
+                className="text-sm text-zinc-400 hover:text-zinc-200"
+              >
+                Close
+              </button>
+            </div>
+            <SidebarSections />
+          </div>
+          <button
+            className="flex-1 bg-black/40"
+            aria-label="Close sidebar"
+            onClick={() => setSidebarOpen(false)}
+          />
+        </div>
+      )}
+
       {/* Main Content */}
-      <main className="flex-1 flex flex-col bg-[#212121]">
+      <main className="flex flex-1 flex-col bg-[#212121]">
         {/* Header */}
-        <header className="flex items-center justify-between px-4 py-3 border-b border-[#202123]">
+        <header className="flex items-center justify-between border-b border-[#202123] px-4 py-3">
           <div className="flex items-center gap-2">
+            <button
+              className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
+              onClick={() => setSidebarOpen(true)}
+            >
+              ☰
+            </button>
             <span className="text-sm font-semibold">LLM Client</span>
 
             {viewMode === "chat" && currentConversation && (
-              <span className="hidden sm:inline text-xs text-zinc-500">
+              <span className="hidden text-xs text-zinc-500 sm:inline">
                 {currentConversation.title || "Untitled chat"}
               </span>
             )}
 
             {inProjectView && currentProject && (
-              <span className="hidden sm:inline text-xs text-zinc-500">
+              <span className="hidden text-xs text-zinc-500 sm:inline">
                 Project · {currentProject.name}
               </span>
             )}
           </div>
 
-          {/* Rename/Delete in header */}
+          {/* Rename/Delete/Move in header */}
           {viewMode === "chat" && currentConversation && (
-            <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-400">
+            <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+              <select
+                value={currentConversation.project_id || ""}
+                onChange={(e) =>
+                  moveConversation(
+                    currentConversation.id,
+                    e.target.value === "" ? null : e.target.value
+                  )
+                }
+                className="rounded-md border border-[#3f3f46] bg-transparent px-2 py-1 text-[11px] text-zinc-300"
+              >
+                <option value="">No project</option>
+                {sortedProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
               <button
                 onClick={() => renameConversation(currentConversation.id)}
                 className="hover:text-zinc-200"
@@ -516,14 +688,14 @@ export default function Home() {
         {/* PROJECT VIEW */}
         {inProjectView && currentProject ? (
           <div className="flex-1 overflow-y-auto px-6 py-6">
-            <div className="max-w-3xl mx-auto">
-              <h1 className="text-lg font-semibold mb-4">
+            <div className="mx-auto max-w-3xl">
+              <h1 className="mb-4 text-lg font-semibold">
                 {currentProject.name}
               </h1>
 
               <button
                 onClick={() => handleNewChat(false)}
-                className="w-full rounded-2xl bg-[#181818] px-4 py-3 text-sm text-zinc-300 hover:bg-[#202123] mb-6"
+                className="mb-6 w-full rounded-2xl bg-[#181818] px-4 py-3 text-sm text-zinc-300 hover:bg-[#202123]"
               >
                 ＋ New chat in {currentProject.name}
               </button>
@@ -543,8 +715,8 @@ export default function Home() {
                     <button
                       className="flex-1 text-left"
                       onClick={() => {
-                        setSelectedConversationId(c.id);
-                        setViewMode("chat");
+                        handleConversationSelect(c.id);
+                        setSidebarOpen(false);
                       }}
                     >
                       <div className="font-medium text-zinc-100">
@@ -563,7 +735,7 @@ export default function Home() {
                       <span>·</span>
 
                       <select
-                        className="bg-transparent border border-[#3f3f46] rounded-md px-1 py-0.5"
+                        className="rounded-md border border-[#3f3f46] bg-transparent px-1 py-0.5"
                         value={c.project_id || ""}
                         onChange={(e) =>
                           moveConversation(
@@ -601,15 +773,15 @@ export default function Home() {
           <>
             {/* Messages */}
             <div className="flex-1 overflow-y-auto px-4 py-6">
-              <div className="max-w-2xl mx-auto flex flex-col space-y-3">
+              <div className="mx-auto flex max-w-2xl flex-col space-y-4">
                 {isLoadingMessages && (
-                  <div className="text-xs text-zinc-500 text-center mb-2">
+                  <div className="mb-2 text-center text-xs text-zinc-500">
                     Loading messages...
                   </div>
                 )}
 
                 {!isLoadingMessages && messages.length === 0 && (
-                  <div className="text-sm text-zinc-400 text-center mt-10">
+                  <div className="mt-10 text-center text-sm text-zinc-400">
                     Start chatting — GPT-5.1 chat is streaming live.
                   </div>
                 )}
@@ -622,16 +794,17 @@ export default function Home() {
                     }`}
                   >
                     <div
-                      className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-relaxed ${
+                      className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed md:max-w-[70%] ${
                         m.role === "user"
                           ? "bg-[#1e4fd8] text-white"
                           : "bg-[#202123] text-zinc-100"
                       }`}
                     >
                       {m.role === "assistant" ? (
-                        <div className="markdown-body">
+                        <div className="space-y-3 text-[15px] leading-relaxed">
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm, remarkBreaks]}
+                            components={markdownComponents}
                           >
                             {m.content}
                           </ReactMarkdown>
@@ -650,7 +823,7 @@ export default function Home() {
 
             {/* Input */}
             <div className="border-t border-[#202123] bg-[#212121] px-4 py-3">
-              <div className="max-w-2xl mx-auto flex items-center gap-2">
+              <div className="mx-auto flex max-w-2xl items-center gap-2">
                 <input
                   className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
                   value={input}
@@ -662,7 +835,7 @@ export default function Home() {
                 <button
                   onClick={sendMessage}
                   disabled={isSending || !input.trim()}
-                  className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50 hover:bg-[#2658e4]"
+                  className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#2658e4] disabled:opacity-50"
                 >
                   Send
                 </button>
@@ -674,13 +847,13 @@ export default function Home() {
 
       {/* PROJECT MODAL */}
       {showProjectModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="w-full max-w-md bg-[#181818] border border-[#3f3f46] rounded-xl p-4">
-            <div className="flex items-center justify-between mb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-xl border border-[#3f3f46] bg-[#181818] p-4">
+            <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold">New project</h2>
               <button
                 onClick={() => setShowProjectModal(false)}
-                className="text-zinc-400 hover:text-zinc-200 text-lg"
+                className="text-lg text-zinc-400 hover:text-zinc-200"
               >
                 ×
               </button>
@@ -696,7 +869,7 @@ export default function Home() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setShowProjectModal(false)}
-                className="px-3 py-1.5 rounded-md text-xs text-zinc-300 hover:bg-[#26272b]"
+                className="rounded-md px-3 py-1.5 text-xs text-zinc-300 hover:bg-[#26272b]"
               >
                 Cancel
               </button>
@@ -704,7 +877,7 @@ export default function Home() {
               <button
                 onClick={handleCreateProject}
                 disabled={!newProjectName.trim()}
-                className="px-3 py-1.5 rounded-md bg-[#1e4fd8] text-white text-xs disabled:opacity-50 hover:bg-[#2658e4]"
+                className="rounded-md bg-[#1e4fd8] px-3 py-1.5 text-xs text-white hover:bg-[#2658e4] disabled:opacity-50"
               >
                 Create
               </button>
