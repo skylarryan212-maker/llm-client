@@ -46,6 +46,13 @@ type SearchRecord = {
   summary: string;
 };
 
+type AssistantMetadata = {
+  usedModel?: string;
+  usedModelMode?: ModelMode;
+  usedWebSearch?: boolean;
+  searchRecords?: SearchRecord[];
+};
+
 const MODEL_MAP = {
   nano: "gpt-5-nano-2025-08-07",
   mini: "gpt-5-mini-2025-08-07",
@@ -163,6 +170,19 @@ export async function POST(req: Request) {
 
     const supabase = getSupabaseClient();
 
+    const { data: conversationInfo, error: conversationInfoError } =
+      await supabase
+        .from("conversations")
+        .select("title")
+        .eq("id", conversationId)
+        .single();
+
+    if (conversationInfoError) {
+      console.warn("Unable to load conversation metadata", conversationInfoError);
+    }
+
+    const initialConversationTitle = (conversationInfo?.title || "").trim();
+
     // Load the persisted history so the model gets consistent context.
     const { data: historyRows, error: historyError } = await supabase
       .from("messages")
@@ -214,12 +234,23 @@ export async function POST(req: Request) {
 
     const openai = getOpenAIClient();
 
-    const resolvedModelKey = await selectModelKey({
+    const isFirstAssistantResponse = !historyForModel.some(
+      (msg) => msg.role === "assistant"
+    );
+    const shouldAttemptFastTitle =
+      isFirstAssistantResponse && isDefaultTitle(initialConversationTitle);
+    const shouldRequestRouterTitle = shouldAttemptFastTitle && modelMode === "auto";
+
+    const selectionResult = await selectModelKey({
       openai,
       history: historyForModel,
       userText,
       requestedMode: modelMode,
+      requestTitle: shouldRequestRouterTitle,
     });
+
+    const resolvedModelKey = selectionResult.model;
+    const routerSuggestedTitle = selectionResult.suggestedTitle ?? null;
 
     const historyMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
       historyForModel.map((message) => ({
@@ -254,9 +285,6 @@ export async function POST(req: Request) {
       ...historyForModel,
       { role: "user" as const, content: userText },
     ].find((msg) => msg.role === "user")?.content;
-    const isFirstAssistantResponse = !historyForModel.some(
-      (msg) => msg.role === "assistant"
-    );
 
     const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
 
@@ -271,6 +299,29 @@ export async function POST(req: Request) {
           enqueueJson({ status });
         };
         let fullAssistantMessage = "";
+
+        let fastTitleResolved = false;
+        if (shouldAttemptFastTitle && routerSuggestedTitle) {
+          const applied = await updateConversationTitleIfDefault({
+            supabase,
+            conversationId,
+            candidate: routerSuggestedTitle,
+          });
+          if (applied) {
+            fastTitleResolved = true;
+            enqueueJson({ titleUpdate: { conversationId, title: applied } });
+          }
+        }
+        if (shouldAttemptFastTitle && !fastTitleResolved) {
+          void startNanoTitleTask({
+            openai,
+            supabase,
+            conversationId,
+            userMessage: userText,
+            onTitle: (title) =>
+              enqueueJson({ titleUpdate: { conversationId, title } }),
+          });
+        }
 
         try {
           if (shouldForceSearch) {
@@ -299,7 +350,7 @@ export async function POST(req: Request) {
           });
 
           const usedWebSearch = searchRecords.length > 0;
-          const metadata = {
+          const metadata: AssistantMetadata = {
             usedModel: MODEL_MAP[resolvedModelKey],
             usedModelMode: resolvedModelKey,
             requestedModelMode: modelMode,
@@ -307,7 +358,12 @@ export async function POST(req: Request) {
             searchRecords,
           };
 
-          enqueueJson({ meta: metadata });
+          enqueueJson({
+            meta: {
+              ...metadata,
+              assistantMessageId: assistantRow?.id,
+            },
+          });
 
           for await (const chunk of stream) {
             const token = chunk.choices[0]?.delta?.content;
@@ -320,12 +376,26 @@ export async function POST(req: Request) {
           console.error("Stream error:", err);
           enqueueJson({ error: "upstream_error" });
         } finally {
-          enqueueJson({ done: true });
           if (assistantRow?.id) {
             try {
+              let metadataToPersist: AssistantMetadata = metadata;
+              const { data: existingMetadataRow } = await supabase
+                .from("messages")
+                .select("metadata")
+                .eq("id", assistantRow.id)
+                .single();
+              if (existingMetadataRow?.metadata) {
+                metadataToPersist = {
+                  ...(existingMetadataRow.metadata as AssistantMetadata),
+                  ...metadataToPersist,
+                };
+              }
               await supabase
                 .from("messages")
-                .update({ content: fullAssistantMessage })
+                .update({
+                  content: fullAssistantMessage,
+                  metadata: metadataToPersist,
+                })
                 .eq("id", assistantRow.id);
             } catch (persistErr) {
               console.error("Failed to persist assistant response", persistErr);
@@ -340,9 +410,12 @@ export async function POST(req: Request) {
               userMessage: firstUserMessage ?? userText,
               assistantMessage: fullAssistantMessage,
               modelMode,
+              onTitle: (title) =>
+                enqueueJson({ titleUpdate: { conversationId, title } }),
             });
           }
 
+          enqueueJson({ done: true });
           controller.close();
         }
       },
@@ -368,6 +441,12 @@ type SelectModelArgs = {
   history: HistoryMessage[];
   userText: string;
   requestedMode: ModelMode;
+  requestTitle?: boolean;
+};
+
+type SelectModelResult = {
+  model: keyof typeof MODEL_MAP;
+  suggestedTitle?: string | null;
 };
 
 async function selectModelKey({
@@ -375,36 +454,53 @@ async function selectModelKey({
   history,
   userText,
   requestedMode,
-}: SelectModelArgs): Promise<keyof typeof MODEL_MAP> {
+  requestTitle,
+}: SelectModelArgs): Promise<SelectModelResult> {
   if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
-    return requestedMode;
+    return { model: requestedMode };
   }
 
   try {
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = requestTitle
+      ? [
+          {
+            role: "system",
+            content:
+              "Given the user message and recent context, respond with JSON {\"model\":\"nano|mini|full\",\"title\":\"short descriptive title\"}.",
+          },
+          { role: "user", content: buildRouterPromptWithTitle(history, userText) },
+        ]
+      : [
+          {
+            role: "system",
+            content:
+              "Given the user message and recent context, output ONLY one of: nano, mini, full. Use nano for trivial / short questions, mini for most normal questions, full for complex, multi-step, or high-stakes reasoning.",
+          },
+          { role: "user", content: buildRouterPrompt(history, userText) },
+        ];
+
     const completion = await openai.chat.completions.create({
       model: MODEL_MAP.nano,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Given the user message and recent context, output ONLY one of: nano, mini, full. Use nano for trivial / short questions, mini for most normal questions, full for complex, multi-step, or high-stakes reasoning.",
-        },
-        {
-          role: "user",
-          content: buildRouterPrompt(history, userText),
-        },
-      ],
+      messages,
     });
 
-    const choice = completion.choices[0]?.message?.content?.trim().toLowerCase();
+    const content = completion.choices[0]?.message?.content?.trim() ?? "";
+    if (requestTitle) {
+      const parsed = parseRouterResponse(content);
+      if (parsed) {
+        return parsed;
+      }
+    }
+
+    const choice = content.toLowerCase();
     if (choice === "nano" || choice === "mini" || choice === "full") {
-      return choice;
+      return { model: choice };
     }
   } catch (error) {
     console.warn("Model router failed, defaulting to mini", error);
   }
 
-  return "mini";
+  return { model: "mini" };
 }
 
 function buildRouterPrompt(history: HistoryMessage[], userText: string) {
@@ -416,6 +512,33 @@ function buildRouterPrompt(history: HistoryMessage[], userText: string) {
   const recentBlock = recent.length > 0 ? recent.join("\n") : "(no prior messages)";
 
   return `Recent conversation:\n${recentBlock}\n\nLatest user request:\n${userText}\n\nRespond with one word: nano, mini, or full.`;
+}
+
+function buildRouterPromptWithTitle(history: HistoryMessage[], userText: string) {
+  const recent = history.slice(-6).map((message) => {
+    const speaker = message.role === "user" ? "User" : "Assistant";
+    return `${speaker}: ${message.content}`;
+  });
+  const recentBlock = recent.length > 0 ? recent.join("\n") : "(no prior messages)";
+  return `Recent conversation:\n${recentBlock}\n\nLatest user request:\n${userText}\n\nRespond with valid JSON: {"model":"nano|mini|full","title":"3-8 word title"}.`;
+}
+
+function parseRouterResponse(content: string): SelectModelResult | null {
+  try {
+    const parsed = JSON.parse(content);
+    const modelValue =
+      typeof parsed.model === "string" ? parsed.model.toLowerCase() : "";
+    if (modelValue !== "nano" && modelValue !== "mini" && modelValue !== "full") {
+      return null;
+    }
+    const suggestedTitle =
+      typeof parsed.title === "string"
+        ? normalizeTitleCandidate(parsed.title)
+        : null;
+    return { model: modelValue, suggestedTitle };
+  } catch {
+    return null;
+  }
 }
 
 type ToolLoopArgs = {
@@ -657,6 +780,158 @@ function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
   return `Web search results for "${query}":\n${lines.join("\n")}\nUse the numbered results above to ground your response.`;
 }
 
+async function requestShortTitle({
+  openai,
+  model,
+  userMessage,
+  assistantMessage,
+}: {
+  openai: OpenAI;
+  model: string;
+  userMessage: string;
+  assistantMessage?: string;
+}): Promise<string | null> {
+  const trimmedUser = userMessage.trim();
+  const trimmedAssistant = assistantMessage?.trim();
+  if (!trimmedUser) {
+    return null;
+  }
+
+  const prompt = trimmedAssistant
+    ? `User message:\n${trimmedUser}\n\nAssistant reply:\n${trimmedAssistant}\n\nTitle:`
+    : `User message:\n${trimmedUser}\n\nTitle:`;
+
+  const completion = await openai.chat.completions.create({
+    model,
+    max_completion_tokens: 32,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You write ultra-short, specific chat titles (3-8 words). Avoid punctuation, quotes, emojis, and filler phrases. Respond with the title only.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+  });
+
+  const rawTitle = completion.choices[0]?.message?.content?.trim() ?? "";
+  return normalizeTitleCandidate(rawTitle);
+}
+
+async function startNanoTitleTask({
+  openai,
+  supabase,
+  conversationId,
+  userMessage,
+  onTitle,
+}: {
+  openai: OpenAI;
+  supabase: ReturnType<typeof getSupabaseClient>;
+  conversationId: string;
+  userMessage: string;
+  onTitle?: (title: string) => void;
+}) {
+  try {
+    const candidate = await requestShortTitle({
+      openai,
+      model: MODEL_MAP.nano,
+      userMessage,
+    });
+    if (!candidate) {
+      return;
+    }
+    const applied = await updateConversationTitleIfDefault({
+      supabase,
+      conversationId,
+      candidate,
+    });
+    if (applied) {
+      onTitle?.(applied);
+    }
+  } catch (error) {
+    console.warn("Fast title generation failed", error);
+  }
+}
+
+async function updateConversationTitleIfDefault({
+  supabase,
+  conversationId,
+  candidate,
+}: {
+  supabase: ReturnType<typeof getSupabaseClient>;
+  conversationId: string;
+  candidate: string;
+}): Promise<string | null> {
+  const normalized = normalizeTitleCandidate(candidate);
+  if (!normalized) {
+    return null;
+  }
+
+  const { data: conversation, error } = await supabase
+    .from("conversations")
+    .select("title")
+    .eq("id", conversationId)
+    .single();
+
+  if (error) {
+    console.warn("Unable to check conversation title", error);
+    return null;
+  }
+
+  const existingTitle = (conversation?.title || "").trim();
+  if (!isDefaultTitle(existingTitle)) {
+    return null;
+  }
+
+  const { error: updateError } = await supabase
+    .from("conversations")
+    .update({ title: normalized })
+    .eq("id", conversationId);
+
+  if (updateError) {
+    console.warn("Failed to set conversation title", updateError);
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeTitleCandidate(raw: string) {
+  const clean = raw
+    .replace(/["'“”‘’]+/g, "")
+    .replace(/[.!?,:;]+$/g, "")
+    .trim();
+  if (!clean) {
+    return null;
+  }
+  const words = clean.split(/\s+/).filter(Boolean).slice(0, 8);
+  if (words.length === 0) {
+    return null;
+  }
+  const normalized = words.join(" ");
+  const forbiddenTitles = [
+    "conversation with assistant",
+    "chat with assistant",
+    "new chat",
+    "untitled chat",
+  ];
+  if (forbiddenTitles.includes(normalized.toLowerCase())) {
+    return null;
+  }
+  return normalized;
+}
+
+function isDefaultTitle(value?: string | null) {
+  if (!value) {
+    return true;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "" || normalized === "new chat" || normalized === "untitled chat";
+}
+
 async function ensureChatTitle({
   openai,
   supabase,
@@ -664,6 +939,7 @@ async function ensureChatTitle({
   userMessage,
   assistantMessage,
   modelMode,
+  onTitle,
 }: {
   openai: OpenAI;
   supabase: ReturnType<typeof getSupabaseClient>;
@@ -671,6 +947,7 @@ async function ensureChatTitle({
   userMessage: string;
   assistantMessage: string;
   modelMode: ModelMode;
+  onTitle?: (title: string) => void;
 }) {
   const trimmedAssistant = assistantMessage.trim();
   const trimmedUser = userMessage.trim();
@@ -691,7 +968,7 @@ async function ensureChatTitle({
   }
 
   const existingTitle = (conversation?.title || "").trim();
-  if (existingTitle && existingTitle !== "New chat" && existingTitle !== "Untitled chat") {
+  if (!isDefaultTitle(existingTitle)) {
     return;
   }
 
@@ -705,55 +982,26 @@ async function ensureChatTitle({
           : "nano";
 
   try {
-    const completion = await openai.chat.completions.create({
+    const candidate = await requestShortTitle({
+      openai,
       model: MODEL_MAP[titleModelKey],
-      max_completion_tokens: 32,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You write ultra-short, specific chat titles (3-8 words). Avoid punctuation, quotes, emojis, and filler phrases. Respond with the title only.",
-        },
-        {
-          role: "user",
-          content: `User message:\n${trimmedUser}\n\nAssistant reply:\n${trimmedAssistant}\n\nTitle:`,
-        },
-      ],
+      userMessage: trimmedUser,
+      assistantMessage: trimmedAssistant,
     });
 
-    const rawTitle = completion.choices[0]?.message?.content?.trim() || "";
-    const cleanTitle = rawTitle
-      .replace(/["'“”‘’]+/g, "")
-      .replace(/[.!?,:;]+$/g, "")
-      .trim();
-
-    if (!cleanTitle) {
+    if (!candidate) {
       return;
     }
 
-    const words = cleanTitle.split(/\s+/).filter(Boolean);
-    const truncated = words.slice(0, 8).join(" ");
-    if (!truncated) {
-      return;
+    const applied = await updateConversationTitleIfDefault({
+      supabase,
+      conversationId,
+      candidate,
+    });
+
+    if (applied) {
+      onTitle?.(applied);
     }
-
-    const normalized = truncated.trim();
-    const normalizedLower = normalized.toLowerCase();
-    const forbiddenTitles = [
-      "conversation with assistant",
-      "chat with assistant",
-      "new chat",
-      "untitled chat",
-    ];
-
-    if (forbiddenTitles.includes(normalizedLower)) {
-      return;
-    }
-
-    await supabase
-      .from("conversations")
-      .update({ title: normalized })
-      .eq("id", conversationId);
   } catch (err) {
     console.warn("Title generation failed", err);
   }
