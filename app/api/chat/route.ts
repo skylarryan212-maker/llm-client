@@ -41,9 +41,9 @@ type HistoryMessage = {
 type ModelMode = "auto" | "nano" | "mini" | "full";
 
 const MODEL_MAP = {
-  nano: "gpt-5.1-nano",
-  mini: "gpt-5.1-mini",
-  full: "gpt-5.1",
+  nano: "gpt-5-nano-2025-08-07",
+  mini: "gpt-5-mini-2025-08-07",
+  full: "gpt-5.1-2025-11-13",
 } as const;
 
 const GOOGLE_SEARCH_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
@@ -206,7 +206,10 @@ export async function POST(req: Request) {
 
     const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
     if (shouldForceSearch) {
-      await injectManualSearchResult(messagesWithTools, deriveSearchQuery(userText));
+      await injectManualSearchResult(
+        messagesWithTools,
+        deriveSearchQuery(userText)
+      );
     }
 
     await runToolCallLoop({
@@ -360,11 +363,23 @@ async function runToolCallLoop({
     });
 
     for (const toolCall of toolCalls) {
-      if (toolCall.type !== "function" || toolCall.function?.name !== "google_search") {
+      if (
+        toolCall.type !== "function" ||
+        toolCall.function?.name !== "google_search"
+      ) {
         continue;
       }
 
-      const query = parseSearchQuery(toolCall.function?.arguments);
+      let query = "";
+      try {
+        const args = JSON.parse(toolCall.function?.arguments || "{}");
+        if (typeof args?.query === "string") {
+          query = args.query;
+        }
+      } catch (error) {
+        console.warn("Failed to parse google_search arguments", error);
+      }
+
       const toolResponse = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
         query
@@ -401,17 +416,6 @@ async function injectManualSearchResult(
 
   const toolResponse = await createToolResponseMessage(toolCallId, trimmed);
   messages.push(toolResponse);
-}
-
-function parseSearchQuery(rawArgs: string | undefined) {
-  if (!rawArgs) return "";
-  try {
-    const parsed = JSON.parse(rawArgs) as { query?: unknown };
-    return typeof parsed.query === "string" ? parsed.query : "";
-  } catch (error) {
-    console.warn("Failed to parse google_search arguments", error);
-    return "";
-  }
 }
 
 async function createToolResponseMessage(

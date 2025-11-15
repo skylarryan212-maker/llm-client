@@ -19,7 +19,8 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "rehype-raw": ["./lib/rehypeRaw.ts"]
     }
   },
   "include": [
