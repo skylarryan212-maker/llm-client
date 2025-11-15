@@ -200,7 +200,7 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client. Use the conversation history to respond naturally. Be concise by default unless the user asks for detail. Cite sources when referencing web results.",
+          "You are a helpful assistant inside a custom LLM client. You can access up-to-date Google search results via the google_search tool—treat them as real-time information, integrate them naturally, and cite sources when referencing them. Never claim you lack internet access, cannot browse, or are not up to date when tool results are provided. If search returns nothing useful, explain that briefly and rely on prior knowledge. Use conversation history, stay concise unless more detail is requested, and remain helpful and factual.",
       },
       ...historyMessages,
       { role: "user", content: userText },
@@ -593,18 +593,24 @@ async function ensureChatTitle({
   }
 
   const titleModelKey: keyof typeof MODEL_MAP =
-    modelMode === "auto" ? "nano" : modelMode;
+    modelMode === "nano"
+      ? "nano"
+      : modelMode === "mini"
+        ? "mini"
+        : modelMode === "full"
+          ? "mini"
+          : "nano";
 
   try {
     const completion = await openai.chat.completions.create({
       model: MODEL_MAP[titleModelKey],
       temperature: 0.2,
-      max_tokens: 32,
+      max_completion_tokens: 32,
       messages: [
         {
           role: "system",
           content:
-            "You write ultra-short, catchy chat titles (max 6 words). Do not add punctuation or quotes.",
+            "You write ultra-short, specific chat titles (3-8 words). Avoid punctuation, quotes, emojis, and filler phrases. Respond with the title only.",
         },
         {
           role: "user",
@@ -615,17 +621,36 @@ async function ensureChatTitle({
 
     const rawTitle = completion.choices[0]?.message?.content?.trim() || "";
     const cleanTitle = rawTitle
-      .replace(/^[-\s"']+/, "")
-      .replace(/[-\s"']+$/, "")
-      .slice(0, 60);
+      .replace(/["'“”‘’]+/g, "")
+      .replace(/[.!?,:;]+$/g, "")
+      .trim();
 
     if (!cleanTitle) {
       return;
     }
 
+    const words = cleanTitle.split(/\s+/).filter(Boolean);
+    const truncated = words.slice(0, 8).join(" ");
+    if (!truncated) {
+      return;
+    }
+
+    const normalized = truncated.trim();
+    const normalizedLower = normalized.toLowerCase();
+    const forbiddenTitles = [
+      "conversation with assistant",
+      "chat with assistant",
+      "new chat",
+      "untitled chat",
+    ];
+
+    if (forbiddenTitles.includes(normalizedLower)) {
+      return;
+    }
+
     await supabase
       .from("conversations")
-      .update({ title: cleanTitle })
+      .update({ title: normalized })
       .eq("id", conversationId);
   } catch (err) {
     console.warn("Title generation failed", err);
