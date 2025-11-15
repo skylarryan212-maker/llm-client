@@ -37,6 +37,11 @@ type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
 };
+type PersistedHistoryRow = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
 
@@ -178,6 +183,16 @@ export async function POST(req: Request) {
       ? (requestedModeRaw as ModelMode)
       : "auto";
     const forceWebSearch = Boolean(body.forceWebSearch);
+    const retryAssistantMessageId =
+      typeof body.retryAssistantMessageId === "string" &&
+      body.retryAssistantMessageId.trim().length > 0
+        ? body.retryAssistantMessageId.trim()
+        : null;
+    let retryUserMessageId =
+      typeof body.retryUserMessageId === "string" &&
+      body.retryUserMessageId.trim().length > 0
+        ? body.retryUserMessageId.trim()
+        : null;
 
     if (!userText) {
       return NextResponse.json(
@@ -198,7 +213,7 @@ export async function POST(req: Request) {
     // Load the persisted history so the model gets consistent context.
     const { data: historyRows, error: historyError } = await supabase
       .from("messages")
-      .select("role, content")
+      .select("id, role, content")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true })
       .limit(40);
@@ -211,11 +226,78 @@ export async function POST(req: Request) {
       );
     }
 
-    const historyForModel = (historyRows || []).filter(
-      (m): m is HistoryMessage =>
-        !!m &&
-        typeof m.content === "string" &&
-        (m.role === "user" || m.role === "assistant")
+    const validHistoryRows: PersistedHistoryRow[] = (historyRows || [])
+      .filter(
+        (m): m is {
+          id: string;
+          role: "user" | "assistant";
+          content: string;
+        } =>
+          !!m &&
+          typeof m.id === "string" &&
+          typeof m.content === "string" &&
+          (m.role === "user" || m.role === "assistant")
+      )
+      .map((m) => ({ id: m.id, role: m.role, content: m.content }));
+
+    const isRetryRequest = Boolean(retryAssistantMessageId);
+
+    if (isRetryRequest && !retryAssistantMessageId) {
+      return NextResponse.json(
+        { error: "Missing retry message id" },
+        { status: 400 }
+      );
+    }
+
+    let historyRowsForModel = validHistoryRows;
+
+    if (isRetryRequest && retryAssistantMessageId) {
+      const assistantIndex = validHistoryRows.findIndex(
+        (row) => row.id === retryAssistantMessageId
+      );
+
+      if (assistantIndex === -1) {
+        return NextResponse.json(
+          { error: "Assistant message not found" },
+          { status: 404 }
+        );
+      }
+
+      if (!retryUserMessageId) {
+        for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+          if (validHistoryRows[i].role === "user") {
+            retryUserMessageId = validHistoryRows[i].id;
+            break;
+          }
+        }
+      }
+
+      if (!retryUserMessageId) {
+        return NextResponse.json(
+          { error: "Unable to identify user message for retry" },
+          { status: 400 }
+        );
+      }
+
+      const userIndex = validHistoryRows.findIndex(
+        (row) => row.id === retryUserMessageId
+      );
+
+      if (userIndex === -1) {
+        return NextResponse.json(
+          { error: "User message not found for retry" },
+          { status: 404 }
+        );
+      }
+
+      historyRowsForModel = validHistoryRows.slice(0, userIndex + 1);
+    }
+
+    const historyForModel: HistoryMessage[] = historyRowsForModel.map(
+      (message) => ({
+        role: message.role,
+        content: message.content,
+      })
     );
 
     const { data: conversationRow } = await supabase
@@ -231,30 +313,54 @@ export async function POST(req: Request) {
     const needsTitle =
       !hasAssistantHistory && isPlaceholderTitle(existingConversationTitle);
 
-    const { error: userInsertError } = await supabase
-      .from("messages")
-      .insert({
-        conversation_id: conversationId,
-        role: "user",
-        content: userText,
-      });
+    let userRowId: string | null = null;
+    let assistantRowId: string | null = null;
 
-    if (userInsertError) {
-      console.error("Failed to persist user message", userInsertError);
-    }
+    if (isRetryRequest && retryAssistantMessageId) {
+      assistantRowId = retryAssistantMessageId;
+      userRowId = retryUserMessageId ?? null;
+      try {
+        await supabase
+          .from("messages")
+          .update({ content: "", metadata: null })
+          .eq("id", assistantRowId)
+          .eq("conversation_id", conversationId);
+      } catch (error) {
+        console.warn("Failed to clear assistant message before retry", error);
+      }
+    } else {
+      const { data: userRow, error: userInsertError } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: conversationId,
+          role: "user",
+          content: userText,
+        })
+        .select("id")
+        .single();
 
-    const { data: assistantRow, error: assistantInsertError } = await supabase
-      .from("messages")
-      .insert({
-        conversation_id: conversationId,
-        role: "assistant",
-        content: "",
-      })
-      .select("id")
-      .single();
+      if (userInsertError) {
+        console.error("Failed to persist user message", userInsertError);
+      }
 
-    if (assistantInsertError) {
-      console.error("Failed to seed assistant message", assistantInsertError);
+      userRowId = userRow?.id ?? null;
+
+      const { data: assistantRow, error: assistantInsertError } =
+        await supabase
+          .from("messages")
+          .insert({
+            conversation_id: conversationId,
+            role: "assistant",
+            content: "",
+          })
+          .select("id")
+          .single();
+
+      if (assistantInsertError) {
+        console.error("Failed to seed assistant message", assistantInsertError);
+      }
+
+      assistantRowId = assistantRow?.id ?? null;
     }
 
     const openai = getOpenAIClient();
@@ -305,7 +411,7 @@ export async function POST(req: Request) {
           "You are a helpful assistant inside a custom LLM client. You can access up-to-date Google search results via the google_search tool—treat them as real-time information, integrate them naturally, and cite sources when referencing them. Never claim you lack internet access, cannot browse, or are not up to date when tool results are provided. If search returns nothing useful, explain that briefly and rely on prior knowledge. Use conversation history, stay concise unless more detail is requested, and remain helpful and factual.",
       },
       ...historyMessages,
-      { role: "user", content: userText },
+      ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
     ];
 
     const messagesWithTools: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -321,10 +427,12 @@ export async function POST(req: Request) {
     };
 
     const encoder = new TextEncoder();
-    const firstUserMessage = [
-      ...historyForModel,
-      { role: "user" as const, content: userText },
-    ].find((msg) => msg.role === "user")?.content;
+    const historyForTitle = isRetryRequest
+      ? historyForModel
+      : [...historyForModel, { role: "user" as const, content: userText }];
+    const firstUserMessage = historyForTitle.find(
+      (msg) => msg.role === "user"
+    )?.content;
     const isFirstAssistantResponse = !historyForModel.some(
       (msg) => msg.role === "assistant"
     );
@@ -412,8 +520,9 @@ export async function POST(req: Request) {
 
           enqueueJson({
             meta: {
-              ...metadata,
-              assistantMessageRowId: assistantRow?.id ?? null,
+              ...responseMetadata,
+              assistantMessageRowId: assistantRowId,
+              userMessageRowId: userRowId,
             },
           });
 
@@ -429,7 +538,7 @@ export async function POST(req: Request) {
           enqueueJson({ error: "upstream_error" });
         } finally {
           enqueueJson({ done: true });
-          if (assistantRow?.id) {
+          if (assistantRowId) {
             try {
               const updatePayload: {
                 content: string;
@@ -442,8 +551,8 @@ export async function POST(req: Request) {
 
               await supabase
                 .from("messages")
-                .update({ content: fullAssistantMessage, metadata })
-                .eq("id", assistantRow.id);
+                .update(updatePayload)
+                .eq("id", assistantRowId);
             } catch (persistErr) {
               console.error("Failed to persist assistant response", persistErr);
             }
