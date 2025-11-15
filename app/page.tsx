@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -77,7 +84,7 @@ const markdownComponents: Components = {
     <ol className="my-3 list-decimal space-y-1 pl-6 text-zinc-200">{children}</ol>
   ),
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  code({ inline, children }) {
+  code({ inline, children }: { inline?: boolean; children?: ReactNode }) {
     if (inline) {
       return (
         <code className="rounded-md bg-[#2d2d30] px-1.5 py-0.5 text-[13px] text-zinc-100">
