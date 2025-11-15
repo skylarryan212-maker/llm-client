@@ -18,15 +18,20 @@ import type { SourceChip } from "@/lib/chatTypes";
 
 type SearchSource = {
   title: string;
-  link: string;
-  displayLink: string;
+  url: string;
+  domain: string;
   snippet: string;
+  published?: string | null;
+  sourceType?: string;
+  confidenceScore?: number;
 };
 
 type SearchRecord = {
   query: string;
   summary: string;
-  results: SearchSource[];
+  rankedSources: SearchSource[];
+  rawResults?: SearchSource[];
+  fromCache?: boolean;
 };
 
 type MessageMetadata = {
@@ -1754,37 +1759,41 @@ type SendMessageOptions = {
                                   expandedSourcesId === messageId &&
                                   !isStreamingAssistantMessage && (
                                     <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
-                                  {m.searchRecords?.map((record, idx) => (
-                                    <div key={`${record.query}-${idx}`} className="space-y-2">
-                                      <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                                        {record.query}
+                                  {m.searchRecords?.map((record, idx) => {
+                                    const ranked = record.rankedSources ?? [];
+                                    return (
+                                      <div key={`${record.query}-${idx}`} className="space-y-2">
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+                                          {record.query}
+                                        </div>
+                                        {ranked.length === 0 ? (
+                                          <p className="text-[12px] text-zinc-400">
+                                            {record.summary}
+                                          </p>
+                                        ) : (
+                                          <div className="space-y-2">
+                                            {ranked.map((result, sourceIdx) => (
+                                              <div
+                                                key={`${result.url}-${sourceIdx}`}
+                                                className="rounded-xl bg-[#1b1b20] p-2"
+                                              >
+                                                <div className="text-[13px] font-semibold text-zinc-100">
+                                                  {result.title}
+                                                </div>
+                                                <div className="text-[11px] text-zinc-500">
+                                                  {result.domain}
+                                                  {result.published && ` • ${result.published}`}
+                                                </div>
+                                                <p className="mt-1 text-[12px] text-zinc-300">
+                                                  {result.snippet}
+                                                </p>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
                                       </div>
-                                      {record.results.length === 0 ? (
-                                        <p className="text-[12px] text-zinc-400">
-                                          {record.summary}
-                                        </p>
-                                      ) : (
-                                        <div className="space-y-2">
-                                          {record.results.map((result, sourceIdx) => (
-                                            <div
-                                              key={`${result.link}-${sourceIdx}`}
-                                              className="rounded-xl bg-[#1b1b20] p-2"
-                                            >
-                                              <div className="text-[13px] font-semibold text-zinc-100">
-                                                {result.title}
-                                              </div>
-                                              <div className="text-[11px] text-zinc-500">
-                                                {result.displayLink}
-                                              </div>
-                                              <p className="mt-1 text-[12px] text-zinc-300">
-                                                {result.snippet}
-                                              </p>
-                                            </div>
-                                          ))}
-                                    </div>
-                                  )}
-                          </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               )}
                           </div>

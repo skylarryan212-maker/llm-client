@@ -16,7 +16,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing query" }, { status: 400 });
     }
 
-    const results = await googleSearch(query);
+    const { results } = await googleSearch(query);
 
     return NextResponse.json({ results }, { status: 200 });
   } catch (error) {
