@@ -218,6 +218,19 @@ export async function POST(req: Request) {
         (m.role === "user" || m.role === "assistant")
     );
 
+    const { data: conversationRow } = await supabase
+      .from("conversations")
+      .select("title")
+      .eq("id", conversationId)
+      .single();
+
+    const existingConversationTitle = (conversationRow?.title || "").trim();
+    const hasAssistantHistory = historyForModel.some(
+      (msg) => msg.role === "assistant"
+    );
+    const needsTitle =
+      !hasAssistantHistory && isPlaceholderTitle(existingConversationTitle);
+
     const { error: userInsertError } = await supabase
       .from("messages")
       .insert({
@@ -246,12 +259,38 @@ export async function POST(req: Request) {
 
     const openai = getOpenAIClient();
 
-    const resolvedModelKey = await selectModelKey({
+    const { model: resolvedModelKey, titleSuggestion } = await selectModelKey({
       openai,
       history: historyForModel,
       userText,
       requestedMode: modelMode,
+      requestTitle: needsTitle && modelMode === "auto",
     });
+
+    let routerTitlePromise: Promise<string | null> | null = null;
+    if (needsTitle && titleSuggestion) {
+      routerTitlePromise = applyTitleSuggestion({
+        supabase,
+        conversationId,
+        suggestedTitle: titleSuggestion,
+      });
+    }
+
+    let manualTitlePromise: Promise<string | null> | null = null;
+    if (needsTitle && !titleSuggestion && modelMode !== "auto") {
+      manualTitlePromise = requestNanoTitle({
+        openai,
+        userMessage: userText,
+      }).then((maybeTitle) =>
+        maybeTitle
+          ? applyTitleSuggestion({
+              supabase,
+              conversationId,
+              suggestedTitle: maybeTitle,
+            })
+          : null
+      );
+    }
 
     const historyMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
       historyForModel.map((message) => ({
@@ -313,6 +352,17 @@ export async function POST(req: Request) {
         const sendStatusUpdate = (status: SearchStatusEvent) => {
           enqueueJson({ status });
         };
+        const announceTitle = (promise: Promise<string | null> | null) => {
+          promise
+            ?.then((title) => {
+              if (title) {
+                enqueueJson({ title });
+              }
+            })
+            .catch((err) =>
+              console.warn("Unable to announce title update", err)
+            );
+        };
         let fullAssistantMessage = "";
         let responseMetadata: {
           usedModel: string;
@@ -321,6 +371,9 @@ export async function POST(req: Request) {
           usedWebSearch: boolean;
           searchRecords: SearchRecord[];
         } | null = null;
+
+        announceTitle(routerTitlePromise);
+        announceTitle(manualTitlePromise);
 
         try {
           if (shouldForceSearch) {
@@ -359,7 +412,7 @@ export async function POST(req: Request) {
 
           enqueueJson({
             meta: {
-              ...responseMetadata,
+              ...metadata,
               assistantMessageRowId: assistantRow?.id ?? null,
             },
           });
@@ -389,7 +442,7 @@ export async function POST(req: Request) {
 
               await supabase
                 .from("messages")
-                .update(updatePayload)
+                .update({ content: fullAssistantMessage, metadata })
                 .eq("id", assistantRow.id);
             } catch (persistErr) {
               console.error("Failed to persist assistant response", persistErr);
@@ -431,6 +484,12 @@ type SelectModelArgs = {
   history: HistoryMessage[];
   userText: string;
   requestedMode: ModelMode;
+  requestTitle?: boolean;
+};
+
+type SelectModelResult = {
+  model: keyof typeof MODEL_MAP;
+  titleSuggestion?: string | null;
 };
 
 async function selectModelKey({
@@ -438,9 +497,10 @@ async function selectModelKey({
   history,
   userText,
   requestedMode,
-}: SelectModelArgs): Promise<keyof typeof MODEL_MAP> {
+  requestTitle = false,
+}: SelectModelArgs): Promise<SelectModelResult> {
   if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
-    return requestedMode;
+    return { model: requestedMode };
   }
 
   try {
@@ -450,27 +510,35 @@ async function selectModelKey({
         {
           role: "system",
           content:
-            "Given the user message and recent context, output ONLY one of: nano, mini, full. Use nano for trivial / short questions, mini for most normal questions, full for complex, multi-step, or high-stakes reasoning.",
+            'Given the user message and recent context, respond with minified JSON {\"mode\":\"nano|mini|full\",\"title\":\"...\"}. "mode" selects the response model: nano for trivial or short questions, mini for most normal questions, full for complex or high-stakes reasoning. If a title is not needed, set "title" to an empty string. When a title is requested, keep it to 3-8 words with no punctuation, emojis, or filler.',
         },
         {
           role: "user",
-          content: buildRouterPrompt(history, userText),
+          content: buildRouterPrompt(history, userText, requestTitle),
         },
       ],
     });
 
-    const choice = completion.choices[0]?.message?.content?.trim().toLowerCase();
-    if (choice === "nano" || choice === "mini" || choice === "full") {
-      return choice;
+    const content = completion.choices[0]?.message?.content?.trim() ?? "";
+    const parsed = parseRouterResponse(content);
+    if (parsed?.mode) {
+      return {
+        model: parsed.mode,
+        titleSuggestion: requestTitle ? parsed.title ?? "" : undefined,
+      };
     }
   } catch (error) {
     console.warn("Model router failed, defaulting to mini", error);
   }
 
-  return "mini";
+  return { model: "mini", titleSuggestion: null };
 }
 
-function buildRouterPrompt(history: HistoryMessage[], userText: string) {
+function buildRouterPrompt(
+  history: HistoryMessage[],
+  userText: string,
+  requestTitle: boolean
+) {
   const recent = history.slice(-6).map((message) => {
     const speaker = message.role === "user" ? "User" : "Assistant";
     return `${speaker}: ${message.content}`;
@@ -478,7 +546,36 @@ function buildRouterPrompt(history: HistoryMessage[], userText: string) {
 
   const recentBlock = recent.length > 0 ? recent.join("\n") : "(no prior messages)";
 
-  return `Recent conversation:\n${recentBlock}\n\nLatest user request:\n${userText}\n\nRespond with one word: nano, mini, or full.`;
+  const titleDirective = requestTitle
+    ? "Provide a concise chat title in the `title` field based solely on the latest user request."
+    : "Set `title` to an empty string.";
+
+  return `Recent conversation:
+${recentBlock}
+
+Latest user request:
+${userText}
+
+Respond with JSON containing keys \"mode\" and \"title\". ${titleDirective}`;
+}
+
+function parseRouterResponse(content: string) {
+  try {
+    const parsed = JSON.parse(content);
+    const rawMode = typeof parsed.mode === "string" ? parsed.mode.toLowerCase() : "";
+    const title = typeof parsed.title === "string" ? parsed.title : "";
+    if (rawMode === "nano" || rawMode === "mini" || rawMode === "full") {
+      return { mode: rawMode as keyof typeof MODEL_MAP, title };
+    }
+  } catch {
+    // ignore
+  }
+
+  const normalized = content.trim().toLowerCase();
+  if (normalized === "nano" || normalized === "mini" || normalized === "full") {
+    return { mode: normalized as keyof typeof MODEL_MAP, title: "" };
+  }
+  return null;
 }
 
 type ToolLoopArgs = {
@@ -799,6 +896,80 @@ async function ensureChatTitle({
       .eq("id", conversationId);
   } catch (err) {
     console.warn("Title generation failed", err);
+  }
+}
+
+async function requestNanoTitle({
+  openai,
+  userMessage,
+}: {
+  openai: OpenAI;
+  userMessage: string;
+}): Promise<string | null> {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: MODEL_MAP.nano,
+      max_completion_tokens: 24,
+      temperature: 1,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You create short chat titles (3-8 words) from a single user prompt. Avoid punctuation, emojis, and filler words. Respond with the title only.",
+        },
+        {
+          role: "user",
+          content: `User message:\n${userMessage}\n\nTitle:`,
+        },
+      ],
+    });
+
+    return completion.choices[0]?.message?.content?.trim() || null;
+  } catch (error) {
+    console.warn("Nano title request failed", error);
+    return null;
+  }
+}
+
+async function applyTitleSuggestion({
+  supabase,
+  conversationId,
+  suggestedTitle,
+}: {
+  supabase: ReturnType<typeof getSupabaseClient>;
+  conversationId: string;
+  suggestedTitle?: string | null;
+}): Promise<string | null> {
+  const normalized = normalizeGeneratedTitle(suggestedTitle);
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("title")
+      .eq("id", conversationId)
+      .single();
+
+    if (error) {
+      console.warn("Unable to load conversation for title update", error);
+      return null;
+    }
+
+    if (!isPlaceholderTitle(data?.title)) {
+      return null;
+    }
+
+    await supabase
+      .from("conversations")
+      .update({ title: normalized })
+      .eq("id", conversationId);
+
+    return normalized;
+  } catch (error) {
+    console.warn("Failed to apply title suggestion", error);
+    return null;
   }
 }
 

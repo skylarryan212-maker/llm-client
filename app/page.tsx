@@ -364,21 +364,6 @@ export default function Home() {
     loadMessages(selectedConversationId);
   }, [selectedConversationId, loadMessages]);
 
-  const persistMessageMetadata = useCallback(
-    async (messageId: string, metadata: MessageMetadata) => {
-      if (!messageId) return;
-      try {
-        await supabase
-          .from("messages")
-          .update({ metadata })
-          .eq("id", messageId);
-      } catch (error) {
-        console.warn("Failed to persist message metadata", error);
-      }
-    },
-    []
-  );
-
   useEffect(() => {
     if (pendingMetadataPersistRef.current.size === 0) return;
     messages.forEach((msg) => {
@@ -526,6 +511,21 @@ export default function Home() {
       setConversations(data as ConversationMeta[]);
     }
   }, []);
+
+  const persistMessageMetadata = useCallback(
+    async (messageId: string, metadata: MessageMetadata) => {
+      if (!messageId) return;
+      try {
+        await supabase
+          .from("messages")
+          .update({ metadata })
+          .eq("id", messageId);
+      } catch (error) {
+        console.warn("Failed to persist message metadata", error);
+      }
+    },
+    []
+  );
 
   // ------------------------------------------------------------
   // CREATE CONVERSATION
@@ -801,6 +801,17 @@ export default function Home() {
                         status.message || "Web search failed. Using prior data.",
                       variant: "error",
                     });
+                  }
+                } else if (typeof payload.title === "string") {
+                  const newTitle = payload.title.trim();
+                  if (newTitle && conversationId) {
+                    setConversations((prev) =>
+                      prev.map((conv) =>
+                        conv.id === conversationId
+                          ? { ...conv, title: newTitle }
+                          : conv
+                      )
+                    );
                   }
                 } else if (payload.done) {
                   markResponseFinished();
