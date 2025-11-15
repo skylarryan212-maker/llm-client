@@ -85,6 +85,7 @@ const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
 };
 
 const MAX_INPUT_HEIGHT = 176;
+const MIN_INPUT_HEIGHT = 32;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
 const LONG_THINK_THRESHOLD_MS = 3000;
@@ -395,7 +396,8 @@ export default function Home() {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const nextHeight = Math.min(el.scrollHeight, MAX_INPUT_HEIGHT);
+    const measuredHeight = Math.max(el.scrollHeight, MIN_INPUT_HEIGHT);
+    const nextHeight = Math.min(measuredHeight, MAX_INPUT_HEIGHT);
     el.style.height = `${nextHeight}px`;
     el.style.overflowY =
       el.scrollHeight > MAX_INPUT_HEIGHT ? "auto" : "hidden";
@@ -644,6 +646,9 @@ type SendMessageOptions = {
           },
         ]);
       } else {
+        if (assistantMessageId) {
+          pendingMetadataPersistRef.current.delete(assistantMessageId);
+        }
         setMessages((prev) =>
           prev.map((msg) => {
             if (msg.id !== assistantMessageId) return msg;
@@ -654,8 +659,9 @@ type SendMessageOptions = {
               usedModelMode: undefined,
               usedWebSearch: undefined,
               searchRecords: [],
+              thoughtDurationSeconds: undefined,
+              thoughtDurationLabel: undefined,
               metadata: {
-                ...(msg.metadata || {}),
                 requestedModelMode: chosenMode,
               },
             };
@@ -1595,12 +1601,10 @@ type SendMessageOptions = {
                               m.thoughtDurationSeconds
                             )
                           : null;
-                    const bubbleAlignmentClass = isAssistant
-                      ? "flex w-full max-w-[95%] flex-col md:max-w-[85%]"
-                      : "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
-                    const bubbleColorClass = isAssistant
-                      ? "bg-[#202123] text-zinc-100"
-                      : "bg-[#1e4fd8] text-white";
+                    const assistantWrapperClass =
+                      "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
+                    const userWrapperClass =
+                      "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
 
                     return (
                       <div
@@ -1609,122 +1613,121 @@ type SendMessageOptions = {
                           isAssistant ? "justify-start" : "justify-end"
                         }`}
                       >
-                        <div
-                          className={`relative ${bubbleAlignmentClass} rounded-3xl px-5 py-4 text-left text-[15px] leading-relaxed ${bubbleColorClass}`}
-                        >
-                          {isAssistant ? (
-                            <>
-                              {thoughtLabel && (
-                                <div className="mb-2">
-                                  <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300">
-                                    <span
-                                      className="h-2 w-2 rounded-full bg-zinc-500"
-                                      aria-hidden
-                                    />
-                                    <span>{thoughtLabel}</span>
-                                  </div>
-                                </div>
-                              )}
-                              <div className="space-y-3 text-[15px] leading-relaxed">
-                                <div className="prose prose-invert max-w-none text-sm">
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm, remarkBreaks]}
-                                    rehypePlugins={[rehypeRaw]}
-                                    components={markdownComponents}
-                                  >
-                                    {m.content}
-                                  </ReactMarkdown>
+                        {isAssistant ? (
+                          <div
+                            className={`${assistantWrapperClass} px-1 py-1 text-left text-[15px] leading-relaxed text-zinc-100 md:px-2`}
+                          >
+                            {thoughtLabel && (
+                              <div className="mb-2">
+                                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300">
+                                  <span
+                                    className="h-2 w-2 rounded-full bg-zinc-500"
+                                    aria-hidden
+                                  />
+                                  <span>{thoughtLabel}</span>
                                 </div>
                               </div>
+                            )}
+                            <div className="space-y-3 text-[15px] leading-relaxed">
+                              <div className="prose prose-invert max-w-none text-sm">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm, remarkBreaks]}
+                                  rehypePlugins={[rehypeRaw]}
+                                  components={markdownComponents}
+                                >
+                                  {m.content}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
 
-                              {!isStreamingAssistantMessage && (
-                                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
-                                  <button
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      handleCopyMessage(m, messageId);
-                                    }}
-                                    className="rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
-                                  >
-                                    {copiedMessageId === messageId ? "Copied" : "Copy"}
-                                  </button>
+                            {!isStreamingAssistantMessage && (
+                              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                                <button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleCopyMessage(m, messageId);
+                                  }}
+                                  className="rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                >
+                                  {copiedMessageId === messageId ? "Copied" : "Copy"}
+                                </button>
 
-                                  {hasSources && (
-                                    <>
-                                      <span
-                                        className="h-4 w-px bg-[#38383d]"
-                                        aria-hidden
-                                      />
+                                {hasSources && (
+                                  <>
+                                    <span
+                                      className="h-4 w-px bg-[#38383d]"
+                                      aria-hidden
+                                    />
+                                    <button
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setExpandedSourcesId((prev) =>
+                                          prev === messageId ? null : messageId
+                                        );
+                                      }}
+                                      className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                      aria-expanded={expandedSourcesId === messageId}
+                                    >
+                                      {expandedSourcesId === messageId
+                                        ? "Hide sources"
+                                        : "Sources"}
+                                    </button>
+                                  </>
+                                )}
+
+                                {m.usedModel && (
+                                  <>
+                                    <span
+                                      className="h-4 w-px bg-[#38383d]"
+                                      aria-hidden
+                                    />
+                                    <div className="relative">
                                       <button
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          setExpandedSourcesId((prev) =>
+                                          setOpenModelMenuId((prev) =>
                                             prev === messageId ? null : messageId
                                           );
                                         }}
-                                        className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
-                                        aria-expanded={expandedSourcesId === messageId}
+                                        className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
                                       >
-                                        {expandedSourcesId === messageId
-                                          ? "Hide sources"
-                                          : "Sources"}
+                                        {m.usedModel}
                                       </button>
-                                    </>
-                                  )}
 
-                                  {m.usedModel && (
-                                    <>
-                                      <span
-                                        className="h-4 w-px bg-[#38383d]"
-                                        aria-hidden
-                                      />
-                                      <div className="relative">
-                                        <button
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            setOpenModelMenuId((prev) =>
-                                              prev === messageId ? null : messageId
-                                            );
-                                          }}
-                                          className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
-                                        >
-                                          {m.usedModel}
-                                        </button>
+                                      {openModelMenuId === messageId && (
+                                        <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
+                                          {(Object.entries(
+                                            MODEL_NAME_MAP
+                                          ) as [Exclude<ModelMode, "auto">, string][]).map(
+                                            ([mode, name]) => (
+                                              <button
+                                                key={mode}
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                  handleRetryWithModel(mode, m);
+                                                }}
+                                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                                              >
+                                                <span>Retry with {name}</span>
+                                                {m.usedModelMode === mode && (
+                                                  <span className="text-[10px] text-zinc-500">
+                                                    current
+                                                  </span>
+                                                )}
+                                              </button>
+                                            )
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
 
-                                        {openModelMenuId === messageId && (
-                                          <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
-                                            {(Object.entries(
-                                              MODEL_NAME_MAP
-                                            ) as [Exclude<ModelMode, "auto">, string][]).map(
-                                              ([mode, name]) => (
-                                                <button
-                                                  key={mode}
-                                                  onClick={(event) => {
-                                                    event.stopPropagation();
-                                                    handleRetryWithModel(mode, m);
-                                                  }}
-                                                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                                                >
-                                                  <span>Retry with {name}</span>
-                                                  {m.usedModelMode === mode && (
-                                                    <span className="text-[10px] text-zinc-500">
-                                                      current
-                                                    </span>
-                                                  )}
-                                                </button>
-                                              )
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </>
-                                  )}
-                                </div>
-                              )}
-
-                              {hasSources &&
-                                expandedSourcesId === messageId &&
-                                !isStreamingAssistantMessage && (
+                            {hasSources &&
+                              expandedSourcesId === messageId &&
+                              !isStreamingAssistantMessage && (
                                 <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
                                   {m.searchRecords?.map((record, idx) => (
                                     <div key={`${record.query}-${idx}`} className="space-y-2">
@@ -1759,13 +1762,16 @@ type SendMessageOptions = {
                                   ))}
                                 </div>
                               )}
-                            </>
-                          ) : (
+                          </div>
+                        ) : (
+                          <div
+                            className={`relative ${userWrapperClass} rounded-3xl bg-[#1e4fd8] px-5 py-4 text-left text-[15px] leading-relaxed text-white`}
+                          >
                             <div className="whitespace-pre-wrap break-words">
                               {m.content}
                             </div>
-                          )}
-                        </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -1803,7 +1809,7 @@ type SendMessageOptions = {
               {showScrollButton && messages.length > 0 && (
                 <button
                   onClick={handleJumpToBottom}
-                  className="pointer-events-auto absolute bottom-28 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-[#1b1b25]/90 p-3 text-white shadow-xl transition hover:bg-[#242433]"
+                  className="pointer-events-auto absolute bottom-5 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-[#1b1b25]/90 p-3 text-white shadow-xl transition hover:bg-[#242433] sm:bottom-6"
                   aria-label="Jump to latest message"
                 >
                   <svg
@@ -1868,7 +1874,7 @@ type SendMessageOptions = {
 
                 <div className="flex items-end gap-2">
                   <div className="relative w-full">
-                    <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-1.5 pr-16 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
+                    <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-1 pr-14 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
                       <div className="relative">
                         <button
                           type="button"
@@ -1916,7 +1922,7 @@ type SendMessageOptions = {
                       <div className="flex-1 px-1">
                         <textarea
                           ref={textareaRef}
-                          className="w-full resize-none border-none bg-transparent py-1 text-[15px] leading-[1.4] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[24px]"
+                          className="w-full resize-none border-none bg-transparent py-0.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
                           style={{ maxHeight: MAX_INPUT_HEIGHT }}
                           value={input}
                           onChange={(e) => setInput(e.target.value)}
@@ -1955,7 +1961,7 @@ type SendMessageOptions = {
                         isStreaming ? handleStopGeneration : () => sendMessage()
                       }
                       disabled={!isStreaming && !canSendMessage}
-                      className={`absolute right-1.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                      className={`absolute right-2 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
                         isStreaming
                           ? "hover:bg-[#225fd0]"
                           : "hover:bg-[#3c7cff] disabled:opacity-40"
