@@ -408,7 +408,7 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client. You can access up-to-date Google search results via the google_search tool—treat them as real-time information, integrate them naturally, and cite sources when referencing them. Never claim you lack internet access, cannot browse, or are not up to date when tool results are provided. If search returns nothing useful, explain that briefly and rely on prior knowledge. Use conversation history, stay concise unless more detail is requested, and remain helpful and factual.",
+          "You are a helpful assistant inside a custom LLM client. When google_search tool messages are present, treat them as live web research: read them carefully, ground your answer in the findings, cite sources, and do not claim you lack internet access or browsing ability. If tool results are missing or empty, briefly explain that before relying on prior knowledge. Use conversation history, stay concise unless more detail is requested, and remain helpful and factual.",
       },
       ...historyMessages,
       ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
@@ -501,9 +501,10 @@ export async function POST(req: Request) {
             onSearchStatus: sendStatusUpdate,
           });
 
+          const finalMessages = [...messagesWithTools];
           const stream = await openai.chat.completions.create({
             model: MODEL_MAP[resolvedModelKey],
-            messages: messagesWithTools,
+            messages: finalMessages,
             stream: true,
             tools: [GOOGLE_SEARCH_TOOL],
             tool_choice: "none",
