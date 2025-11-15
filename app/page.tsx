@@ -28,14 +28,28 @@ type SearchRecord = {
   results: SearchSource[];
 };
 
+type MessageMetadata = {
+  usedModel?: string;
+  usedModelMode?: ModelMode;
+  requestedModelMode?: ModelMode;
+  usedWebSearch?: boolean;
+  searchRecords?: SearchRecord[];
+  thoughtDurationSeconds?: number;
+  thoughtDurationLabel?: string;
+};
+
 type ChatMessage = {
   id?: string;
+  persistedId?: string;
   role: "user" | "assistant";
   content: string;
   usedModel?: string;
   usedModelMode?: ModelMode;
   usedWebSearch?: boolean;
   searchRecords?: SearchRecord[];
+  metadata?: MessageMetadata;
+  thoughtDurationSeconds?: number;
+  thoughtDurationLabel?: string;
 };
 
 type Project = {
@@ -73,27 +87,14 @@ const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
 const MAX_INPUT_HEIGHT = 176;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
-const LONG_THINK_THRESHOLD_MS = 1800;
+const LONG_THINK_THRESHOLD_MS = 3000;
 
 type ServerStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
   | { type: "search-error"; query: string; message?: string };
 
-function isComplexPrompt(text: string) {
-  const normalized = text.trim();
-  if (normalized.length > 600) return true;
-  const newlineCount = normalized.split(/\n/).length - 1;
-  if (newlineCount >= 6) return true;
-  return normalized.includes("```");
-}
-
-type StatusVariant =
-  | "default"
-  | "extended"
-  | "search"
-  | "error"
-  | "duration";
+type StatusVariant = "default" | "extended" | "search" | "error";
 
 function StatusBubble({
   label,
@@ -107,7 +108,6 @@ function StatusBubble({
     extended: "border-[#4b64ff]/30 bg-[#1a1c2b]/80 text-[#b7c6ff]",
     search: "border-[#4b64ff]/30 bg-[#152033]/80 text-[#9bb8ff]",
     error: "border-red-500/40 bg-[#30161a]/85 text-red-200",
-    duration: "border-white/10 bg-[#15151a]/80 text-zinc-300",
   };
 
   const dotMap: Record<StatusVariant, string> = {
@@ -115,10 +115,9 @@ function StatusBubble({
     extended: "bg-[#8ab4ff]",
     search: "bg-[#8ab4ff]",
     error: "bg-red-400",
-    duration: "bg-zinc-500",
   };
 
-  const pulseClass = variant === "duration" ? "" : "animate-pulse";
+  const pulseClass = "animate-pulse";
 
   return (
     <div
@@ -139,6 +138,10 @@ function createLocalId() {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
+}
+
+function formatThoughtDurationLabel(seconds: number) {
+  return `Thought for ${seconds.toFixed(1)} seconds`;
 }
 
 const markdownComponents: Components = {
@@ -228,7 +231,6 @@ export default function Home() {
   const [thinkingStatus, setThinkingStatus] = useState<
     { phase: "waiting" | "extended" | "responding"; label: string } | null
   >(null);
-  const [durationStatus, setDurationStatus] = useState<string | null>(null);
   const [searchIndicator, setSearchIndicator] = useState<
     { message: string; variant: "running" | "error" } | null
   >(null);
@@ -241,10 +243,10 @@ export default function Home() {
   const responseTimingRef = useRef({
     start: null as number | null,
     firstToken: null as number | null,
-    end: null as number | null,
+    assistantMessageId: null as string | null,
   });
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const durationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
 
   function scrollToBottom(opts: { behavior?: ScrollBehavior } = {}) {
     const el = chatContainerRef.current;
@@ -301,7 +303,7 @@ export default function Home() {
 
       const { data, error } = await supabase
         .from("messages")
-        .select("id, role, content, created_at")
+        .select("id, role, content, created_at, metadata")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
@@ -321,11 +323,30 @@ export default function Home() {
         setMessages([]);
       } else {
         setMessages(
-          (data || []).map((m) => ({
-            id: (m as { id?: string }).id,
-            role: m.role,
-            content: m.content,
-          }))
+          (data || []).map((m) => {
+            const metadata =
+              ((m as { metadata?: MessageMetadata }).metadata || {}) as MessageMetadata;
+            const thoughtSeconds = metadata.thoughtDurationSeconds;
+            const thoughtLabel =
+              metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
+                ? metadata.thoughtDurationLabel
+                : typeof thoughtSeconds === "number"
+                  ? formatThoughtDurationLabel(thoughtSeconds)
+                  : undefined;
+            return {
+              id: (m as { id?: string }).id,
+              persistedId: (m as { id?: string }).id,
+              role: m.role,
+              content: m.content,
+              usedModel: metadata.usedModel,
+              usedModelMode: metadata.usedModelMode,
+              usedWebSearch: metadata.usedWebSearch,
+              searchRecords: metadata.searchRecords || [],
+              metadata,
+              thoughtDurationSeconds: thoughtSeconds,
+              thoughtDurationLabel: thoughtLabel,
+            } as ChatMessage;
+          })
         );
       }
 
@@ -342,6 +363,18 @@ export default function Home() {
 
     loadMessages(selectedConversationId);
   }, [selectedConversationId, loadMessages]);
+
+  useEffect(() => {
+    if (pendingMetadataPersistRef.current.size === 0) return;
+    messages.forEach((msg) => {
+      const messageId = msg.id;
+      if (!messageId) return;
+      const pending = pendingMetadataPersistRef.current.get(messageId);
+      if (!pending || !msg.persistedId) return;
+      pendingMetadataPersistRef.current.delete(messageId);
+      persistMessageMetadata(msg.persistedId, pending);
+    });
+  }, [messages, persistMessageMetadata]);
 
   // ------------------------------------------------------------
   // AUTOSCROLL WHEN MESSAGES CHANGE
@@ -393,10 +426,6 @@ export default function Home() {
       if (thinkingTimerRef.current) {
         clearTimeout(thinkingTimerRef.current);
         thinkingTimerRef.current = null;
-      }
-      if (durationTimerRef.current) {
-        clearTimeout(durationTimerRef.current);
-        durationTimerRef.current = null;
       }
     };
   }, []);
@@ -455,13 +484,6 @@ export default function Home() {
     }
   };
 
-  const clearDurationTimeout = () => {
-    if (durationTimerRef.current) {
-      clearTimeout(durationTimerRef.current);
-      durationTimerRef.current = null;
-    }
-  };
-
   // ------------------------------------------------------------
   // HELPERS
   // ------------------------------------------------------------
@@ -489,6 +511,21 @@ export default function Home() {
       setConversations(data as ConversationMeta[]);
     }
   }, []);
+
+  const persistMessageMetadata = useCallback(
+    async (messageId: string, metadata: MessageMetadata) => {
+      if (!messageId) return;
+      try {
+        await supabase
+          .from("messages")
+          .update({ metadata })
+          .eq("id", messageId);
+      } catch (error) {
+        console.warn("Failed to persist message metadata", error);
+      }
+    },
+    []
+  );
 
   // ------------------------------------------------------------
   // CREATE CONVERSATION
@@ -538,30 +575,19 @@ export default function Home() {
     setMoveMenuConversationId(null);
     setAutoScrollEnabled(true);
     setShowScrollButton(false);
-    clearDurationTimeout();
-    setDurationStatus(null);
     setSearchIndicator(null);
-    const promptIsComplex = isComplexPrompt(text);
     responseTimingRef.current = {
       start: typeof performance !== "undefined" ? performance.now() : Date.now(),
       firstToken: null,
-      end: null,
+      assistantMessageId: null,
     };
     clearThinkingTimeout();
-    setThinkingStatus(
-      promptIsComplex
-        ? { phase: "extended", label: "Thinking for longer…" }
-        : { phase: "waiting", label: "Thinking…" }
-    );
-    if (!promptIsComplex) {
-      thinkingTimerRef.current = setTimeout(() => {
-        setThinkingStatus((prev) =>
-          prev && prev.phase === "waiting"
-            ? { phase: "extended", label: "Thinking for longer…" }
-            : prev
-        );
-      }, LONG_THINK_THRESHOLD_MS);
-    }
+    setThinkingStatus({ phase: "waiting", label: "Thinking…" });
+    thinkingTimerRef.current = setTimeout(() => {
+      if (!responseTimingRef.current.firstToken) {
+        setThinkingStatus({ phase: "extended", label: "Thinking for longer…" });
+      }
+    }, LONG_THINK_THRESHOLD_MS);
 
     try {
       if (!conversationId) {
@@ -576,13 +602,19 @@ export default function Home() {
       const userMessageId = createLocalId();
       const assistantId = createLocalId();
       assistantMessageId = assistantId;
+      responseTimingRef.current.assistantMessageId = assistantId;
       setActiveAssistantMessageId(assistantId);
 
       // user msg + empty assistant bubble for streaming
       setMessages((prev) => [
         ...prev,
         { id: userMessageId, role: "user", content: text },
-        { id: assistantId, role: "assistant", content: "" },
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          metadata: { requestedModelMode: chosenMode },
+        },
       ]);
 
       const shouldForceWebSearch = forceWebSearch;
@@ -613,27 +645,13 @@ export default function Home() {
       const markResponseFinished = () => {
         clearThinkingTimeout();
         setThinkingStatus(null);
-        const startTime = responseTimingRef.current.start;
-        if (startTime) {
-          const endTime =
-            responseTimingRef.current.end ??
-            (typeof performance !== "undefined"
-              ? performance.now()
-              : Date.now());
-          const totalMs = Math.max(0, endTime - startTime);
-          const seconds = totalMs / 1000;
-          const formatted = `Thought for ${seconds.toFixed(1)} seconds`;
-          clearDurationTimeout();
-          setDurationStatus(formatted);
-          durationTimerRef.current = setTimeout(
-            () => setDurationStatus(null),
-            6000
-          );
-        }
+        setSearchIndicator((prev) =>
+          prev?.variant === "running" ? null : prev
+        );
         responseTimingRef.current = {
           start: null,
           firstToken: null,
-          end: null,
+          assistantMessageId: null,
         };
       };
 
@@ -649,44 +667,117 @@ export default function Home() {
               try {
                 const payload = JSON.parse(line);
                 if (payload.meta) {
-                  const meta = payload.meta as {
-                    usedModel?: string;
-                    usedModelMode?: ModelMode;
-                    usedWebSearch?: boolean;
-                    searchRecords?: SearchRecord[];
+                  const meta = payload.meta as MessageMetadata & {
+                    assistantMessageRowId?: string;
                   };
+                  const assistantRowId =
+                    (meta as { assistantMessageRowId?: string })
+                      .assistantMessageRowId;
                   setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessageId
-                        ? {
-                            ...msg,
-                            usedModel: meta.usedModel,
-                            usedModelMode: meta.usedModelMode,
-                            usedWebSearch: meta.usedWebSearch,
-                            searchRecords: meta.searchRecords || [],
-                          }
-                        : msg
-                    )
+                    prev.map((msg) => {
+                      if (msg.id !== assistantMessageId) return msg;
+                      const mergedMetadata: MessageMetadata = {
+                        ...(msg.metadata || {}),
+                        usedModel: meta.usedModel ?? msg.metadata?.usedModel,
+                        usedModelMode:
+                          meta.usedModelMode ?? msg.metadata?.usedModelMode,
+                        requestedModelMode:
+                          meta.requestedModelMode ??
+                          msg.metadata?.requestedModelMode ??
+                          chosenMode,
+                        usedWebSearch:
+                          typeof meta.usedWebSearch === "boolean"
+                            ? meta.usedWebSearch
+                            : msg.metadata?.usedWebSearch,
+                        searchRecords:
+                          meta.searchRecords ??
+                          msg.metadata?.searchRecords ??
+                          [],
+                        thoughtDurationSeconds: msg.thoughtDurationSeconds,
+                        thoughtDurationLabel: msg.thoughtDurationLabel,
+                      };
+                      return {
+                        ...msg,
+                        usedModel: meta.usedModel ?? msg.usedModel,
+                        usedModelMode: meta.usedModelMode ?? msg.usedModelMode,
+                        usedWebSearch:
+                          typeof meta.usedWebSearch === "boolean"
+                            ? meta.usedWebSearch
+                            : msg.usedWebSearch,
+                        searchRecords:
+                          meta.searchRecords ?? msg.searchRecords ?? [],
+                        metadata: mergedMetadata,
+                        persistedId: assistantRowId ?? msg.persistedId,
+                      };
+                    })
                   );
-                  if (meta.usedModelMode === "full") {
-                    setThinkingStatus((prev) =>
-                      prev && prev.phase !== "responding"
-                        ? { phase: "extended", label: "Thinking for longer…" }
-                        : prev
+                  if (assistantMessageId && assistantRowId) {
+                    const pending = pendingMetadataPersistRef.current.get(
+                      assistantMessageId
                     );
+                    if (pending) {
+                      pendingMetadataPersistRef.current.delete(
+                        assistantMessageId
+                      );
+                      persistMessageMetadata(assistantRowId, pending);
+                    }
                   }
                 } else if (typeof payload.token === "string") {
                   const token = payload.token as string;
                   if (!responseTimingRef.current.firstToken) {
-                    responseTimingRef.current.firstToken =
+                    const now =
                       typeof performance !== "undefined"
                         ? performance.now()
                         : Date.now();
+                    responseTimingRef.current.firstToken = now;
                     clearThinkingTimeout();
                     setThinkingStatus({
                       phase: "responding",
                       label: "Responding…",
                     });
+                    setSearchIndicator((prev) =>
+                      prev?.variant === "running" ? null : prev
+                    );
+                    const startTime = responseTimingRef.current.start;
+                    const targetMessageId =
+                      responseTimingRef.current.assistantMessageId;
+                    if (startTime && targetMessageId) {
+                      const seconds = Math.max(0, (now - startTime) / 1000);
+                      const formatted = formatThoughtDurationLabel(seconds);
+                      let persistedIdForTiming: string | undefined;
+                      let updatedMetadata: MessageMetadata | null = null;
+                      setMessages((prev) =>
+                        prev.map((msg) => {
+                          if (msg.id !== targetMessageId) return msg;
+                          persistedIdForTiming = msg.persistedId;
+                          const nextMetadata: MessageMetadata = {
+                            ...(msg.metadata || {}),
+                            thoughtDurationSeconds: seconds,
+                            thoughtDurationLabel: formatted,
+                          };
+                          updatedMetadata = nextMetadata;
+                          return {
+                            ...msg,
+                            metadata: nextMetadata,
+                            thoughtDurationSeconds: seconds,
+                            thoughtDurationLabel: formatted,
+                          };
+                        })
+                      );
+                      if (updatedMetadata) {
+                        if (persistedIdForTiming) {
+                          persistMessageMetadata(
+                            persistedIdForTiming,
+                            updatedMetadata
+                          );
+                        } else {
+                          pendingMetadataPersistRef.current.set(
+                            targetMessageId,
+                            updatedMetadata
+                          );
+                        }
+                      }
+                    }
                   }
                   setMessages((prev) =>
                     prev.map((msg) =>
@@ -703,9 +794,7 @@ export default function Home() {
                       variant: "running",
                     });
                   } else if (status.type === "search-complete") {
-                    setSearchIndicator((prev) =>
-                      prev?.variant === "running" ? null : prev
-                    );
+                    // keep indicator visible until first token arrives
                   } else if (status.type === "search-error") {
                     setSearchIndicator({
                       message:
@@ -713,11 +802,18 @@ export default function Home() {
                       variant: "error",
                     });
                   }
+                } else if (typeof payload.title === "string") {
+                  const newTitle = payload.title.trim();
+                  if (newTitle && conversationId) {
+                    setConversations((prev) =>
+                      prev.map((conv) =>
+                        conv.id === conversationId
+                          ? { ...conv, title: newTitle }
+                          : conv
+                      )
+                    );
+                  }
                 } else if (payload.done) {
-                  responseTimingRef.current.end =
-                    typeof performance !== "undefined"
-                      ? performance.now()
-                      : Date.now();
                   markResponseFinished();
                   finished = true;
                 }
@@ -762,15 +858,16 @@ export default function Home() {
         }
       }
       clearThinkingTimeout();
-      clearDurationTimeout();
       setThinkingStatus(null);
-      setDurationStatus(null);
       setSearchIndicator(null);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
-        end: null,
+        assistantMessageId: null,
       };
+      if (assistantMessageId) {
+        pendingMetadataPersistRef.current.delete(assistantMessageId);
+      }
     } finally {
       abortControllerRef.current = null;
       setIsStreaming(false);
@@ -778,16 +875,16 @@ export default function Home() {
         assistantMessageId && current === assistantMessageId ? null : current
       );
       clearThinkingTimeout();
-      if (responseTimingRef.current.start) {
-        responseTimingRef.current = {
-          start: null,
-          firstToken: null,
-          end: null,
-        };
+      responseTimingRef.current = {
+        start: null,
+        firstToken: null,
+        assistantMessageId: null,
+      };
+      if (assistantMessageId) {
+        pendingMetadataPersistRef.current.delete(assistantMessageId);
       }
     }
   }
-
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -807,19 +904,21 @@ export default function Home() {
   }
 
   function handleStopGeneration() {
+    const activeId = activeAssistantMessageId;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsStreaming(false);
     clearThinkingTimeout();
-    clearDurationTimeout();
     setThinkingStatus(null);
-    setDurationStatus(null);
     setSearchIndicator(null);
     responseTimingRef.current = {
       start: null,
       firstToken: null,
-      end: null,
+      assistantMessageId: null,
     };
+    if (activeId) {
+      pendingMetadataPersistRef.current.delete(activeId);
+    }
     setActiveAssistantMessageId(null);
   }
 
@@ -1413,6 +1512,21 @@ export default function Home() {
                     const isStreamingAssistantMessage =
                       isAssistant &&
                       activeAssistantMessageId === messageId;
+                    const thoughtLabel =
+                      m.thoughtDurationLabel &&
+                      m.thoughtDurationLabel.trim().length > 0
+                        ? m.thoughtDurationLabel
+                        : typeof m.thoughtDurationSeconds === "number"
+                          ? formatThoughtDurationLabel(
+                              m.thoughtDurationSeconds
+                            )
+                          : null;
+                    const bubbleAlignmentClass = isAssistant
+                      ? "flex w-full max-w-[95%] flex-col md:max-w-[85%]"
+                      : "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
+                    const bubbleColorClass = isAssistant
+                      ? "bg-[#202123] text-zinc-100"
+                      : "bg-[#1e4fd8] text-white";
 
                     return (
                       <div
@@ -1422,14 +1536,21 @@ export default function Home() {
                         }`}
                       >
                         <div
-                          className={`relative w-full max-w-[95%] rounded-3xl px-5 py-4 text-[15px] leading-relaxed md:max-w-[85%] ${
-                            isAssistant
-                              ? "bg-[#202123] text-zinc-100"
-                              : "bg-[#1e4fd8] text-white"
-                          }`}
+                          className={`relative ${bubbleAlignmentClass} rounded-3xl px-5 py-4 text-left text-[15px] leading-relaxed ${bubbleColorClass}`}
                         >
                           {isAssistant ? (
                             <>
+                              {thoughtLabel && (
+                                <div className="mb-2">
+                                  <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300">
+                                    <span
+                                      className="h-2 w-2 rounded-full bg-zinc-500"
+                                      aria-hidden
+                                    />
+                                    <span>{thoughtLabel}</span>
+                                  </div>
+                                </div>
+                              )}
                               <div className="space-y-3 text-[15px] leading-relaxed">
                                 <div className="prose prose-invert max-w-none text-sm">
                                   <ReactMarkdown
@@ -1566,14 +1687,16 @@ export default function Home() {
                               )}
                             </>
                           ) : (
-                            m.content
+                            <div className="whitespace-pre-wrap break-words">
+                              {m.content}
+                            </div>
                           )}
                         </div>
                       </div>
                     );
                   })}
 
-                  {(searchIndicator || thinkingStatus || (durationStatus && !isStreaming)) && (
+                  {(searchIndicator || thinkingStatus) && (
                     <div
                       className="mx-auto mt-2 flex flex-col items-center gap-2"
                       style={{ maxWidth: MAX_MESSAGE_WIDTH }}
@@ -1596,12 +1719,6 @@ export default function Home() {
                               ? "extended"
                               : "default"
                           }
-                        />
-                      )}
-                      {durationStatus && !isStreaming && (
-                        <StatusBubble
-                          label={durationStatus}
-                          variant="duration"
                         />
                       )}
                     </div>
@@ -1638,39 +1755,45 @@ export default function Home() {
                 style={{ maxWidth: MAX_MESSAGE_WIDTH }}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-[#35353a] bg-[#1a1b1f] p-1">
-                    {MODEL_SEGMENTS.map((segment) => {
-                      const isActive = modelMode === segment.value;
-                      return (
-                        <button
-                          key={segment.value}
-                          className={`rounded-xl px-3 py-1 text-left text-[11px] font-medium transition ${
-                            isActive
-                              ? "bg-[#1e4fd8] text-white shadow-inner"
-                              : "text-zinc-400 hover:text-zinc-200"
-                          }`}
-                          onClick={() => setModelMode(segment.value)}
-                          aria-pressed={isActive}
-                        >
-                          <div>{segment.label}</div>
-                          <div className="text-[10px] font-normal text-zinc-300/70">
-                            {segment.hint}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {forceWebSearch && (
-                    <div className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]">
-                      <span className="text-base leading-none">🌐</span>
-                      <span>Web search armed</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-[#35353a] bg-[#1a1b1f] p-1">
+                      {MODEL_SEGMENTS.map((segment) => {
+                        const isActive = modelMode === segment.value;
+                        return (
+                          <button
+                            key={segment.value}
+                            className={`rounded-xl px-3 py-1 text-left text-[11px] font-medium transition ${
+                              isActive
+                                ? "bg-[#1e4fd8] text-white shadow-inner"
+                                : "text-zinc-400 hover:text-zinc-200"
+                            }`}
+                            onClick={() => setModelMode(segment.value)}
+                            aria-pressed={isActive}
+                          >
+                            <div>{segment.label}</div>
+                            <div className="text-[10px] font-normal text-zinc-300/70">
+                              {segment.hint}
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
-                  )}
+
+                    {forceWebSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setForceWebSearch(false)}
+                        className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]"
+                      >
+                        <span className="text-base leading-none">🌐</span>
+                        <span>Web search</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                <div className="flex items-end gap-2">
-                  <div className="flex w-full items-end gap-2 rounded-3xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
+                <div className="flex items-center gap-2">
+                  <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
                     <div className="relative">
                       <button
                         type="button"
@@ -1762,6 +1885,7 @@ export default function Home() {
                         ? "hover:bg-[#225fd0]"
                         : "hover:bg-[#3c7cff] disabled:opacity-40"
                     }`}
+                    style={{ borderRadius: "50%" }}
                     aria-label={isStreaming ? "Stop response" : "Send message"}
                   >
                     {isStreaming ? (
