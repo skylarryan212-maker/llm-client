@@ -329,6 +329,17 @@ export async function POST(req: Request) {
       (msg) => msg.role === "assistant"
     );
 
+    if (isFirstAssistantResponse) {
+      void ensureChatTitle({
+        openai,
+        supabase,
+        conversationId,
+        userMessage: firstUserMessage ?? userText,
+        assistantMessage: null,
+        allowUserOnly: true,
+      });
+    }
+
     const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
 
     const readable = new ReadableStream({
@@ -353,6 +364,13 @@ export async function POST(req: Request) {
             );
         };
         let fullAssistantMessage = "";
+        let responseMetadata: {
+          usedModel: string;
+          usedModelMode: ModelMode;
+          requestedModelMode: ModelMode;
+          usedWebSearch: boolean;
+          searchRecords: SearchRecord[];
+        } | null = null;
 
         announceTitle(routerTitlePromise);
         announceTitle(manualTitlePromise);
@@ -384,7 +402,7 @@ export async function POST(req: Request) {
           });
 
           const usedWebSearch = searchRecords.length > 0;
-          const metadata = {
+          responseMetadata = {
             usedModel: MODEL_MAP[resolvedModelKey],
             usedModelMode: resolvedModelKey,
             requestedModelMode: modelMode,
@@ -413,6 +431,15 @@ export async function POST(req: Request) {
           enqueueJson({ done: true });
           if (assistantRow?.id) {
             try {
+              const updatePayload: {
+                content: string;
+                metadata?: typeof responseMetadata;
+              } = { content: fullAssistantMessage };
+
+              if (responseMetadata) {
+                updatePayload.metadata = responseMetadata;
+              }
+
               await supabase
                 .from("messages")
                 .update({ content: fullAssistantMessage, metadata })
@@ -429,7 +456,6 @@ export async function POST(req: Request) {
               conversationId,
               userMessage: firstUserMessage ?? userText,
               assistantMessage: fullAssistantMessage,
-              modelMode,
             });
           }
 
@@ -797,19 +823,23 @@ async function ensureChatTitle({
   conversationId,
   userMessage,
   assistantMessage,
-  modelMode,
+  allowUserOnly = false,
 }: {
   openai: OpenAI;
   supabase: ReturnType<typeof getSupabaseClient>;
   conversationId: string;
   userMessage: string;
-  assistantMessage: string;
-  modelMode: ModelMode;
+  assistantMessage: string | null;
+  allowUserOnly?: boolean;
 }) {
-  const trimmedAssistant = assistantMessage.trim();
+  const trimmedAssistant = (assistantMessage || "").trim();
   const trimmedUser = userMessage.trim();
 
-  if (!trimmedAssistant || !trimmedUser) {
+  if (!trimmedUser) {
+    return;
+  }
+
+  if (!trimmedAssistant && !allowUserOnly) {
     return;
   }
 
@@ -829,14 +859,7 @@ async function ensureChatTitle({
     return;
   }
 
-  const titleModelKey: keyof typeof MODEL_MAP =
-    modelMode === "nano"
-      ? "nano"
-      : modelMode === "mini"
-        ? "mini"
-        : modelMode === "full"
-          ? "mini"
-          : "nano";
+  const titleModelKey: keyof typeof MODEL_MAP = "nano";
 
   try {
     const completion = await openai.chat.completions.create({
@@ -849,10 +872,15 @@ async function ensureChatTitle({
           content:
             "You write ultra-short, specific chat titles (3-8 words). Avoid punctuation, quotes, emojis, and filler phrases. Respond with the title only.",
         },
-        {
-          role: "user",
-          content: `User message:\n${trimmedUser}\n\nAssistant reply:\n${trimmedAssistant}\n\nTitle:`,
-        },
+        trimmedAssistant
+          ? {
+              role: "user" as const,
+              content: `User message:\n${trimmedUser}\n\nAssistant reply:\n${trimmedAssistant}\n\nTitle:`,
+            }
+          : {
+              role: "user" as const,
+              content: `User message:\n${trimmedUser}\n\nTitle:`,
+            },
       ],
     });
 
@@ -944,3 +972,4 @@ async function applyTitleSuggestion({
     return null;
   }
 }
+
