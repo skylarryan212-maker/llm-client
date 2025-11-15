@@ -7,9 +7,15 @@ import {
   GoogleSearchRequestError,
   MissingGoogleConfigError,
   googleSearch,
+  peekCachedSearch,
 } from "@/lib/googleSearch";
 import type { GoogleSearchResult } from "@/lib/googleSearch";
 import type { SourceChip } from "@/lib/chatTypes";
+import {
+  planSearchQuery,
+  normalizeAndRankSources,
+  type RankedSource,
+} from "@/lib/searchPlanner";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -48,8 +54,17 @@ type ModelMode = "auto" | "nano" | "mini" | "full";
 
 type SearchRecord = {
   query: string;
-  results: GoogleSearchResult[];
+  rawResults: GoogleSearchResult[];
+  rankedSources: RankedSource[];
   summary: string;
+  fromCache: boolean;
+};
+
+type SearchBudget = { remaining: number };
+type SearchSequenceTracker = { value: number };
+
+type SearchDebugLogger = {
+  step: (stepNumber: number, message: string, meta?: Record<string, unknown>) => void;
 };
 
 type ResponseMetadata = {
@@ -85,176 +100,10 @@ const GOOGLE_SEARCH_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   },
 };
 
-const SEARCH_KEYWORDS = [
-  "search the web",
-  "google this",
-  "look this up",
-  "search online",
-  "search google",
-  "use google",
-  "browse the web",
-  "check the web",
-  "current",
-  "latest",
-  "today",
-  "right now",
-  "price of",
-  "stock price",
-  "market cap",
-  "share price",
-  "current price",
-  "current stock",
-  "weather",
-  "forecast",
-  "temperature",
-  "current gpu",
-  "current cpu",
-  "newest gpu",
-  "newest graphics card",
-  "latest gpu",
-  "latest graphics card",
-  "latest console",
-  "current amd card",
-  "aapl",
-  "nvda",
-  "tsla",
-  "amd",
-  "msft",
-  "goog",
-];
-
-const SEARCH_REGEXES = [
-  /\bcurrent(?:ly)?\b/i,
-  /\blatest\b/i,
-  /\btoday\b/i,
-  /\bright now\b/i,
-  /\bprice of\b/i,
-  /\bstock price\b/i,
-  /\bmarket cap\b/i,
-  /\bshare price\b/i,
-  /\bnewest (?:gpu|graphics card|cpu|console|phone)\b/i,
-  /\bmost recent (?:gpu|graphics card|cpu|console|phone)\b/i,
-  /\brtx\s?(?:[4-6]\d{2}|50\d{2})\b/i,
-  /\brx\s?\d{4}\b/i,
-];
-
-const STOCK_TICKERS = [
-  "aapl",
-  "msft",
-  "nvda",
-  "amd",
-  "tsla",
-  "goog",
-  "googl",
-  "amzn",
-  "meta",
-  "intc",
-  "avgo",
-  "btc",
-  "eth",
-];
-
 type SearchStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
   | { type: "search-error"; query: string; message?: string };
-
-const RECENT_QUERY_KEYWORDS = [
-  "today",
-  "tonight",
-  "current",
-  "currently",
-  "latest",
-  "right now",
-  "breaking",
-  "news",
-  "this week",
-  "this month",
-  "this year",
-  "price",
-  "price of",
-  "prices",
-  "stock",
-  "stock price",
-  "stocks",
-  "market cap",
-  "earnings",
-  "forecast",
-  "weather",
-  "temperature",
-  "humidity",
-  "version",
-  "update",
-  "release",
-  "launch",
-  "newest",
-  "recent",
-  "gpu",
-  "graphics card",
-  "cpu",
-  "console",
-  "rtx",
-  "rx",
-  "ps5",
-  "ps6",
-  "xbox",
-  "coin",
-  "crypto",
-  "btc",
-  "eth",
-  "aapl",
-  "nvda",
-  "tsla",
-  "amd",
-  "msft",
-  "goog",
-  "meta",
-];
-
-function containsTicker(text: string) {
-  return STOCK_TICKERS.some((ticker) =>
-    new RegExp(`\\b${ticker}\\b`, "i").test(text)
-  );
-}
-
-function matchesSearchRegex(text: string) {
-  return SEARCH_REGEXES.some((regex) => regex.test(text));
-}
-
-function needsRecentResults(query: string) {
-  const normalized = query.toLowerCase();
-  return (
-    RECENT_QUERY_KEYWORDS.some((keyword) => normalized.includes(keyword)) ||
-    matchesSearchRegex(query) ||
-    containsTicker(query)
-  );
-}
-
-function shouldSearchWeb(userText: string) {
-  const normalized = userText.toLowerCase();
-  return (
-    SEARCH_KEYWORDS.some((keyword) => normalized.includes(keyword)) ||
-    matchesSearchRegex(userText) ||
-    containsTicker(userText)
-  );
-}
-
-function deriveSearchQuery(userText: string) {
-  let query = userText
-    .replace(/search( the)? (web|internet|online)/gi, "")
-    .replace(/google (this|it)/gi, "")
-    .replace(/look this up/gi, "")
-    .replace(/use google/gi, "")
-    .replace(/browse the web/gi, "")
-    .replace(/check the web/gi, "")
-    .trim();
-
-  if (!query) {
-    query = userText.trim();
-  }
-
-  return query;
-}
 
 const PLACEHOLDER_TITLES = [
   "",
@@ -525,13 +374,13 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client with genuine live web access via the google_search function tool.\n" +
-          "- Always run google_search before answering any time-sensitive or fast-changing question (weather, stock or crypto prices, hardware launches, pricing, 'current/today/latest' phrasing, etc.).\n" +
-          "- Treat google_search output as the authoritative source of truth. If tool data conflicts with training data, rely on the tool results and mention the discrepancy.\n" +
-          "- Limit yourself to a single targeted search unless the first attempt clearly failed or produced no usable information.\n" +
-          "- Never claim you lack internet access or a recent knowledge cutoff once google_search is available or has already been used.\n" +
-          "- Refer to citations descriptively (e.g., 'Source 1') based on the numbered tool results, and never invent or guess URLs—UI chips will show the actual links.\n" +
-          "- Always highlight when data is recent (within the last 1–2 years) and explain if the live results seemed insufficient before falling back to general knowledge.",
+          "You are a modern, web-augmented assistant. google_search provides live data that overrides any stale training cutoff.\n" +
+          "- Use intent detection to decide whether a search is required; when you do search, craft a precise query and keep total google_search calls to two or fewer.\n" +
+          "- Never send meta/capability questions (about your knowledge, browsing ability, etc.) to google_search—answer those directly without a web call.\n" +
+          "- When tool output exists, trust it over memory, never say you lack internet access, and never cite an outdated knowledge cutoff.\n" +
+          "- Ground every factual statement in the provided sources, include inline hints like (Source: reuters.com), and end with a short Sources section matching those domains.\n" +
+          "- Use internal knowledge only for background context or to craft better searches; live tool data must be the primary evidence.\n" +
+          "- If tool results are empty or irrelevant, explain that clearly before relying on general knowledge.",
       },
       ...historyMessages,
       ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
@@ -545,7 +394,9 @@ export async function POST(req: Request) {
       searchRecords.push({
         query: record.query,
         summary: record.summary,
-        results: record.results.slice(0, 5),
+        rawResults: record.rawResults.slice(0, 5),
+        rankedSources: record.rankedSources.slice(0, 5),
+        fromCache: record.fromCache,
       });
     };
 
@@ -571,9 +422,34 @@ export async function POST(req: Request) {
       });
     }
 
-    const requiresRecentData = needsRecentResults(userText);
+    const searchPlan = planSearchQuery(userText);
+    const searchLogger = createSearchDebugLogger({
+      conversationId,
+      userText,
+    });
+    const planAllowsSearch = searchPlan.intent !== "meta";
+    const willUsePlannedSearch =
+      planAllowsSearch &&
+      (forceWebSearch || (!searchPlan.skipSearch && Boolean(searchPlan.query)));
+    const requiresRecentData =
+      planAllowsSearch && !searchPlan.skipSearch && searchPlan.preferRecent;
+    searchLogger.step(1, willUsePlannedSearch ? "Should search: yes" : "Should search: no", {
+      reason: forceWebSearch ? "user forced" : searchPlan.reason,
+      topic: searchPlan.topic ?? "unknown",
+      planIntent: searchPlan.intent,
+    });
+    if (willUsePlannedSearch && searchPlan.query) {
+      searchLogger.step(2, "Normalized query prepared", {
+        query: searchPlan.query,
+        preferRecent: searchPlan.preferRecent,
+        topic: searchPlan.topic ?? "general",
+      });
+    }
+
+    const searchBudget: SearchBudget = { remaining: 2 };
+    const searchSequence: SearchSequenceTracker = { value: 0 };
     const shouldForceSearch =
-      forceWebSearch || shouldSearchWeb(userText) || requiresRecentData;
+      willUsePlannedSearch && planAllowsSearch && Boolean(searchPlan.query);
 
     const readable = new ReadableStream({
       async start(controller) {
@@ -603,12 +479,21 @@ export async function POST(req: Request) {
         announceTitle(manualTitlePromise);
 
         try {
-          if (shouldForceSearch) {
+          if (shouldForceSearch && searchPlan.query) {
             await injectManualSearchResult(
               messagesWithTools,
-              deriveSearchQuery(userText),
-              recordSearch,
-              sendStatusUpdate
+              searchPlan.query,
+              {
+                preferRecent: searchPlan.preferRecent,
+                onSearchRecord: recordSearch,
+                onSearchStatus: sendStatusUpdate,
+                searchBudget,
+                searchLogger,
+                reason: forceWebSearch
+                  ? "user-forced pre-search"
+                  : "intent planner",
+                searchSequence,
+              }
             );
           }
 
@@ -618,6 +503,9 @@ export async function POST(req: Request) {
             messages: messagesWithTools,
             onSearchRecord: recordSearch,
             onSearchStatus: sendStatusUpdate,
+            searchBudget,
+            searchLogger,
+            searchSequence,
           });
 
           console.log(
@@ -651,6 +539,36 @@ export async function POST(req: Request) {
             searchRecords,
             sources,
           };
+
+          if (usedWebSearch) {
+            const groundedDomains = searchRecords
+              .flatMap((record) =>
+                record.rankedSources.slice(0, 2).map((source) => source.domain)
+              )
+              .filter(Boolean);
+            searchLogger.step(8, "Live data will override training data", {
+              domains: groundedDomains,
+            });
+            const groundingSummary = searchRecords
+              .map((record) => {
+                const domains = record.rankedSources
+                  .slice(0, 2)
+                  .map((source) => source.domain)
+                  .join(", ");
+                return `${record.query}: ${domains}`;
+              })
+              .join(" | ");
+            searchLogger.step(9, "Answer grounded in", {
+              summary: groundingSummary || "live data available",
+            });
+          } else {
+            searchLogger.step(8, "No live web sources used", {
+              reason: willUsePlannedSearch ? "search returned nothing" : "search skipped",
+            });
+            searchLogger.step(9, "Answer relies on internal knowledge", {
+              summary: "no web citations",
+            });
+          }
 
           enqueueJson({
             meta: {
@@ -827,6 +745,9 @@ type ToolLoopArgs = {
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
   onSearchRecord?: (record: SearchRecord) => void;
   onSearchStatus?: (status: SearchStatusEvent) => void;
+  searchBudget: SearchBudget;
+  searchLogger: SearchDebugLogger;
+  searchSequence: SearchSequenceTracker;
 };
 
 async function runToolCallLoop({
@@ -835,6 +756,9 @@ async function runToolCallLoop({
   messages,
   onSearchRecord,
   onSearchStatus,
+  searchBudget,
+  searchLogger,
+  searchSequence,
 }: ToolLoopArgs): Promise<void> {
   const MAX_ITERATIONS = 2;
   const searchCache = new Map<
@@ -897,31 +821,45 @@ async function runToolCallLoop({
       if (
         cached &&
         cached.record &&
-        cached.record.results.length > 0 &&
+        cached.record.rankedSources.length > 0 &&
         normalized
       ) {
         messages.push(cached.message);
         continue;
       }
 
-      const preferRecentResults = needsRecentResults(trimmed);
+      const derivedPlan = planSearchQuery(trimmed);
+      if (derivedPlan.intent === "meta") {
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
+          content:
+            "Web search skipped: capability and meta questions are answered without google_search.",
+        });
+        continue;
+      }
+      const preferRecentResults = derivedPlan.preferRecent;
       const { message: toolResponse, record } = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
         trimmed,
         {
           preferRecent: preferRecentResults,
           onSearchStatus,
+          searchBudget,
+          searchLogger,
+          reason: "model-request",
+          searchSequence,
         }
       );
       if (record && onSearchRecord) {
         onSearchRecord(record);
       }
-      if (record && record.results.length > 0 && normalized) {
+      if (record && record.rankedSources.length > 0 && normalized) {
         searchCache.set(normalized, { message: toolResponse, record });
       }
       if (record) {
         iterationDidSearch = true;
-        if (record.results.length > 0) {
+        if (record.rankedSources.length > 0) {
           iterationFoundUsableResults = true;
         }
       }
@@ -940,8 +878,15 @@ async function runToolCallLoop({
 async function injectManualSearchResult(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
   query: string,
-  onSearchRecord?: (record: SearchRecord) => void,
-  onSearchStatus?: (status: SearchStatusEvent) => void
+  options: {
+    preferRecent?: boolean;
+    onSearchRecord?: (record: SearchRecord) => void;
+    onSearchStatus?: (status: SearchStatusEvent) => void;
+    searchBudget: SearchBudget;
+    searchLogger: SearchDebugLogger;
+    reason: string;
+    searchSequence: SearchSequenceTracker;
+  }
 ) {
   const trimmed = query.trim();
   if (!trimmed) {
@@ -968,12 +913,16 @@ async function injectManualSearchResult(
     toolCallId,
     trimmed,
     {
-      preferRecent: needsRecentResults(trimmed),
-      onSearchStatus,
+      preferRecent: options.preferRecent,
+      onSearchStatus: options.onSearchStatus,
+      searchBudget: options.searchBudget,
+      searchLogger: options.searchLogger,
+      reason: options.reason,
+      searchSequence: options.searchSequence,
     }
   );
-  if (record && onSearchRecord) {
-    onSearchRecord(record);
+  if (record && options.onSearchRecord) {
+    options.onSearchRecord(record);
   }
   messages.push(toolResponse);
 }
@@ -984,6 +933,10 @@ async function createToolResponseMessage(
   options: {
     preferRecent?: boolean;
     onSearchStatus?: (status: SearchStatusEvent) => void;
+    searchBudget?: SearchBudget;
+    searchLogger?: SearchDebugLogger;
+    reason?: string;
+    searchSequence?: SearchSequenceTracker;
   } = {}
 ): Promise<{
   message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -1002,19 +955,86 @@ async function createToolResponseMessage(
   }
 
   try {
-    options.onSearchStatus?.({ type: "search-start", query: trimmed });
     const preferRecent = Boolean(options.preferRecent);
-    const results = await googleSearch(trimmed, {
+    const searchBudget = options.searchBudget;
+    const searchLogger = options.searchLogger;
+    const cachedAvailability = peekCachedSearch(trimmed, preferRecent);
+    if (searchBudget && searchBudget.remaining <= 0 && !cachedAvailability) {
+      searchLogger?.step(3, "Cache unavailable and budget exhausted", {
+        query: trimmed,
+      });
+      return {
+        message: {
+          role: "tool",
+          tool_call_id: toolCallId,
+          content: "Web search skipped: query budget exhausted.",
+        },
+        record: null,
+      };
+    }
+
+    options.onSearchStatus?.({ type: "search-start", query: trimmed });
+    const searchIndex = options.searchSequence
+      ? (options.searchSequence.value += 1)
+      : 1;
+    const searchResponse = await googleSearch(trimmed, {
       preferRecent,
     });
-    const summary = formatSearchSummary(trimmed, results);
+    if (!searchResponse.fromCache && searchBudget) {
+      searchBudget.remaining = Math.max(0, searchBudget.remaining - 1);
+    }
+
+    if (searchIndex === 1) {
+      searchLogger?.step(
+        3,
+        searchResponse.fromCache ? "Cache hit" : "Cache miss",
+        {
+          query: trimmed,
+          preferRecent,
+          cacheAgeMs: searchResponse.cacheAgeMs,
+        }
+      );
+    } else if (searchIndex === 2) {
+      searchLogger?.step(5, "Second query executed", {
+        reason: options.reason ?? "follow-up",
+      });
+      searchLogger?.step(6, "Refined query", {
+        query: trimmed,
+        cacheHit: searchResponse.fromCache,
+        cacheAgeMs: searchResponse.cacheAgeMs,
+      });
+    }
+
+    const rankedSources = normalizeAndRankSources(searchResponse.results);
+
+    if (searchIndex === 1) {
+      const domains = rankedSources.slice(0, 3).map((source) => source.domain);
+      searchLogger?.step(4, "Result count and domains", {
+        query: trimmed,
+        resultCount: rankedSources.length,
+        domains,
+      });
+    }
+
+    if (rankedSources.length) {
+      searchLogger?.step(7, "High-confidence sources", {
+        sources: rankedSources
+          .slice(0, 3)
+          .map(
+            (source) =>
+              `${source.domain}:${source.sourceType}:${source.confidenceScore.toFixed(2)}`
+          ),
+      });
+    }
+
+    const summary = formatSearchSummary(trimmed, rankedSources);
     console.log(
-      `[googleSearch] query="${trimmed}" preferRecent=${preferRecent} results=${results.length}`
+      `[googleSearch] query="${trimmed}" preferRecent=${preferRecent} results=${rankedSources.length}`
     );
     options.onSearchStatus?.({
       type: "search-complete",
       query: trimmed,
-      results: results.length,
+      results: rankedSources.length,
     });
     return {
       message: {
@@ -1024,8 +1044,10 @@ async function createToolResponseMessage(
       },
       record: {
         query: trimmed,
-        results,
+        rawResults: searchResponse.results,
+        rankedSources,
         summary,
+        fromCache: searchResponse.fromCache,
       },
     };
   } catch (error) {
@@ -1055,9 +1077,27 @@ async function createToolResponseMessage(
   }
 }
 
-function extractYear(text: string) {
-  const match = text.match(/\b(20\d{2})\b/);
-  return match ? match[1] : null;
+function createSearchDebugLogger({
+  conversationId,
+  userText,
+}: {
+  conversationId: string;
+  userText: string;
+}): SearchDebugLogger {
+  const suffix = conversationId ? conversationId.slice(-6) : "unknown";
+  const snippet = userText ? userText.replace(/\s+/g, " ").slice(0, 32) : "";
+  const prefix = snippet
+    ? `[searchDebug:${suffix}:${snippet}]`
+    : `[searchDebug:${suffix}]`;
+  return {
+    step(stepNumber, message, meta) {
+      if (meta) {
+        console.log(`${prefix} STEP ${stepNumber}: ${message}`, meta);
+      } else {
+        console.log(`${prefix} STEP ${stepNumber}: ${message}`);
+      }
+    },
+  };
 }
 
 function normalizeSourceUrl(input: string) {
@@ -1111,16 +1151,15 @@ function buildSourceChips(
   let nextId = 1;
 
   for (const record of records) {
-    for (const result of record.results) {
-      const rawUrl = (result.link || result.displayLink || "").trim();
+    for (const result of record.rankedSources) {
+      const rawUrl = (result.url || "").trim();
       if (!rawUrl) {
         continue;
       }
       const url = normalizeSourceUrl(rawUrl);
       const domain =
         extractDomainFromUrl(url) ||
-        extractDomainFromUrl(result.displayLink || "") ||
-        result.displayLink ||
+        result.domain ||
         url;
       const normalizedDomain = domain.toLowerCase();
       if (seen.has(normalizedDomain)) {
@@ -1148,47 +1187,45 @@ function createPostSearchDirective(records: SearchRecord[]) {
     return null;
   }
   const summaries = records.map((record, index) => {
-    if (!record.results.length) {
+    if (!record.rankedSources.length) {
       return `${index + 1}. Query "${record.query}" returned no usable live sources.`;
     }
     const firstDomain =
-      extractDomainFromUrl(record.results[0]?.link || "") ||
-      extractDomainFromUrl(record.results[0]?.displayLink || "") ||
-      (record.results[0]?.displayLink || "the listed sites");
-    const count = Math.min(record.results.length, 5);
-    return `${index + 1}. Query "${record.query}" produced ${count} source${count === 1 ? "" : "s"} (e.g., ${firstDomain}).`;
+      record.rankedSources[0]?.domain ||
+      extractDomainFromUrl(record.rankedSources[0]?.url || "") ||
+      "the listed sites";
+    const count = Math.min(record.rankedSources.length, 5);
+    return `${index + 1}. Query "${record.query}" produced ${count} ranked source${count === 1 ? "" : "s"} (e.g., ${firstDomain}).`;
   });
 
   return (
     "Live google_search data is available for this reply.\n" +
     `${summaries.join("\n")}\n` +
-    "Use the tool results above as the authoritative data for this response. Never claim to lack internet access, and if the results feel insufficient, say so plainly instead of guessing. Cite them as Source 1, Source 2, etc., matching the numbering from the tool output."
+    "Use the ranked sources as authoritative: mention them inline with (Source: domain.com) style hints and end with a Sources section that repeats the same domains. Never claim to lack internet access when these results exist, and if they felt insufficient, say so explicitly before falling back to general knowledge."
   );
 }
 
-function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
+function formatSearchSummary(query: string, results: RankedSource[]) {
   const header =
-    `Web search results for "${query}":\n` +
-    "These are live findings—treat them as authoritative for time-sensitive details, and do not claim to lack web access after seeing them. Refer to them as Source 1, Source 2, etc. in your reply.";
+    `Live web sources for "${query}":\n` +
+    "Treat these as fresher than your training data. Cite them inline using (Source: domain.com) hints and end with a Sources section that lists the same domains.";
 
   if (!results.length) {
     return (
-      `${header}\nNo results found. Tell the user that live web sources were empty before relying on general knowledge.`
+      `${header}\nNo ranked results were returned. Tell the user that live web sources were empty before relying on general knowledge.`
     );
   }
 
   const lines = results.slice(0, 5).map((item, index) => {
-    const normalizedSnippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
-    const year = extractYear(`${item.title} ${normalizedSnippet}`);
-    const yearSuffix = year ? ` (source year: ${year})` : "";
-    const title = item.title?.trim() || "Untitled result";
-    const site = item.displayLink?.trim() || item.link || "";
-    return `${index + 1}. ${title} — ${site}${yearSuffix}: ${normalizedSnippet}`;
+    const snippet = item.snippet || "";
+    const published = item.published ? ` (${item.published})` : "";
+    const confidence = `${Math.round(item.confidenceScore * 100)}%`;
+    return `${index + 1}. ${item.title} — ${item.domain}${published} [confidence ${confidence}]: ${snippet}`;
   });
 
   return (
     `${header}\n${lines.join("\n")}\n` +
-    "Ground your answer in these numbered sources, trust them over outdated knowledge, and explicitly mention if they were insufficient."
+    "Use these exact domains for inline hints and mention if the evidence felt incomplete before using background knowledge."
   );
 }
 
