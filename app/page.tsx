@@ -297,7 +297,10 @@ export default function Home() {
   // LOAD MESSAGES
   // ------------------------------------------------------------
   const loadMessages = useCallback(
-    async (conversationId: string, opts: { silent?: boolean } = {}) => {
+    async (
+      conversationId: string,
+      opts: { silent?: boolean; force?: boolean } = {}
+    ) => {
       if (!conversationId) return;
       if (!opts.silent) setIsLoadingMessages(true);
 
@@ -307,12 +310,12 @@ export default function Home() {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
-      if (selectedConversationId !== conversationId) {
+      if (!opts.force && selectedConversationId !== conversationId) {
         if (!opts.silent) setIsLoadingMessages(false);
         return;
       }
 
-      if (skipAutoLoadRef.current === conversationId) {
+      if (!opts.force && skipAutoLoadRef.current === conversationId) {
         skipAutoLoadRef.current = null;
         if (!opts.silent) setIsLoadingMessages(false);
         return;
@@ -363,18 +366,6 @@ export default function Home() {
 
     loadMessages(selectedConversationId);
   }, [selectedConversationId, loadMessages]);
-
-  useEffect(() => {
-    if (pendingMetadataPersistRef.current.size === 0) return;
-    messages.forEach((msg) => {
-      const messageId = msg.id;
-      if (!messageId) return;
-      const pending = pendingMetadataPersistRef.current.get(messageId);
-      if (!pending || !msg.persistedId) return;
-      pendingMetadataPersistRef.current.delete(messageId);
-      persistMessageMetadata(msg.persistedId, pending);
-    });
-  }, [messages, persistMessageMetadata]);
 
   // ------------------------------------------------------------
   // AUTOSCROLL WHEN MESSAGES CHANGE
@@ -474,6 +465,11 @@ export default function Home() {
     [sortedConversations, selectedProjectId]
   );
 
+  const unassignedChats = useMemo(
+    () => sortedConversations.filter((c) => !c.project_id),
+    [sortedConversations]
+  );
+
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const canSendMessage = input.trim().length > 0;
 
@@ -489,7 +485,11 @@ export default function Home() {
   // ------------------------------------------------------------
   const handleConversationSelect = (id: string) => {
     const convo = conversations.find((c) => c.id === id);
-    setSelectedConversationId(id);
+    if (id === selectedConversationId) {
+      loadMessages(id, { force: true });
+    } else {
+      setSelectedConversationId(id);
+    }
     setSelectedProjectId(convo?.project_id ?? null);
     setViewMode("chat");
     setSidebarOpen(false);
@@ -527,6 +527,18 @@ export default function Home() {
     []
   );
 
+  useEffect(() => {
+    if (pendingMetadataPersistRef.current.size === 0) return;
+    messages.forEach((msg) => {
+      const messageId = msg.id;
+      if (!messageId) return;
+      const pending = pendingMetadataPersistRef.current.get(messageId);
+      if (!pending || !msg.persistedId) return;
+      pendingMetadataPersistRef.current.delete(messageId);
+      persistMessageMetadata(msg.persistedId, pending);
+    });
+  }, [messages, persistMessageMetadata]);
+
   // ------------------------------------------------------------
   // CREATE CONVERSATION
   // ------------------------------------------------------------
@@ -550,10 +562,17 @@ export default function Home() {
     return data;
   }
 
-  type SendMessageOptions = {
-    messageOverride?: string;
-    modelOverride?: ModelMode;
-  };
+type RetryOptions = {
+  assistantMessageId: string;
+  assistantPersistedId?: string | null;
+  userMessagePersistedId?: string | null;
+};
+
+type SendMessageOptions = {
+  messageOverride?: string;
+  modelOverride?: ModelMode;
+  retry?: RetryOptions;
+};
 
   // ------------------------------------------------------------
   // SEND MESSAGE — STREAMING
@@ -563,7 +582,9 @@ export default function Home() {
     if (!sourceText.trim() || isStreaming) return;
 
     let conversationId = selectedConversationId;
-    let assistantMessageId: string | null = null;
+    let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
+    let userMessageId: string | null = null;
+    const isRetry = Boolean(options?.retry);
     const text = sourceText.trim();
     const chosenMode = options?.modelOverride ?? modelMode;
     if (!options?.messageOverride) {
@@ -590,6 +611,9 @@ export default function Home() {
     }, LONG_THINK_THRESHOLD_MS);
 
     try {
+      if (!conversationId && isRetry) {
+        throw new Error("Cannot retry without a conversation");
+      }
       if (!conversationId) {
         const conv = await createConversation("New chat", selectedProjectId);
         conversationId = conv.id;
@@ -599,23 +623,48 @@ export default function Home() {
         skipAutoLoadRef.current = conv.id;
       }
 
-      const userMessageId = createLocalId();
-      const assistantId = createLocalId();
-      assistantMessageId = assistantId;
-      responseTimingRef.current.assistantMessageId = assistantId;
-      setActiveAssistantMessageId(assistantId);
+      if (!assistantMessageId) {
+        assistantMessageId = createLocalId();
+      }
+      responseTimingRef.current.assistantMessageId = assistantMessageId;
+      setActiveAssistantMessageId(assistantMessageId);
 
-      // user msg + empty assistant bubble for streaming
-      setMessages((prev) => [
-        ...prev,
-        { id: userMessageId, role: "user", content: text },
-        {
-          id: assistantId,
-          role: "assistant",
-          content: "",
-          metadata: { requestedModelMode: chosenMode },
-        },
-      ]);
+      if (!isRetry) {
+        const newUserMessageId = createLocalId();
+        userMessageId = newUserMessageId;
+        const activeAssistantId = assistantMessageId!;
+        setMessages((prev) => [
+          ...prev,
+          { id: newUserMessageId, role: "user", content: text },
+          {
+            id: activeAssistantId,
+            role: "assistant",
+            content: "",
+            metadata: { requestedModelMode: chosenMode },
+          },
+        ]);
+      } else {
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== assistantMessageId) return msg;
+            return {
+              ...msg,
+              content: "",
+              usedModel: undefined,
+              usedModelMode: undefined,
+              usedWebSearch: undefined,
+              searchRecords: [],
+              metadata: {
+                ...(msg.metadata || {}),
+                requestedModelMode: chosenMode,
+              },
+            };
+          })
+        );
+        setExpandedSourcesId((prev) =>
+          prev === assistantMessageId ? null : prev
+        );
+      }
 
       const shouldForceWebSearch = forceWebSearch;
       setForceWebSearch(false);
@@ -624,15 +673,26 @@ export default function Home() {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
+      const requestBody: Record<string, unknown> = {
+        message: text,
+        conversationId,
+        modelMode: chosenMode,
+        forceWebSearch: shouldForceWebSearch,
+      };
+
+      if (options?.retry?.assistantPersistedId) {
+        requestBody.retryAssistantMessageId =
+          options.retry.assistantPersistedId;
+      }
+      if (options?.retry?.userMessagePersistedId) {
+        requestBody.retryUserMessageId =
+          options.retry.userMessagePersistedId;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          conversationId,
-          modelMode: chosenMode,
-          forceWebSearch: shouldForceWebSearch,
-        }),
+        body: JSON.stringify(requestBody),
         signal: abortController.signal,
       });
 
@@ -669,10 +729,22 @@ export default function Home() {
                 if (payload.meta) {
                   const meta = payload.meta as MessageMetadata & {
                     assistantMessageRowId?: string;
+                    userMessageRowId?: string;
                   };
                   const assistantRowId =
                     (meta as { assistantMessageRowId?: string })
                       .assistantMessageRowId;
+                  const userRowId = (meta as { userMessageRowId?: string })
+                    .userMessageRowId;
+                  if (userRowId && userMessageId) {
+                    setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === userMessageId
+                          ? { ...msg, persistedId: userRowId }
+                          : msg
+                      )
+                    );
+                  }
                   setMessages((prev) =>
                     prev.map((msg) => {
                       if (msg.id !== assistantMessageId) return msg;
@@ -892,14 +964,37 @@ export default function Home() {
     }
   }
 
-  async function handleRetryWithModel(targetMode: ModelMode) {
-    const lastUser = [...messages].reverse().find((m) => m.role === "user");
-    if (!lastUser) return;
+  async function handleRetryWithModel(
+    targetMode: ModelMode,
+    targetMessage: ChatMessage
+  ) {
+    if (!targetMessage.id) return;
+    const targetIndex = messages.findIndex(
+      (msg) => msg.id === targetMessage.id
+    );
+    if (targetIndex === -1) return;
+    const relatedUserMessage = [...messages]
+      .slice(0, targetIndex)
+      .reverse()
+      .find((msg) => msg.role === "user");
+    if (!relatedUserMessage) return;
+    if (!targetMessage.persistedId || !relatedUserMessage.persistedId) {
+      console.warn("Retry unavailable until messages finish saving");
+      return;
+    }
     setModelMode(targetMode);
     setOpenModelMenuId(null);
+    setExpandedSourcesId((prev) =>
+      prev === targetMessage.id ? null : prev
+    );
     await sendMessage({
-      messageOverride: lastUser.content,
+      messageOverride: relatedUserMessage.content,
       modelOverride: targetMode,
+      retry: {
+        assistantMessageId: targetMessage.id,
+        assistantPersistedId: targetMessage.persistedId,
+        userMessagePersistedId: relatedUserMessage.persistedId,
+      },
     });
   }
 
@@ -1175,11 +1270,13 @@ export default function Home() {
       </div>
 
       <div className="mt-1 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
-        {sortedConversations.length === 0 && (
-          <div className="px-1 py-2 text-[11px] text-zinc-500">No chats yet.</div>
+        {unassignedChats.length === 0 && (
+          <div className="px-1 py-2 text-[11px] text-zinc-500">
+            No unassigned chats yet.
+          </div>
         )}
 
-        {sortedConversations.map((c) => {
+        {unassignedChats.map((c) => {
           const isActive = selectedConversationId === c.id && viewMode === "chat";
           const isMenuOpen = rowMenu?.type === "conversation" && rowMenu.id === c.id;
           const showMoveMenu = moveMenuConversationId === c.id;
@@ -1355,29 +1452,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* Project selector */}
-          {viewMode === "chat" && currentConversation && (
-            <div className="flex items-center gap-2 text-[11px] text-zinc-400">
-              <span className="hidden text-xs text-zinc-500 sm:inline">Project:</span>
-              <select
-                value={currentConversation.project_id || ""}
-                onChange={(e) =>
-                  moveConversation(
-                    currentConversation.id,
-                    e.target.value === "" ? null : e.target.value
-                  )
-                }
-                className="rounded-md border border-[#3f3f46] bg-transparent px-2 py-1 text-[11px] text-zinc-300"
-              >
-                <option value="">No project</option>
-                {sortedProjects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
         </header>
 
         {/* PROJECT VIEW */}
@@ -1627,7 +1701,7 @@ export default function Home() {
                                                   key={mode}
                                                   onClick={(event) => {
                                                     event.stopPropagation();
-                                                    handleRetryWithModel(mode);
+                                                    handleRetryWithModel(mode, m);
                                                   }}
                                                   className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
                                                 >
@@ -1792,18 +1866,112 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
-                    <div className="relative">
+                <div className="flex items-end gap-2">
+                  <div className="relative w-full">
+                    <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-1.5 pr-16 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          aria-label="Insert options"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setComposerMenuOpen((prev) => !prev);
+                          }}
+                          className="flex h-9 w-9 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                          >
+                            <path d="M12 5v14M5 12h14" />
+                          </svg>
+                        </button>
+
+                        {composerMenuOpen && (
+                          <div
+                            onClick={(event) => event.stopPropagation()}
+                            className="absolute bottom-12 left-0 z-30 w-44 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                          >
+                            <button
+                              onClick={() => {
+                                setForceWebSearch((prev) => !prev);
+                                setComposerMenuOpen(false);
+                              }}
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                            >
+                              <span>Web search</span>
+                              {forceWebSearch && (
+                                <span className="text-[#8ab4ff]">On</span>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex-1 px-1">
+                        <textarea
+                          ref={textareaRef}
+                          className="w-full resize-none border-none bg-transparent py-1 text-[15px] leading-[1.4] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[24px]"
+                          style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                          value={input}
+                          onChange={(e) => setInput(e.target.value)}
+                          onKeyDown={handleKeyDown}
+                          placeholder="Message the assistant…"
+                          rows={1}
+                        />
+                      </div>
+
                       <button
                         type="button"
-                        aria-label="Insert options"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setComposerMenuOpen((prev) => !prev);
-                        }}
-                        className="flex h-10 w-10 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
+                        aria-label="Voice input (coming soon)"
+                        onClick={() => textareaRef.current?.focus()}
+                        className="flex h-9 w-9 items-center justify-center rounded-full text-white/70 transition hover:text-white"
                       >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-5 w-5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={1.8}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                          <path d="M19 11.5a7 7 0 0 1-14 0" />
+                          <path d="M12 18.5v2" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={
+                        isStreaming ? handleStopGeneration : () => sendMessage()
+                      }
+                      disabled={!isStreaming && !canSendMessage}
+                      className={`absolute right-1.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                        isStreaming
+                          ? "hover:bg-[#225fd0]"
+                          : "hover:bg-[#3c7cff] disabled:opacity-40"
+                      }`}
+                      aria-label={isStreaming ? "Stop response" : "Send message"}
+                    >
+                      {isStreaming ? (
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-4 w-4"
+                          fill="currentColor"
+                        >
+                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                        </svg>
+                      ) : (
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
                           viewBox="0 0 24 24"
@@ -1812,107 +1980,14 @@ export default function Home() {
                           stroke="currentColor"
                           strokeWidth={2}
                           strokeLinecap="round"
+                          strokeLinejoin="round"
                         >
-                          <path d="M12 5v14M5 12h14" />
+                          <path d="M12 18V6" />
+                          <path d="M6 12l6-6 6 6" />
                         </svg>
-                      </button>
-
-                      {composerMenuOpen && (
-                        <div
-                          onClick={(event) => event.stopPropagation()}
-                          className="absolute bottom-12 left-0 z-30 w-44 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
-                        >
-                          <button
-                            onClick={() => {
-                              setForceWebSearch((prev) => !prev);
-                              setComposerMenuOpen(false);
-                            }}
-                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                          >
-                            <span>Web search</span>
-                            {forceWebSearch && (
-                              <span className="text-[#8ab4ff]">On</span>
-                            )}
-                          </button>
-                        </div>
                       )}
-                    </div>
-
-                    <div className="flex-1 px-1">
-                      <textarea
-                        ref={textareaRef}
-                        className="w-full resize-none border-none bg-transparent px-0 text-[15px] leading-6 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[24px]"
-                        style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        placeholder="Message the assistant…"
-                        rows={1}
-                      />
-                    </div>
-
-                    <button
-                      type="button"
-                      aria-label="Voice input (coming soon)"
-                      onClick={() => textareaRef.current?.focus()}
-                      className="flex h-10 w-10 items-center justify-center rounded-full text-white/70 transition hover:text-white"
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-5 w-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={1.8}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                        <path d="M19 11.5a7 7 0 0 1-14 0" />
-                        <path d="M12 18.5v2" />
-                      </svg>
                     </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={
-                      isStreaming ? handleStopGeneration : () => sendMessage()
-                    }
-                    disabled={!isStreaming && !canSendMessage}
-                    className={`flex h-12 w-12 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                      isStreaming
-                        ? "hover:bg-[#225fd0]"
-                        : "hover:bg-[#3c7cff] disabled:opacity-40"
-                    }`}
-                    style={{ borderRadius: "50%" }}
-                    aria-label={isStreaming ? "Stop response" : "Send message"}
-                  >
-                    {isStreaming ? (
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-4 w-4"
-                        fill="currentColor"
-                      >
-                        <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                      </svg>
-                    ) : (
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-5 w-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M12 18V6" />
-                        <path d="M6 12l6-6 6 6" />
-                      </svg>
-                    )}
-                  </button>
                 </div>
               </div>
             </div>
