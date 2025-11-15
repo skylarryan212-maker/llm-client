@@ -134,6 +134,38 @@ function deriveSearchQuery(userText: string) {
   return query;
 }
 
+const PLACEHOLDER_TITLES = [
+  "",
+  "new chat",
+  "untitled chat",
+  "conversation with assistant",
+  "chat with assistant",
+];
+
+function isPlaceholderTitle(value: string | null | undefined) {
+  const normalized = (value || "").trim().toLowerCase();
+  return PLACEHOLDER_TITLES.includes(normalized);
+}
+
+function normalizeGeneratedTitle(input: string | null | undefined) {
+  const cleaned = (input || "")
+    .replace(/["'“”‘’]+/g, "")
+    .replace(/[.!?,:;]+$/g, "")
+    .trim();
+  if (!cleaned) {
+    return null;
+  }
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  const truncated = words.slice(0, 8).join(" ");
+  if (!truncated) return null;
+  const normalized = truncated.trim();
+  if (isPlaceholderTitle(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -271,6 +303,13 @@ export async function POST(req: Request) {
           enqueueJson({ status });
         };
         let fullAssistantMessage = "";
+        let responseMetadata: {
+          usedModel: string;
+          usedModelMode: ModelMode;
+          requestedModelMode: ModelMode;
+          usedWebSearch: boolean;
+          searchRecords: SearchRecord[];
+        } | null = null;
 
         try {
           if (shouldForceSearch) {
@@ -299,7 +338,7 @@ export async function POST(req: Request) {
           });
 
           const usedWebSearch = searchRecords.length > 0;
-          const metadata = {
+          responseMetadata = {
             usedModel: MODEL_MAP[resolvedModelKey],
             usedModelMode: resolvedModelKey,
             requestedModelMode: modelMode,
@@ -307,7 +346,12 @@ export async function POST(req: Request) {
             searchRecords,
           };
 
-          enqueueJson({ meta: metadata });
+          enqueueJson({
+            meta: {
+              ...responseMetadata,
+              assistantMessageRowId: assistantRow?.id ?? null,
+            },
+          });
 
           for await (const chunk of stream) {
             const token = chunk.choices[0]?.delta?.content;
@@ -323,9 +367,18 @@ export async function POST(req: Request) {
           enqueueJson({ done: true });
           if (assistantRow?.id) {
             try {
+              const updatePayload: {
+                content: string;
+                metadata?: typeof responseMetadata;
+              } = { content: fullAssistantMessage };
+
+              if (responseMetadata) {
+                updatePayload.metadata = responseMetadata;
+              }
+
               await supabase
                 .from("messages")
-                .update({ content: fullAssistantMessage })
+                .update(updatePayload)
                 .eq("id", assistantRow.id);
             } catch (persistErr) {
               console.error("Failed to persist assistant response", persistErr);
@@ -708,6 +761,7 @@ async function ensureChatTitle({
     const completion = await openai.chat.completions.create({
       model: MODEL_MAP[titleModelKey],
       max_completion_tokens: 32,
+      temperature: 1,
       messages: [
         {
           role: "system",
@@ -722,31 +776,8 @@ async function ensureChatTitle({
     });
 
     const rawTitle = completion.choices[0]?.message?.content?.trim() || "";
-    const cleanTitle = rawTitle
-      .replace(/["'“”‘’]+/g, "")
-      .replace(/[.!?,:;]+$/g, "")
-      .trim();
-
-    if (!cleanTitle) {
-      return;
-    }
-
-    const words = cleanTitle.split(/\s+/).filter(Boolean);
-    const truncated = words.slice(0, 8).join(" ");
-    if (!truncated) {
-      return;
-    }
-
-    const normalized = truncated.trim();
-    const normalizedLower = normalized.toLowerCase();
-    const forbiddenTitles = [
-      "conversation with assistant",
-      "chat with assistant",
-      "new chat",
-      "untitled chat",
-    ];
-
-    if (forbiddenTitles.includes(normalizedLower)) {
+    const normalized = normalizeGeneratedTitle(rawTitle);
+    if (!normalized) {
       return;
     }
 
@@ -758,3 +789,4 @@ async function ensureChatTitle({
     console.warn("Title generation failed", err);
   }
 }
+
