@@ -9,6 +9,7 @@ import {
   googleSearch,
 } from "@/lib/googleSearch";
 import type { GoogleSearchResult } from "@/lib/googleSearch";
+import type { SourceChip } from "@/lib/chatTypes";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -49,6 +50,15 @@ type SearchRecord = {
   query: string;
   results: GoogleSearchResult[];
   summary: string;
+};
+
+type ResponseMetadata = {
+  usedModel: string;
+  usedModelMode: ModelMode;
+  requestedModelMode: ModelMode;
+  usedWebSearch: boolean;
+  searchRecords: SearchRecord[];
+  sources: SourceChip[];
 };
 
 const MODEL_MAP = {
@@ -94,6 +104,9 @@ const SEARCH_KEYWORDS = [
   "share price",
   "current price",
   "current stock",
+  "weather",
+  "forecast",
+  "temperature",
   "current gpu",
   "current cpu",
   "newest gpu",
@@ -167,6 +180,9 @@ const RECENT_QUERY_KEYWORDS = [
   "market cap",
   "earnings",
   "forecast",
+  "weather",
+  "temperature",
+  "humidity",
   "version",
   "update",
   "release",
@@ -509,7 +525,13 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client with live web access through the google_search function tool. Use google_search for questions that are time-sensitive or likely to change (stock or crypto prices, hardware generations, breaking news, live sports, anything mentioning 'current', 'latest', 'today', etc.). Treat the web results as the primary factual reference for prices, release dates, specs, or event timing—if they contradict older knowledge, trust the web data and reconcile your answer accordingly. Limit yourself to 1–2 search queries per user request: start with one targeted query, then only add a second if the first clearly failed or needs refinement. When you rely on google_search, never claim you lack browsing capability; instead say things like 'Based on the latest web results…' and cite/describe the numbered sources that informed you. Prefer sources from the last 1–2 years whenever the user wants current information, and highlight when the data appears recent. If no web results are returned, state that limitation before falling back to general knowledge.",
+          "You are a helpful assistant inside a custom LLM client with genuine live web access via the google_search function tool.\n" +
+          "- Always run google_search before answering any time-sensitive or fast-changing question (weather, stock or crypto prices, hardware launches, pricing, 'current/today/latest' phrasing, etc.).\n" +
+          "- Treat google_search output as the authoritative source of truth. If tool data conflicts with training data, rely on the tool results and mention the discrepancy.\n" +
+          "- Limit yourself to a single targeted search unless the first attempt clearly failed or produced no usable information.\n" +
+          "- Never claim you lack internet access or a recent knowledge cutoff once google_search is available or has already been used.\n" +
+          "- Refer to citations descriptively (e.g., 'Source 1') based on the numbered tool results, and never invent or guess URLs—UI chips will show the actual links.\n" +
+          "- Always highlight when data is recent (within the last 1–2 years) and explain if the live results seemed insufficient before falling back to general knowledge.",
       },
       ...historyMessages,
       ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
@@ -549,7 +571,9 @@ export async function POST(req: Request) {
       });
     }
 
-    const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
+    const requiresRecentData = needsRecentResults(userText);
+    const shouldForceSearch =
+      forceWebSearch || shouldSearchWeb(userText) || requiresRecentData;
 
     const readable = new ReadableStream({
       async start(controller) {
@@ -573,13 +597,7 @@ export async function POST(req: Request) {
             );
         };
         let fullAssistantMessage = "";
-        let responseMetadata: {
-          usedModel: string;
-          usedModelMode: ModelMode;
-          requestedModelMode: ModelMode;
-          usedWebSearch: boolean;
-          searchRecords: SearchRecord[];
-        } | null = null;
+        let responseMetadata: ResponseMetadata | null = null;
 
         announceTitle(routerTitlePromise);
         announceTitle(manualTitlePromise);
@@ -607,6 +625,14 @@ export async function POST(req: Request) {
           );
 
           const finalMessages = [...messagesWithTools];
+          const postSearchDirective = createPostSearchDirective(searchRecords);
+          if (postSearchDirective) {
+            finalMessages.push({
+              role: "system",
+              content: postSearchDirective,
+            });
+          }
+
           const stream = await openai.chat.completions.create({
             model: MODEL_MAP[resolvedModelKey],
             messages: finalMessages,
@@ -616,12 +642,14 @@ export async function POST(req: Request) {
           });
 
           const usedWebSearch = searchRecords.length > 0;
+          const sources = buildSourceChips(searchRecords);
           responseMetadata = {
             usedModel: MODEL_MAP[resolvedModelKey],
             usedModelMode: resolvedModelKey,
             requestedModelMode: modelMode,
             usedWebSearch,
             searchRecords,
+            sources,
           };
 
           enqueueJson({
@@ -1032,10 +1060,116 @@ function extractYear(text: string) {
   return match ? match[1] : null;
 }
 
+function normalizeSourceUrl(input: string) {
+  if (!input) {
+    return "";
+  }
+  try {
+    return new URL(input).toString();
+  } catch {
+    try {
+      return new URL(`https://${input}`).toString();
+    } catch {
+      return input;
+    }
+  }
+}
+
+function extractDomainFromUrl(input: string) {
+  if (!input) {
+    return null;
+  }
+  try {
+    const host = new URL(input).hostname;
+    return host.replace(/^www\./i, "");
+  } catch {
+    if (!/^https?:/i.test(input)) {
+      try {
+        const host = new URL(`https://${input}`).hostname;
+        return host.replace(/^www\./i, "");
+      } catch {
+        // fall through
+      }
+    }
+    const sanitized = input
+      .replace(/^https?:\/\//i, "")
+      .split("/")[0]
+      .trim();
+    return sanitized || null;
+  }
+}
+
+function buildSourceChips(
+  records: SearchRecord[],
+  maxSources = 4
+): SourceChip[] {
+  if (!records.length) {
+    return [];
+  }
+  const chips: SourceChip[] = [];
+  const seen = new Set<string>();
+  let nextId = 1;
+
+  for (const record of records) {
+    for (const result of record.results) {
+      const rawUrl = (result.link || result.displayLink || "").trim();
+      if (!rawUrl) {
+        continue;
+      }
+      const url = normalizeSourceUrl(rawUrl);
+      const domain =
+        extractDomainFromUrl(url) ||
+        extractDomainFromUrl(result.displayLink || "") ||
+        result.displayLink ||
+        url;
+      const normalizedDomain = domain.toLowerCase();
+      if (seen.has(normalizedDomain)) {
+        continue;
+      }
+      chips.push({
+        id: nextId,
+        title: result.title?.trim() || domain,
+        url,
+        domain,
+      });
+      seen.add(normalizedDomain);
+      nextId += 1;
+      if (chips.length >= maxSources) {
+        return chips;
+      }
+    }
+  }
+
+  return chips;
+}
+
+function createPostSearchDirective(records: SearchRecord[]) {
+  if (!records.length) {
+    return null;
+  }
+  const summaries = records.map((record, index) => {
+    if (!record.results.length) {
+      return `${index + 1}. Query "${record.query}" returned no usable live sources.`;
+    }
+    const firstDomain =
+      extractDomainFromUrl(record.results[0]?.link || "") ||
+      extractDomainFromUrl(record.results[0]?.displayLink || "") ||
+      (record.results[0]?.displayLink || "the listed sites");
+    const count = Math.min(record.results.length, 5);
+    return `${index + 1}. Query "${record.query}" produced ${count} source${count === 1 ? "" : "s"} (e.g., ${firstDomain}).`;
+  });
+
+  return (
+    "Live google_search data is available for this reply.\n" +
+    `${summaries.join("\n")}\n` +
+    "Use the tool results above as the authoritative data for this response. Never claim to lack internet access, and if the results feel insufficient, say so plainly instead of guessing. Cite them as Source 1, Source 2, etc., matching the numbering from the tool output."
+  );
+}
+
 function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
   const header =
     `Web search results for "${query}":\n` +
-    "Use these findings as the authoritative, up-to-date facts for any time-sensitive detail. If they conflict with your prior knowledge, trust these results.";
+    "These are live findings—treat them as authoritative for time-sensitive details, and do not claim to lack web access after seeing them. Refer to them as Source 1, Source 2, etc. in your reply.";
 
   if (!results.length) {
     return (
@@ -1052,7 +1186,10 @@ function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
     return `${index + 1}. ${title} — ${site}${yearSuffix}: ${normalizedSnippet}`;
   });
 
-  return `${header}\n${lines.join("\n")}\nGround your answer in these numbered sources and cite them explicitly.`;
+  return (
+    `${header}\n${lines.join("\n")}\n` +
+    "Ground your answer in these numbered sources, trust them over outdated knowledge, and explicitly mention if they were insufficient."
+  );
 }
 
 async function ensureChatTitle({
