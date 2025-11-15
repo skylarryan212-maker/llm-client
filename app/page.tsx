@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -14,9 +15,27 @@ import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
 
+type SearchSource = {
+  title: string;
+  link: string;
+  displayLink: string;
+  snippet: string;
+};
+
+type SearchRecord = {
+  query: string;
+  summary: string;
+  results: SearchSource[];
+};
+
 type ChatMessage = {
+  id?: string;
   role: "user" | "assistant";
   content: string;
+  usedModel?: string;
+  usedModelMode?: ModelMode;
+  usedWebSearch?: boolean;
+  searchRecords?: SearchRecord[];
 };
 
 type Project = {
@@ -45,6 +64,19 @@ const MODEL_SEGMENTS: { value: ModelMode; label: string; hint: string }[] = [
   { value: "full", label: "Deep", hint: "5.1" },
 ];
 
+const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
+  nano: "gpt-5-nano-2025-08-07",
+  mini: "gpt-5-mini-2025-08-07",
+  full: "gpt-5.1-2025-11-13",
+};
+
+function createLocalId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2);
+}
+
 const markdownComponents: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
   ul: ({ children }) => (
@@ -54,7 +86,7 @@ const markdownComponents: Components = {
     <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>
   ),
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  code({ inline, children }: any) {
+  code({ inline, children }: { inline?: boolean; children?: ReactNode }) {
     if (inline) {
       return (
         <code className="rounded-md bg-[#2d2d30] px-1.5 py-0.5 text-[13px]">
@@ -96,7 +128,7 @@ export default function Home() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [isSending, setIsSending] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [modelMode, setModelMode] = useState<ModelMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
 
@@ -116,12 +148,25 @@ export default function Home() {
   const [newProjectName, setNewProjectName] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // autoscroll anchor
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const skipAutoLoadRef = useRef<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [expandedSourcesId, setExpandedSourcesId] = useState<string | null>(
+    null
+  );
+  const [openModelMenuId, setOpenModelMenuId] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
-  function scrollToBottom() {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  function scrollToBottom(opts: { behavior?: ScrollBehavior } = {}) {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: opts.behavior ?? "smooth",
+    });
   }
 
   // ------------------------------------------------------------
@@ -164,7 +209,7 @@ export default function Home() {
 
       const { data, error } = await supabase
         .from("messages")
-        .select("role, content, created_at")
+        .select("id, role, content, created_at")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
@@ -185,6 +230,7 @@ export default function Home() {
       } else {
         setMessages(
           (data || []).map((m) => ({
+            id: (m as { id?: string }).id,
             role: m.role,
             content: m.content,
           }))
@@ -209,8 +255,39 @@ export default function Home() {
   // AUTOSCROLL WHEN MESSAGES CHANGE
   // ------------------------------------------------------------
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (!autoScrollEnabled) return;
+    scrollToBottom({ behavior: "smooth" });
+  }, [messages, autoScrollEnabled]);
+
+  useEffect(() => {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const nearBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+      setAutoScrollEnabled(nearBottom);
+      setShowScrollButton(!nearBottom);
+    };
+    handleScroll();
+    el.addEventListener("scroll", handleScroll);
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const maxHeight = 168;
+    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [input]);
+
+  useEffect(() => {
+    const handleWindowClick = () => setOpenModelMenuId(null);
+    window.addEventListener("click", handleWindowClick);
+    return () => window.removeEventListener("click", handleWindowClick);
+  }, []);
 
   // ------------------------------------------------------------
   // MEMOIZED SORTED LISTS
@@ -267,6 +344,17 @@ export default function Home() {
     setSidebarOpen(false);
   };
 
+  const refreshConversations = useCallback(async () => {
+    const { data } = await supabase
+      .from("conversations")
+      .select("id, title, project_id, created_at")
+      .eq("user_id", TEST_USER_ID);
+
+    if (Array.isArray(data)) {
+      setConversations(data as ConversationMeta[]);
+    }
+  }, []);
+
   // ------------------------------------------------------------
   // CREATE CONVERSATION
   // ------------------------------------------------------------
@@ -290,16 +378,26 @@ export default function Home() {
     return data;
   }
 
+  type SendMessageOptions = {
+    messageOverride?: string;
+    modelOverride?: ModelMode;
+  };
+
   // ------------------------------------------------------------
   // SEND MESSAGE — STREAMING
   // ------------------------------------------------------------
-  async function sendMessage() {
-    if (!input.trim() || isSending) return;
+  async function sendMessage(options?: SendMessageOptions) {
+    const sourceText = options?.messageOverride ?? input;
+    if (!sourceText.trim() || isStreaming) return;
 
     let conversationId = selectedConversationId;
-    const text = input.trim();
-    setInput("");
-    setIsSending(true);
+    let assistantMessageId: string | null = null;
+    const text = sourceText.trim();
+    const chosenMode = options?.modelOverride ?? modelMode;
+    if (!options?.messageOverride) {
+      setInput("");
+    }
+    setIsStreaming(true);
 
     try {
       if (!conversationId) {
@@ -311,15 +409,23 @@ export default function Home() {
         skipAutoLoadRef.current = conv.id;
       }
 
+      const userMessageId = createLocalId();
+      const assistantId = createLocalId();
+      assistantMessageId = assistantId;
+
       // user msg + empty assistant bubble for streaming
       setMessages((prev) => [
         ...prev,
-        { role: "user", content: text },
-        { role: "assistant", content: "" },
+        { id: userMessageId, role: "user", content: text },
+        { id: assistantId, role: "assistant", content: "" },
       ]);
 
       const shouldForceWebSearch = forceWebSearch;
       setForceWebSearch(false);
+
+      abortControllerRef.current?.abort();
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
 
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -327,35 +433,72 @@ export default function Home() {
         body: JSON.stringify({
           message: text,
           conversationId,
-          modelMode,
+          modelMode: chosenMode,
           forceWebSearch: shouldForceWebSearch,
         }),
+        signal: abortController.signal,
       });
 
       if (!res.ok || !res.body) throw new Error("Stream failed");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let done = false;
+      let buffer = "";
+      let finished = false;
 
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
+      while (!finished) {
+        const { value, done } = await reader.read();
         if (value) {
-          const chunk = decoder.decode(value, { stream: !doneReading });
-          if (chunk) {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const idx = updated.length - 1;
-              if (idx >= 0 && updated[idx].role === "assistant") {
-                updated[idx] = {
-                  ...updated[idx],
-                  content: updated[idx].content + chunk,
-                };
+          buffer += decoder.decode(value, { stream: !done });
+          let newlineIndex = buffer.indexOf("\n");
+          while (newlineIndex !== -1) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            if (line) {
+              try {
+                const payload = JSON.parse(line);
+                if (payload.meta) {
+                  const meta = payload.meta as {
+                    usedModel?: string;
+                    usedModelMode?: ModelMode;
+                    usedWebSearch?: boolean;
+                    searchRecords?: SearchRecord[];
+                  };
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            usedModel: meta.usedModel,
+                            usedModelMode: meta.usedModelMode,
+                            usedWebSearch: meta.usedWebSearch,
+                            searchRecords: meta.searchRecords || [],
+                          }
+                        : msg
+                    )
+                  );
+                } else if (typeof payload.token === "string") {
+                  const token = payload.token as string;
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessageId
+                        ? { ...msg, content: msg.content + token }
+                        : msg
+                    )
+                  );
+                } else if (payload.done) {
+                  finished = true;
+                }
+              } catch (err) {
+                console.warn("Failed to parse stream chunk", err);
               }
-              return updated;
-            });
+            }
+            newlineIndex = buffer.indexOf("\n");
           }
+        }
+
+        if (done) {
+          finished = true;
         }
       }
 
@@ -368,35 +511,60 @@ export default function Home() {
               : c
           )
         );
-        await loadMessages(conversationId, { silent: true });
       }
+
+      refreshConversations();
     } catch (error) {
-      console.error(error);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const idx = updated.length - 1;
-        if (
-          idx >= 0 &&
-          updated[idx].role === "assistant" &&
-          updated[idx].content === ""
-        ) {
-          updated[idx].content = "Error contacting GPT. Try again.";
-          return updated;
+      if ((error as Error).name === "AbortError") {
+        console.warn("Chat request aborted");
+      } else {
+        console.error(error);
+        if (assistantMessageId) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? { ...msg, content: "Error contacting GPT. Try again." }
+                : msg
+            )
+          );
         }
-        return [
-          ...prev,
-          { role: "assistant", content: "Error contacting GPT. Try again." },
-        ];
-      });
+      }
     } finally {
-      setIsSending(false);
+      abortControllerRef.current = null;
+      setIsStreaming(false);
     }
   }
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  }
+
+  async function handleRetryWithModel(targetMode: ModelMode) {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    setModelMode(targetMode);
+    setOpenModelMenuId(null);
+    await sendMessage({
+      messageOverride: lastUser.content,
+      modelOverride: targetMode,
+    });
+  }
+
+  function handleStopGeneration() {
+    abortControllerRef.current?.abort();
+  }
+
+  async function handleCopyMessage(message: ChatMessage, fallbackId?: string) {
+    if (!message.content) return;
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id ?? fallbackId ?? null);
+      setTimeout(() => setCopiedMessageId(null), 1500);
+    } catch (err) {
+      console.error("Copy failed", err);
     }
   }
 
@@ -783,56 +951,203 @@ export default function Home() {
           /* CHAT VIEW */
           <>
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
-              <div className="mx-auto flex max-w-2xl flex-col space-y-4">
-                {isLoadingMessages && (
-                  <div className="mb-2 text-center text-xs text-zinc-500">
-                    Loading messages...
-                  </div>
-                )}
-
-                {!isLoadingMessages && messages.length === 0 && (
-                  <div className="mt-10 text-center text-sm text-zinc-400">
-                    Start chatting — GPT-5.1 chat is streaming live.
-                  </div>
-                )}
-
-                {messages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`flex ${
-                      m.role === "user" ? "justify-end" : "justify-start"
-                    }`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed md:max-w-[70%] ${
-                        m.role === "user"
-                          ? "bg-[#1e4fd8] text-white"
-                          : "bg-[#202123] text-zinc-100"
-                      }`}
-                    >
-                      {m.role === "assistant" ? (
-                        <div className="space-y-3 text-[15px] leading-relaxed">
-                          <div className="prose prose-invert max-w-none text-sm">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm, remarkBreaks]}
-                              rehypePlugins={[rehypeRaw]}
-                              components={markdownComponents}
-                            >
-                              {m.content}
-                            </ReactMarkdown>
-                          </div>
-                        </div>
-                      ) : (
-                        m.content
-                      )}
+            <div className="relative flex-1">
+              <div
+                ref={chatContainerRef}
+                className="h-full overflow-y-auto overflow-x-hidden px-4 py-6"
+              >
+                <div className="mx-auto flex max-w-2xl flex-col space-y-4">
+                  {isLoadingMessages && (
+                    <div className="mb-2 text-center text-xs text-zinc-500">
+                      Loading messages...
                     </div>
-                  </div>
-                ))}
+                  )}
 
-                {/* Auto-scroll anchor */}
-                <div ref={messagesEndRef} />
+                  {!isLoadingMessages && messages.length === 0 && (
+                    <div className="mt-10 text-center text-sm text-zinc-400">
+                      Start chatting — GPT-5.1 chat is streaming live.
+                    </div>
+                  )}
+
+                  {messages.map((m, i) => {
+                    const messageId = m.id ?? `msg-${i}`;
+                    const isAssistant = m.role === "assistant";
+                    const hasSources = Boolean(
+                      isAssistant &&
+                        m.usedWebSearch &&
+                        (m.searchRecords?.length || 0) > 0
+                    );
+
+                    return (
+                      <div
+                        key={messageId}
+                        className={`flex ${
+                          isAssistant ? "justify-start" : "justify-end"
+                        }`}
+                      >
+                        <div
+                          className={`relative max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed md:max-w-[70%] ${
+                            isAssistant
+                              ? "bg-[#202123] text-zinc-100"
+                              : "bg-[#1e4fd8] text-white"
+                          }`}
+                        >
+                          {isAssistant ? (
+                            <>
+                              <div className="space-y-3 text-[15px] leading-relaxed">
+                                <div className="prose prose-invert max-w-none text-sm">
+                                  <ReactMarkdown
+                                    remarkPlugins={[remarkGfm, remarkBreaks]}
+                                    rehypePlugins={[rehypeRaw]}
+                                    components={markdownComponents}
+                                  >
+                                    {m.content}
+                                  </ReactMarkdown>
+                                </div>
+                              </div>
+
+                              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                                <button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleCopyMessage(m, messageId);
+                                  }}
+                                  className="rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                >
+                                  {copiedMessageId === messageId ? "Copied" : "Copy"}
+                                </button>
+
+                                {hasSources && (
+                                  <>
+                                    <span
+                                      className="h-4 w-px bg-[#38383d]"
+                                      aria-hidden
+                                    />
+                                    <button
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setExpandedSourcesId((prev) =>
+                                          prev === messageId ? null : messageId
+                                        );
+                                      }}
+                                      className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                      aria-expanded={expandedSourcesId === messageId}
+                                    >
+                                      {expandedSourcesId === messageId
+                                        ? "Hide sources"
+                                        : "Sources"}
+                                    </button>
+                                  </>
+                                )}
+
+                                {m.usedModel && (
+                                  <>
+                                    <span
+                                      className="h-4 w-px bg-[#38383d]"
+                                      aria-hidden
+                                    />
+                                    <div className="relative">
+                                      <button
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setOpenModelMenuId((prev) =>
+                                            prev === messageId ? null : messageId
+                                          );
+                                        }}
+                                        className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
+                                      >
+                                        {m.usedModel}
+                                      </button>
+
+                                      {openModelMenuId === messageId && (
+                                        <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
+                                          {(Object.entries(
+                                            MODEL_NAME_MAP
+                                          ) as [Exclude<ModelMode, "auto">, string][]).map(
+                                            ([mode, name]) => (
+                                              <button
+                                                key={mode}
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                  handleRetryWithModel(mode);
+                                                }}
+                                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                                              >
+                                                <span>Retry with {name}</span>
+                                                {m.usedModelMode === mode && (
+                                                  <span className="text-[10px] text-zinc-500">
+                                                    current
+                                                  </span>
+                                                )}
+                                              </button>
+                                            )
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+
+                              {hasSources && expandedSourcesId === messageId && (
+                                <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
+                                  {m.searchRecords?.map((record, idx) => (
+                                    <div key={`${record.query}-${idx}`} className="space-y-2">
+                                      <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+                                        {record.query}
+                                      </div>
+                                      {record.results.length === 0 ? (
+                                        <p className="text-[12px] text-zinc-400">
+                                          {record.summary}
+                                        </p>
+                                      ) : (
+                                        <div className="space-y-2">
+                                          {record.results.map((result, sourceIdx) => (
+                                            <div
+                                              key={`${result.link}-${sourceIdx}`}
+                                              className="rounded-xl bg-[#1b1b20] p-2"
+                                            >
+                                              <div className="text-[13px] font-semibold text-zinc-100">
+                                                {result.title}
+                                              </div>
+                                              <div className="text-[11px] text-zinc-500">
+                                                {result.displayLink}
+                                              </div>
+                                              <p className="mt-1 text-[12px] text-zinc-300">
+                                                {result.snippet}
+                                              </p>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            m.content
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+
+              {showScrollButton && (
+                <button
+                  onClick={() => {
+                    scrollToBottom({ behavior: "smooth" });
+                    setAutoScrollEnabled(true);
+                    setShowScrollButton(false);
+                  }}
+                  className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#15151a] p-3 text-white shadow-lg ring-1 ring-black/40"
+                  aria-label="Scroll to latest"
+                >
+                  ↓
+                </button>
+              )}
             </div>
 
             {/* Input */}
@@ -876,22 +1191,45 @@ export default function Home() {
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <input
-                    className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type a message…"
-                  />
+                <div className="flex items-end gap-3">
+                  <div className="relative flex-1">
+                    <textarea
+                      ref={textareaRef}
+                      className="w-full resize-none rounded-3xl border border-[#3f3f46] bg-[#303030] px-4 py-3 pr-16 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="Message ChatGPT…"
+                      rows={1}
+                    />
 
-                  <button
-                    onClick={sendMessage}
-                    disabled={isSending || !input.trim()}
-                    className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#2658e4] disabled:opacity-50"
-                  >
-                    Send
-                  </button>
+                    <button
+                      onClick={() => sendMessage()}
+                      disabled={isStreaming || !input.trim()}
+                      className="absolute bottom-2.5 right-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-[#1e4fd8] text-white shadow-lg transition hover:bg-[#2a5af2] disabled:opacity-50"
+                      aria-label="Send message"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path d="M12 5v14m0 0-6-6m6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  {isStreaming && (
+                    <button
+                      onClick={handleStopGeneration}
+                      className="rounded-full border border-red-500 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-red-300 hover:bg-red-500/10"
+                    >
+                      ⏹ Stop
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

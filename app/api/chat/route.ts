@@ -40,6 +40,12 @@ type HistoryMessage = {
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
 
+type SearchRecord = {
+  query: string;
+  results: GoogleSearchResult[];
+  summary: string;
+};
+
 const MODEL_MAP = {
   nano: "gpt-5-nano-2025-08-07",
   mini: "gpt-5-mini-2025-08-07",
@@ -203,12 +209,21 @@ export async function POST(req: Request) {
     const messagesWithTools: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       ...baseMessages,
     ];
+    const searchRecords: SearchRecord[] = [];
+    const recordSearch = (record: SearchRecord) => {
+      searchRecords.push({
+        query: record.query,
+        summary: record.summary,
+        results: record.results.slice(0, 5),
+      });
+    };
 
     const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
     if (shouldForceSearch) {
       await injectManualSearchResult(
         messagesWithTools,
-        deriveSearchQuery(userText)
+        deriveSearchQuery(userText),
+        recordSearch
       );
     }
 
@@ -216,6 +231,7 @@ export async function POST(req: Request) {
       openai,
       model: MODEL_MAP[resolvedModelKey],
       messages: messagesWithTools,
+      onSearchRecord: recordSearch,
     });
 
     const stream = await openai.chat.completions.create({
@@ -228,20 +244,45 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
     let fullAssistantMessage = "";
+    const usedWebSearch = searchRecords.length > 0;
+    const metadata = {
+      usedModel: MODEL_MAP[resolvedModelKey],
+      usedModelMode: resolvedModelKey,
+      requestedModelMode: modelMode,
+      usedWebSearch,
+      searchRecords,
+    };
+
+    const firstUserMessage = [
+      ...historyForModel,
+      { role: "user" as const, content: userText },
+    ].find((msg) => msg.role === "user")?.content;
+    const isFirstAssistantResponse = !historyForModel.some(
+      (msg) => msg.role === "assistant"
+    );
 
     const readable = new ReadableStream({
       async start(controller) {
+        const enqueueJson = (payload: Record<string, unknown>) => {
+          controller.enqueue(
+            encoder.encode(`${JSON.stringify(payload)}\n`)
+          );
+        };
+
+        enqueueJson({ meta: metadata });
+
         try {
           for await (const chunk of stream) {
             const token = chunk.choices[0]?.delta?.content;
             if (token) {
               fullAssistantMessage += token;
-              controller.enqueue(encoder.encode(token));
+              enqueueJson({ token });
             }
           }
         } catch (err) {
           console.error("Stream error:", err);
         } finally {
+          enqueueJson({ done: true });
           if (assistantRow?.id) {
             try {
               await supabase
@@ -252,6 +293,18 @@ export async function POST(req: Request) {
               console.error("Failed to persist assistant response", persistErr);
             }
           }
+
+          if (isFirstAssistantResponse && fullAssistantMessage.trim()) {
+            await ensureChatTitle({
+              openai,
+              supabase,
+              conversationId,
+              userMessage: firstUserMessage ?? userText,
+              assistantMessage: fullAssistantMessage,
+              modelMode,
+            });
+          }
+
           controller.close();
         }
       },
@@ -259,7 +312,7 @@ export async function POST(req: Request) {
 
     return new Response(readable, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
       },
     });
@@ -303,7 +356,6 @@ async function selectModelKey({
           content: buildRouterPrompt(history, userText),
         },
       ],
-      temperature: 0,
     });
 
     const choice = completion.choices[0]?.message?.content?.trim().toLowerCase();
@@ -332,12 +384,14 @@ type ToolLoopArgs = {
   openai: OpenAI;
   model: string;
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+  onSearchRecord?: (record: SearchRecord) => void;
 };
 
 async function runToolCallLoop({
   openai,
   model,
   messages,
+  onSearchRecord,
 }: ToolLoopArgs): Promise<void> {
   const MAX_ITERATIONS = 3;
 
@@ -380,10 +434,13 @@ async function runToolCallLoop({
         console.warn("Failed to parse google_search arguments", error);
       }
 
-      const toolResponse = await createToolResponseMessage(
+      const { message: toolResponse, record } = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
         query
       );
+      if (record && onSearchRecord) {
+        onSearchRecord(record);
+      }
       messages.push(toolResponse);
     }
   }
@@ -391,7 +448,8 @@ async function runToolCallLoop({
 
 async function injectManualSearchResult(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-  query: string
+  query: string,
+  onSearchRecord?: (record: SearchRecord) => void
 ) {
   const trimmed = query.trim();
   if (!trimmed) {
@@ -414,30 +472,52 @@ async function injectManualSearchResult(
     ],
   });
 
-  const toolResponse = await createToolResponseMessage(toolCallId, trimmed);
+  const { message: toolResponse, record } = await createToolResponseMessage(
+    toolCallId,
+    trimmed
+  );
+  if (record && onSearchRecord) {
+    onSearchRecord(record);
+  }
   messages.push(toolResponse);
 }
 
 async function createToolResponseMessage(
   toolCallId: string,
   query: string
-): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam> {
+): Promise<{
+  message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
+  record: SearchRecord | null;
+}> {
   const trimmed = query.trim();
   if (!trimmed) {
     return {
-      role: "tool",
-      tool_call_id: toolCallId,
-      content: "Web search skipped: missing query.",
+      message: {
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: "Web search skipped: missing query.",
+      },
+      record: null,
     };
   }
 
   try {
     const results = await googleSearch(trimmed);
     const summary = formatSearchSummary(trimmed, results);
+    console.info(
+      `Google search: query='${trimmed}' results=${results.length}`
+    );
     return {
-      role: "tool",
-      tool_call_id: toolCallId,
-      content: summary,
+      message: {
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: summary,
+      },
+      record: {
+        query: trimmed,
+        results,
+        summary,
+      },
     };
   } catch (error) {
     const message =
@@ -449,10 +529,14 @@ async function createToolResponseMessage(
             ? error.message
             : "Unknown Google search error";
 
+    console.warn(`Google search skipped: ${message}`);
     return {
-      role: "tool",
-      tool_call_id: toolCallId,
-      content: `Web search failed: ${message}`,
+      message: {
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: `Web search failed: ${message}`,
+      },
+      record: null,
     };
   }
 }
@@ -468,4 +552,82 @@ function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
   });
 
   return `Web search results for "${query}":\n${lines.join("\n")}\nUse the numbered results above to ground your response.`;
+}
+
+async function ensureChatTitle({
+  openai,
+  supabase,
+  conversationId,
+  userMessage,
+  assistantMessage,
+  modelMode,
+}: {
+  openai: OpenAI;
+  supabase: ReturnType<typeof getSupabaseClient>;
+  conversationId: string;
+  userMessage: string;
+  assistantMessage: string;
+  modelMode: ModelMode;
+}) {
+  const trimmedAssistant = assistantMessage.trim();
+  const trimmedUser = userMessage.trim();
+
+  if (!trimmedAssistant || !trimmedUser) {
+    return;
+  }
+
+  const { data: conversation, error } = await supabase
+    .from("conversations")
+    .select("title")
+    .eq("id", conversationId)
+    .single();
+
+  if (error) {
+    console.warn("Unable to load conversation for title", error);
+    return;
+  }
+
+  const existingTitle = (conversation?.title || "").trim();
+  if (existingTitle && existingTitle !== "New chat" && existingTitle !== "Untitled chat") {
+    return;
+  }
+
+  const titleModelKey: keyof typeof MODEL_MAP =
+    modelMode === "auto" ? "nano" : modelMode;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: MODEL_MAP[titleModelKey],
+      temperature: 0.2,
+      max_tokens: 32,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You write ultra-short, catchy chat titles (max 6 words). Do not add punctuation or quotes.",
+        },
+        {
+          role: "user",
+          content: `User message:\n${trimmedUser}\n\nAssistant reply:\n${trimmedAssistant}\n\nTitle:`,
+        },
+      ],
+    });
+
+    const rawTitle = completion.choices[0]?.message?.content?.trim() || "";
+    const cleanTitle = rawTitle
+      .replace(/^[-\s"']+/, "")
+      .replace(/[-\s"']+$/, "")
+      .slice(0, 60);
+
+    if (!cleanTitle) {
+      return;
+    }
+
+    await supabase
+      .from("conversations")
+      .update({ title: cleanTitle })
+      .eq("id", conversationId);
+  } catch (err) {
+    console.warn("Title generation failed", err);
+  }
 }
