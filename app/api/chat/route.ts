@@ -8,6 +8,7 @@ import {
   MissingGoogleConfigError,
   googleSearch,
 } from "@/lib/googleSearch";
+import type { GoogleSearchResult } from "@/lib/googleSearch";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -35,6 +36,32 @@ function getSupabaseClient() {
 type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
+};
+
+type ModelMode = "auto" | "nano" | "mini" | "full";
+
+const MODEL_MAP = {
+  nano: "gpt-5.1-nano",
+  mini: "gpt-5.1-mini",
+  full: "gpt-5.1",
+} as const;
+
+const GOOGLE_SEARCH_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "google_search",
+    description: "Search the web using Google Custom Search",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The query to send to Google Custom Search",
+        },
+      },
+      required: ["query"],
+    },
+  },
 };
 
 const SEARCH_KEYWORDS = [
@@ -75,6 +102,13 @@ export async function POST(req: Request) {
     const body = await req.json();
     const userText = (body.message ?? "").toString().trim();
     const conversationId = (body.conversationId ?? "").toString();
+    const requestedModeRaw =
+      typeof body.modelMode === "string" ? body.modelMode : "auto";
+    const allowedModes: ModelMode[] = ["auto", "nano", "mini", "full"];
+    const modelMode = allowedModes.includes(requestedModeRaw as ModelMode)
+      ? (requestedModeRaw as ModelMode)
+      : "auto";
+    const forceWebSearch = Boolean(body.forceWebSearch);
 
     if (!userText) {
       return NextResponse.json(
@@ -115,39 +149,6 @@ export async function POST(req: Request) {
         (m.role === "user" || m.role === "assistant")
     );
 
-    let webSearchContext: string | null = null;
-
-    if (shouldSearchWeb(userText)) {
-      const query = deriveSearchQuery(userText);
-      try {
-        const results = await googleSearch(query);
-        if (results.length > 0) {
-          const topResults = results.slice(0, 3);
-          const summary = topResults
-            .map(
-              (item, index) =>
-                `${index + 1}. ${item.title} (${item.displayLink}) - ${item.snippet}`
-            )
-            .join("\n");
-
-          webSearchContext =
-            `Web search results for "${query}":\n${summary}\nUse the numbered results above to ground your response.`;
-        }
-      } catch (error: unknown) {
-        if (error instanceof MissingGoogleConfigError) {
-          console.warn("Google search skipped:", error.message);
-        } else {
-          const message =
-            error instanceof GoogleSearchRequestError
-              ? error.message
-              : error instanceof Error
-                ? error.message
-                : "Unknown search error";
-          console.error("Google search failed:", message);
-        }
-      }
-    }
-
     const { error: userInsertError } = await supabase
       .from("messages")
       .insert({
@@ -174,26 +175,52 @@ export async function POST(req: Request) {
       console.error("Failed to seed assistant message", assistantInsertError);
     }
 
-    const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+    const openai = getOpenAIClient();
+
+    const resolvedModelKey = await selectModelKey({
+      openai,
+      history: historyForModel,
+      userText,
+      requestedMode: modelMode,
+    });
+
+    const historyMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
+      historyForModel.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+
+    const baseMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client. Use the conversation history to respond naturally. Be concise by default unless the user asks for detail.",
+          "You are a helpful assistant inside a custom LLM client. Use the conversation history to respond naturally. Be concise by default unless the user asks for detail. Cite sources when referencing web results.",
       },
+      ...historyMessages,
+      { role: "user", content: userText },
     ];
 
-    if (webSearchContext) {
-      messages.push({ role: "system", content: webSearchContext });
+    const messagesWithTools: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      ...baseMessages,
+    ];
+
+    const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
+    if (shouldForceSearch) {
+      await injectManualSearchResult(messagesWithTools, deriveSearchQuery(userText));
     }
 
-    messages.push(...historyForModel, { role: "user", content: userText });
+    await runToolCallLoop({
+      openai,
+      model: MODEL_MAP[resolvedModelKey],
+      messages: messagesWithTools,
+    });
 
-    // ⚡ Fast streaming GPT-5.1 chat model
-    const openai = getOpenAIClient();
     const stream = await openai.chat.completions.create({
-      model: "gpt-5-mini-2025-08-07",
-      messages,
+      model: MODEL_MAP[resolvedModelKey],
+      messages: messagesWithTools,
       stream: true,
+      tools: [GOOGLE_SEARCH_TOOL],
+      tool_choice: "none",
     });
 
     const encoder = new TextEncoder();
@@ -240,4 +267,201 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
+}
+
+type SelectModelArgs = {
+  openai: OpenAI;
+  history: HistoryMessage[];
+  userText: string;
+  requestedMode: ModelMode;
+};
+
+async function selectModelKey({
+  openai,
+  history,
+  userText,
+  requestedMode,
+}: SelectModelArgs): Promise<keyof typeof MODEL_MAP> {
+  if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
+    return requestedMode;
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: MODEL_MAP.nano,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Given the user message and recent context, output ONLY one of: nano, mini, full. Use nano for trivial / short questions, mini for most normal questions, full for complex, multi-step, or high-stakes reasoning.",
+        },
+        {
+          role: "user",
+          content: buildRouterPrompt(history, userText),
+        },
+      ],
+      temperature: 0,
+    });
+
+    const choice = completion.choices[0]?.message?.content?.trim().toLowerCase();
+    if (choice === "nano" || choice === "mini" || choice === "full") {
+      return choice;
+    }
+  } catch (error) {
+    console.warn("Model router failed, defaulting to mini", error);
+  }
+
+  return "mini";
+}
+
+function buildRouterPrompt(history: HistoryMessage[], userText: string) {
+  const recent = history.slice(-6).map((message) => {
+    const speaker = message.role === "user" ? "User" : "Assistant";
+    return `${speaker}: ${message.content}`;
+  });
+
+  const recentBlock = recent.length > 0 ? recent.join("\n") : "(no prior messages)";
+
+  return `Recent conversation:\n${recentBlock}\n\nLatest user request:\n${userText}\n\nRespond with one word: nano, mini, or full.`;
+}
+
+type ToolLoopArgs = {
+  openai: OpenAI;
+  model: string;
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+};
+
+async function runToolCallLoop({
+  openai,
+  model,
+  messages,
+}: ToolLoopArgs): Promise<void> {
+  const MAX_ITERATIONS = 3;
+
+  for (let i = 0; i < MAX_ITERATIONS; i += 1) {
+    const completion = await openai.chat.completions.create({
+      model,
+      messages,
+      tools: [GOOGLE_SEARCH_TOOL],
+      tool_choice: "auto",
+    });
+
+    const choice = completion.choices[0];
+    const toolCalls = choice?.message?.tool_calls;
+
+    if (!toolCalls || toolCalls.length === 0) {
+      break;
+    }
+
+    messages.push({
+      role: "assistant",
+      content: choice.message?.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      if (toolCall.type !== "function" || toolCall.function?.name !== "google_search") {
+        continue;
+      }
+
+      const query = parseSearchQuery(toolCall.function?.arguments);
+      const toolResponse = await createToolResponseMessage(
+        toolCall.id ?? `tool-${Date.now()}`,
+        query
+      );
+      messages.push(toolResponse);
+    }
+  }
+}
+
+async function injectManualSearchResult(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  query: string
+) {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const toolCallId = `forced-search-${Date.now()}`;
+  messages.push({
+    role: "assistant",
+    content: "",
+    tool_calls: [
+      {
+        id: toolCallId,
+        type: "function",
+        function: {
+          name: "google_search",
+          arguments: JSON.stringify({ query: trimmed }),
+        },
+      },
+    ],
+  });
+
+  const toolResponse = await createToolResponseMessage(toolCallId, trimmed);
+  messages.push(toolResponse);
+}
+
+function parseSearchQuery(rawArgs: string | undefined) {
+  if (!rawArgs) return "";
+  try {
+    const parsed = JSON.parse(rawArgs) as { query?: unknown };
+    return typeof parsed.query === "string" ? parsed.query : "";
+  } catch (error) {
+    console.warn("Failed to parse google_search arguments", error);
+    return "";
+  }
+}
+
+async function createToolResponseMessage(
+  toolCallId: string,
+  query: string
+): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return {
+      role: "tool",
+      tool_call_id: toolCallId,
+      content: "Web search skipped: missing query.",
+    };
+  }
+
+  try {
+    const results = await googleSearch(trimmed);
+    const summary = formatSearchSummary(trimmed, results);
+    return {
+      role: "tool",
+      tool_call_id: toolCallId,
+      content: summary,
+    };
+  } catch (error) {
+    const message =
+      error instanceof MissingGoogleConfigError
+        ? error.message
+        : error instanceof GoogleSearchRequestError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Unknown Google search error";
+
+    return {
+      role: "tool",
+      tool_call_id: toolCallId,
+      content: `Web search failed: ${message}`,
+    };
+  }
+}
+
+function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
+  if (!results.length) {
+    return `Web search results for "${query}":\nNo results found.`;
+  }
+
+  const lines = results.slice(0, 5).map((item, index) => {
+    const snippet = item.snippet?.replace(/\s+/g, " ") ?? "";
+    return `${index + 1}. ${item.title} (${item.displayLink}) - ${snippet}`;
+  });
+
+  return `Web search results for "${query}":\n${lines.join("\n")}\nUse the numbered results above to ground your response.`;
 }
