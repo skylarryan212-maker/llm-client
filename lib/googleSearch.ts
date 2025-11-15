@@ -19,7 +19,15 @@ export class GoogleSearchRequestError extends Error {
   }
 }
 
-export async function googleSearch(query: string): Promise<GoogleSearchResult[]> {
+type GoogleSearchOptions = {
+  /** Bias toward more recent results when true. */
+  preferFreshResults?: boolean;
+};
+
+export async function googleSearch(
+  query: string,
+  options: GoogleSearchOptions = {}
+): Promise<GoogleSearchResult[]> {
   const apiKey = process.env.GOOGLE_API_KEY;
   const cx = process.env.GOOGLE_CX;
 
@@ -30,14 +38,20 @@ export async function googleSearch(query: string): Promise<GoogleSearchResult[]>
     throw new MissingGoogleConfigError();
   }
 
+  const preferFreshResults = Boolean(options.preferFreshResults);
+  const adjustedQuery = preferFreshResults ? `${query} latest` : query;
+
   console.info(
-    `[googleSearch] Executing query="${query}" (key len=${apiKey.length}, cx len=${cx.length})`
+    `[googleSearch] Executing query="${adjustedQuery}" (fresh=${preferFreshResults})`
   );
 
   const url = new URL("https://www.googleapis.com/customsearch/v1");
   url.searchParams.set("key", apiKey);
   url.searchParams.set("cx", cx);
-  url.searchParams.set("q", query);
+  url.searchParams.set("q", adjustedQuery);
+  if (preferFreshResults) {
+    url.searchParams.set("sort", "date");
+  }
 
   let response: Response;
   try {
