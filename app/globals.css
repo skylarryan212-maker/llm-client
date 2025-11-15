@@ -34,6 +34,14 @@ body {
   white-space: pre-wrap; /* keep line breaks inside paragraphs */
 }
 
+.prose {
+  color: inherit;
+}
+
+.prose code {
+  font-family: var(--font-geist-mono);
+}
+
 /* Paragraph spacing */
 .markdown-body p {
   margin: 0.15rem 0;

@@ -7,10 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
+import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
 
 type ChatMessage = {
@@ -40,9 +41,34 @@ const TEST_USER_ID = "test-user-1";
 const MODEL_SEGMENTS: { value: ModelMode; label: string; hint: string }[] = [
   { value: "auto", label: "Auto", hint: "Router" },
   { value: "nano", label: "Fast", hint: "Nano" },
-  { value: "mini", label: "Balanced", hint: "Mini" },
-  { value: "full", label: "Max", hint: "Full" },
+  { value: "mini", label: "Normal", hint: "Mini" },
+  { value: "full", label: "Deep", hint: "5.1" },
 ];
+
+const markdownComponents: Components = {
+  p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
+  ul: ({ children }) => (
+    <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>
+  ),
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  code({ inline, children }: any) {
+    if (inline) {
+      return (
+        <code className="rounded-md bg-[#2d2d30] px-1.5 py-0.5 text-[13px]">
+          {children}
+        </code>
+      );
+    }
+    return (
+      <pre className="mt-2 overflow-x-auto rounded-lg bg-[#111111] px-3 py-2 text-[13px]">
+        <code>{children}</code>
+      </pre>
+    );
+  },
+};
 
 function latestConvTimeForProject(projectId: string, convs: ConversationMeta[]) {
   const filtered = convs.filter(
@@ -62,72 +88,6 @@ function getNewestConversation(conversations: ConversationMeta[]) {
     (b.created_at || "").localeCompare(a.created_at || "")
   )[0];
 }
-
-const markdownComponents: Components = {
-  h1: ({ children }) => (
-    <h1 className="mt-4 mb-2 text-xl font-semibold text-zinc-100">{children}</h1>
-  ),
-  h2: ({ children }) => (
-    <h2 className="mt-4 mb-2 text-lg font-semibold text-zinc-100">{children}</h2>
-  ),
-  h3: ({ children }) => (
-    <h3 className="mt-3 mb-2 text-base font-semibold text-zinc-100">{children}</h3>
-  ),
-  p: ({ children }) => (
-    <p className="my-2 leading-relaxed text-zinc-100">{children}</p>
-  ),
-  a: ({ children, href }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="text-[#8ab4ff] underline decoration-[#8ab4ff]/60"
-    >
-      {children}
-    </a>
-  ),
-  ul: ({ children }) => (
-    <ul className="my-3 list-disc space-y-1 pl-6 text-zinc-200">{children}</ul>
-  ),
-  ol: ({ children }) => (
-    <ol className="my-3 list-decimal space-y-1 pl-6 text-zinc-200">{children}</ol>
-  ),
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  code({ inline, children }: { inline?: boolean; children?: ReactNode }) {
-    if (inline) {
-      return (
-        <code className="rounded-md bg-[#2d2d30] px-1.5 py-0.5 text-[13px] text-zinc-100">
-          {children}
-        </code>
-      );
-    }
-    return (
-      <pre className="mt-3 overflow-x-auto rounded-xl border border-[#2e2e32] bg-[#151515] p-4 text-[13px] leading-relaxed text-zinc-100">
-        <code>{children}</code>
-      </pre>
-    );
-  },
-  blockquote: ({ children }) => (
-    <blockquote className="my-3 border-l-4 border-[#3b3b3f] pl-4 text-zinc-300">
-      {children}
-    </blockquote>
-  ),
-  table: ({ children }) => (
-    <div className="my-4 overflow-x-auto rounded-xl border border-[#2e2e32]">
-      <table className="w-full border-collapse text-left text-sm text-zinc-200">
-        {children}
-      </table>
-    </div>
-  ),
-  th: ({ children }) => (
-    <th className="border border-[#2e2e32] bg-[#1f1f23] px-3 py-2 text-sm font-medium text-zinc-100">
-      {children}
-    </th>
-  ),
-  td: ({ children }) => (
-    <td className="border border-[#2e2e32] px-3 py-2 text-sm text-zinc-200">{children}</td>
-  ),
-};
 
 export default function Home() {
   // ------------------------------------------------------------
@@ -358,6 +318,9 @@ export default function Home() {
         { role: "assistant", content: "" },
       ]);
 
+      const shouldForceWebSearch = forceWebSearch;
+      setForceWebSearch(false);
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -365,7 +328,7 @@ export default function Home() {
           message: text,
           conversationId,
           modelMode,
-          forceWebSearch,
+          forceWebSearch: shouldForceWebSearch,
         }),
       });
 
@@ -850,12 +813,15 @@ export default function Home() {
                     >
                       {m.role === "assistant" ? (
                         <div className="space-y-3 text-[15px] leading-relaxed">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkBreaks]}
-                            components={markdownComponents}
-                          >
-                            {m.content}
-                          </ReactMarkdown>
+                          <div className="prose prose-invert max-w-none text-sm">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm, remarkBreaks]}
+                              rehypePlugins={[rehypeRaw]}
+                              components={markdownComponents}
+                            >
+                              {m.content}
+                            </ReactMarkdown>
+                          </div>
                         </div>
                       ) : (
                         m.content
