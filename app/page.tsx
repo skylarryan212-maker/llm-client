@@ -335,6 +335,7 @@ export default function Home() {
   );
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
+  const canSendMessage = input.trim().length > 0;
 
   // ------------------------------------------------------------
   // HELPERS
@@ -568,6 +569,7 @@ export default function Home() {
 
   function handleStopGeneration() {
     abortControllerRef.current?.abort();
+    setIsStreaming(false);
   }
 
   async function handleCopyMessage(message: ChatMessage, fallbackId?: string) {
@@ -772,7 +774,7 @@ export default function Home() {
   // RENDER
   // ------------------------------------------------------------
   return (
-    <div className="flex h-screen min-h-0 overflow-hidden bg-[#212121] text-zinc-100">
+    <div className="flex h-screen min-h-0 bg-[#212121] text-zinc-100">
       {/* Desktop Sidebar */}
       <aside className="hidden w-64 min-h-0 flex-col border-r border-[#202123] bg-[#181818] md:flex">
         <SidebarSections />
@@ -802,7 +804,7 @@ export default function Home() {
       )}
 
       {/* Main Content */}
-      <main className="flex flex-1 min-h-0 flex-col overflow-hidden bg-[#212121]">
+      <main className="flex flex-1 min-h-0 flex-col bg-[#212121]">
         {/* Header */}
         <header className="flex shrink-0 items-center justify-between border-b border-[#202123] px-4 py-3">
           <div className="flex items-center gap-2">
@@ -964,12 +966,12 @@ export default function Home() {
           /* CHAT VIEW */
           <>
             {/* Messages */}
-            <div className="relative flex-1">
+            <div className="relative flex-1 min-h-0">
               <div
                 ref={chatContainerRef}
-                className="h-full overflow-y-auto overflow-x-hidden px-4 py-6"
+                className="flex h-full flex-col overflow-y-auto overflow-x-hidden px-4 py-6 pb-32"
               >
-                <div className="mx-auto flex max-w-2xl flex-col space-y-4">
+                <div className="mx-auto flex max-w-2xl flex-col space-y-4 pb-6">
                   {isLoadingMessages && (
                     <div className="mb-2 text-center text-xs text-zinc-500">
                       Loading messages...
@@ -1158,7 +1160,7 @@ export default function Home() {
               {showScrollButton && (
                 <button
                   onClick={handleJumpToBottom}
-                  className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#15151a] p-3 text-white shadow-lg ring-1 ring-black/40 transition hover:bg-[#1f1f25]"
+                  className="pointer-events-auto absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-[#15151a]/90 px-4 py-2 text-sm text-white shadow-xl transition hover:bg-[#1f1f25]"
                   aria-label="Jump to latest message"
                 >
                   <svg
@@ -1218,28 +1220,71 @@ export default function Home() {
                   </button>
                 </div>
 
-                <div className="flex items-end gap-3">
-                  <div className="relative flex-1">
-                    <textarea
-                      ref={textareaRef}
-                      className="w-full resize-none rounded-3xl border border-[#3f3f46] bg-[#303030] px-4 py-3 pr-16 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
-                      value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={handleKeyDown}
-                      placeholder="Message ChatGPT…"
-                      rows={1}
-                    />
+                <div className="flex items-center">
+                  <div className="flex w-full items-center gap-2 rounded-full border border-[#3f3f46] bg-[#2c2c31] px-2 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
+                    <button
+                      type="button"
+                      aria-label="Insert content"
+                      onClick={() => textareaRef.current?.focus()}
+                      className="flex h-11 w-11 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-5 w-5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                        strokeLinecap="round"
+                      >
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                    </button>
+
+                    <div className="flex-1 px-1">
+                      <textarea
+                        ref={textareaRef}
+                        className="max-h-40 min-h-[48px] w-full resize-none border-none bg-transparent px-0 text-[15px] leading-6 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Message the assistant…"
+                        rows={1}
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      aria-label="Voice input (coming soon)"
+                      onClick={() => textareaRef.current?.focus()}
+                      className="flex h-11 w-11 items-center justify-center rounded-full text-white/70 transition hover:text-white"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-5 w-5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.8}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                        <path d="M19 11.5a7 7 0 0 1-14 0" />
+                        <path d="M12 18.5v2" />
+                      </svg>
+                    </button>
 
                     <button
                       type="button"
                       onClick={
                         isStreaming ? handleStopGeneration : () => sendMessage()
                       }
-                      disabled={!isStreaming && !input.trim()}
-                      className={`absolute right-2.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-white shadow-lg transition focus:outline-none ${
+                      disabled={!isStreaming && !canSendMessage}
+                      className={`ml-1 flex h-12 w-12 items-center justify-center rounded-full bg-[#00a86b] text-white shadow-lg transition focus:outline-none ${
                         isStreaming
-                          ? "bg-red-500 hover:bg-red-500/90"
-                          : "bg-[#1e4fd8] hover:bg-[#2a5af2] disabled:opacity-50"
+                          ? "hover:bg-[#00915c]"
+                          : "hover:bg-[#00bf78] disabled:opacity-50"
                       }`}
                       aria-label={isStreaming ? "Stop response" : "Send message"}
                     >
@@ -1247,10 +1292,10 @@ export default function Home() {
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
                           viewBox="0 0 24 24"
-                          className="h-3.5 w-3.5"
+                          className="h-4 w-4"
                           fill="currentColor"
                         >
-                          <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
                         </svg>
                       ) : (
                         <svg
@@ -1260,12 +1305,11 @@ export default function Home() {
                           fill="none"
                           stroke="currentColor"
                           strokeWidth={2}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
                         >
-                          <path
-                            d="M12 5v14m0 0-6-6m6 6 6-6"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
+                          <path d="M12 19V5" />
+                          <path d="M6 11l6-6 6 6" />
                         </svg>
                       )}
                     </button>
