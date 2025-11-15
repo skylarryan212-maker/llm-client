@@ -70,6 +70,70 @@ const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
   full: "gpt-5.1-2025-11-13",
 };
 
+const MAX_INPUT_HEIGHT = 176;
+const MAX_MESSAGE_WIDTH = 900;
+const AUTO_SCROLL_THRESHOLD_PX = 140;
+const LONG_THINK_THRESHOLD_MS = 1800;
+
+type ServerStatusEvent =
+  | { type: "search-start"; query: string }
+  | { type: "search-complete"; query: string; results?: number }
+  | { type: "search-error"; query: string; message?: string };
+
+function isComplexPrompt(text: string) {
+  const normalized = text.trim();
+  if (normalized.length > 600) return true;
+  const newlineCount = normalized.split(/\n/).length - 1;
+  if (newlineCount >= 6) return true;
+  return normalized.includes("```");
+}
+
+type StatusVariant =
+  | "default"
+  | "extended"
+  | "search"
+  | "error"
+  | "duration";
+
+function StatusBubble({
+  label,
+  variant = "default",
+}: {
+  label: string;
+  variant?: StatusVariant;
+}) {
+  const baseClassMap: Record<StatusVariant, string> = {
+    default: "border-white/10 bg-[#15151a]/80 text-zinc-200",
+    extended: "border-[#4b64ff]/30 bg-[#1a1c2b]/80 text-[#b7c6ff]",
+    search: "border-[#4b64ff]/30 bg-[#152033]/80 text-[#9bb8ff]",
+    error: "border-red-500/40 bg-[#30161a]/85 text-red-200",
+    duration: "border-white/10 bg-[#15151a]/80 text-zinc-300",
+  };
+
+  const dotMap: Record<StatusVariant, string> = {
+    default: "bg-zinc-400",
+    extended: "bg-[#8ab4ff]",
+    search: "bg-[#8ab4ff]",
+    error: "bg-red-400",
+    duration: "bg-zinc-500",
+  };
+
+  const pulseClass = variant === "duration" ? "" : "animate-pulse";
+
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${baseClassMap[variant]}`}
+      aria-live="polite"
+    >
+      <span
+        className={`h-2 w-2 rounded-full ${dotMap[variant]} ${pulseClass}`}
+        aria-hidden
+      />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 function createLocalId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -161,6 +225,26 @@ export default function Home() {
   );
   const [openModelMenuId, setOpenModelMenuId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [thinkingStatus, setThinkingStatus] = useState<
+    { phase: "waiting" | "extended" | "responding"; label: string } | null
+  >(null);
+  const [durationStatus, setDurationStatus] = useState<string | null>(null);
+  const [searchIndicator, setSearchIndicator] = useState<
+    { message: string; variant: "running" | "error" } | null
+  >(null);
+  const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [rowMenu, setRowMenu] = useState<
+    { type: "conversation" | "project"; id: string } | null
+  >(null);
+  const [moveMenuConversationId, setMoveMenuConversationId] =
+    useState<string | null>(null);
+  const responseTimingRef = useRef({
+    start: null as number | null,
+    firstToken: null as number | null,
+    end: null as number | null,
+  });
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const durationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function scrollToBottom(opts: { behavior?: ScrollBehavior } = {}) {
     const el = chatContainerRef.current;
@@ -273,9 +357,10 @@ export default function Home() {
     const handleScroll = () => {
       const distanceFromBottom =
         el.scrollHeight - el.scrollTop - el.clientHeight;
-      const nearBottom = distanceFromBottom < 120;
+      const nearBottom = distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX;
       setAutoScrollEnabled(nearBottom);
-      setShowScrollButton(!nearBottom);
+      const hasScrollableContent = el.scrollHeight > el.clientHeight + 8;
+      setShowScrollButton(!nearBottom && hasScrollableContent);
     };
     handleScroll();
     el.addEventListener("scroll", handleScroll);
@@ -286,17 +371,43 @@ export default function Home() {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const maxHeight = 168;
-    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+    const nextHeight = Math.min(el.scrollHeight, MAX_INPUT_HEIGHT);
     el.style.height = `${nextHeight}px`;
-    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+    el.style.overflowY =
+      el.scrollHeight > MAX_INPUT_HEIGHT ? "auto" : "hidden";
   }, [input]);
 
   useEffect(() => {
-    const handleWindowClick = () => setOpenModelMenuId(null);
+    const handleWindowClick = () => {
+      setOpenModelMenuId(null);
+      setComposerMenuOpen(false);
+      setRowMenu(null);
+      setMoveMenuConversationId(null);
+    };
     window.addEventListener("click", handleWindowClick);
     return () => window.removeEventListener("click", handleWindowClick);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (thinkingTimerRef.current) {
+        clearTimeout(thinkingTimerRef.current);
+        thinkingTimerRef.current = null;
+      }
+      if (durationTimerRef.current) {
+        clearTimeout(durationTimerRef.current);
+        durationTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!searchIndicator || searchIndicator.variant !== "error") {
+      return;
+    }
+    const timeout = setTimeout(() => setSearchIndicator(null), 5000);
+    return () => clearTimeout(timeout);
+  }, [searchIndicator]);
 
   // ------------------------------------------------------------
   // MEMOIZED SORTED LISTS
@@ -336,6 +447,20 @@ export default function Home() {
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const canSendMessage = input.trim().length > 0;
+
+  const clearThinkingTimeout = () => {
+    if (thinkingTimerRef.current) {
+      clearTimeout(thinkingTimerRef.current);
+      thinkingTimerRef.current = null;
+    }
+  };
+
+  const clearDurationTimeout = () => {
+    if (durationTimerRef.current) {
+      clearTimeout(durationTimerRef.current);
+      durationTimerRef.current = null;
+    }
+  };
 
   // ------------------------------------------------------------
   // HELPERS
@@ -408,6 +533,35 @@ export default function Home() {
       setInput("");
     }
     setIsStreaming(true);
+    setComposerMenuOpen(false);
+    setRowMenu(null);
+    setMoveMenuConversationId(null);
+    setAutoScrollEnabled(true);
+    setShowScrollButton(false);
+    clearDurationTimeout();
+    setDurationStatus(null);
+    setSearchIndicator(null);
+    const promptIsComplex = isComplexPrompt(text);
+    responseTimingRef.current = {
+      start: typeof performance !== "undefined" ? performance.now() : Date.now(),
+      firstToken: null,
+      end: null,
+    };
+    clearThinkingTimeout();
+    setThinkingStatus(
+      promptIsComplex
+        ? { phase: "extended", label: "Thinking for longer…" }
+        : { phase: "waiting", label: "Thinking…" }
+    );
+    if (!promptIsComplex) {
+      thinkingTimerRef.current = setTimeout(() => {
+        setThinkingStatus((prev) =>
+          prev && prev.phase === "waiting"
+            ? { phase: "extended", label: "Thinking for longer…" }
+            : prev
+        );
+      }, LONG_THINK_THRESHOLD_MS);
+    }
 
     try {
       if (!conversationId) {
@@ -456,6 +610,32 @@ export default function Home() {
       const decoder = new TextDecoder();
       let buffer = "";
       let finished = false;
+      const markResponseFinished = () => {
+        clearThinkingTimeout();
+        setThinkingStatus(null);
+        const startTime = responseTimingRef.current.start;
+        if (startTime) {
+          const endTime =
+            responseTimingRef.current.end ??
+            (typeof performance !== "undefined"
+              ? performance.now()
+              : Date.now());
+          const totalMs = Math.max(0, endTime - startTime);
+          const seconds = totalMs / 1000;
+          const formatted = `Thought for ${seconds.toFixed(1)} seconds`;
+          clearDurationTimeout();
+          setDurationStatus(formatted);
+          durationTimerRef.current = setTimeout(
+            () => setDurationStatus(null),
+            6000
+          );
+        }
+        responseTimingRef.current = {
+          start: null,
+          firstToken: null,
+          end: null,
+        };
+      };
 
       while (!finished) {
         const { value, done } = await reader.read();
@@ -488,8 +668,26 @@ export default function Home() {
                         : msg
                     )
                   );
+                  if (meta.usedModelMode === "full") {
+                    setThinkingStatus((prev) =>
+                      prev && prev.phase !== "responding"
+                        ? { phase: "extended", label: "Thinking for longer…" }
+                        : prev
+                    );
+                  }
                 } else if (typeof payload.token === "string") {
                   const token = payload.token as string;
+                  if (!responseTimingRef.current.firstToken) {
+                    responseTimingRef.current.firstToken =
+                      typeof performance !== "undefined"
+                        ? performance.now()
+                        : Date.now();
+                    clearThinkingTimeout();
+                    setThinkingStatus({
+                      phase: "responding",
+                      label: "Responding…",
+                    });
+                  }
                   setMessages((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantMessageId
@@ -497,7 +695,30 @@ export default function Home() {
                         : msg
                     )
                   );
+                } else if (payload.status) {
+                  const status = payload.status as ServerStatusEvent;
+                  if (status.type === "search-start") {
+                    setSearchIndicator({
+                      message: "Searching the web…",
+                      variant: "running",
+                    });
+                  } else if (status.type === "search-complete") {
+                    setSearchIndicator((prev) =>
+                      prev?.variant === "running" ? null : prev
+                    );
+                  } else if (status.type === "search-error") {
+                    setSearchIndicator({
+                      message:
+                        status.message || "Web search failed. Using prior data.",
+                      variant: "error",
+                    });
+                  }
                 } else if (payload.done) {
+                  responseTimingRef.current.end =
+                    typeof performance !== "undefined"
+                      ? performance.now()
+                      : Date.now();
+                  markResponseFinished();
                   finished = true;
                 }
               } catch (err) {
@@ -540,12 +761,30 @@ export default function Home() {
           );
         }
       }
+      clearThinkingTimeout();
+      clearDurationTimeout();
+      setThinkingStatus(null);
+      setDurationStatus(null);
+      setSearchIndicator(null);
+      responseTimingRef.current = {
+        start: null,
+        firstToken: null,
+        end: null,
+      };
     } finally {
       abortControllerRef.current = null;
       setIsStreaming(false);
       setActiveAssistantMessageId((current) =>
         assistantMessageId && current === assistantMessageId ? null : current
       );
+      clearThinkingTimeout();
+      if (responseTimingRef.current.start) {
+        responseTimingRef.current = {
+          start: null,
+          firstToken: null,
+          end: null,
+        };
+      }
     }
   }
 
@@ -569,7 +808,19 @@ export default function Home() {
 
   function handleStopGeneration() {
     abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     setIsStreaming(false);
+    clearThinkingTimeout();
+    clearDurationTimeout();
+    setThinkingStatus(null);
+    setDurationStatus(null);
+    setSearchIndicator(null);
+    responseTimingRef.current = {
+      start: null,
+      firstToken: null,
+      end: null,
+    };
+    setActiveAssistantMessageId(null);
   }
 
   async function handleCopyMessage(message: ChatMessage, fallbackId?: string) {
@@ -676,6 +927,54 @@ export default function Home() {
     }
   }
 
+  async function handleMoveFromMenu(
+    conversationId: string,
+    targetProjectId: string | null
+  ) {
+    await moveConversation(conversationId, targetProjectId);
+    setRowMenu(null);
+    setMoveMenuConversationId(null);
+  }
+
+  async function renameProject(id: string) {
+    const existingName = projects.find((p) => p.id === id)?.name || "Untitled";
+    const nextName = window.prompt("Rename project:", existingName);
+    if (!nextName || !nextName.trim()) return;
+    await supabase
+      .from("projects")
+      .update({ name: nextName.trim() })
+      .eq("id", id);
+
+    setProjects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, name: nextName.trim() } : p))
+    );
+  }
+
+  async function deleteProject(id: string) {
+    if (
+      !window.confirm(
+        "Delete this project? Chats inside will move back to 'No project'."
+      )
+    ) {
+      return;
+    }
+
+    await supabase.from("conversations").update({ project_id: null }).eq("project_id", id);
+    await supabase.from("projects").delete().eq("id", id);
+
+    setProjects((prev) => prev.filter((p) => p.id !== id));
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.project_id === id ? { ...c, project_id: null } : c
+      )
+    );
+
+    if (selectedProjectId === id) {
+      setSelectedProjectId(null);
+      setViewMode("chat");
+    }
+  }
+
   // ------------------------------------------------------------
   // SIDEBAR CONTENT (shared between desktop + mobile)
   // ------------------------------------------------------------
@@ -707,19 +1006,68 @@ export default function Home() {
           <div className="px-1 py-2 text-[11px] text-zinc-500">No projects yet.</div>
         )}
 
-        {sortedProjects.map((p) => (
-          <button
-            key={p.id}
-            className={`w-full rounded-md px-3 py-2 text-left text-sm ${
-              selectedProjectId === p.id && viewMode === "project"
-                ? "bg-[#202123] text-zinc-100"
-                : "text-zinc-300 hover:bg-[#202123]"
-            }`}
-            onClick={() => handleProjectSelect(p.id)}
-          >
-            {p.name}
-          </button>
-        ))}
+        {sortedProjects.map((p) => {
+          const isActive = selectedProjectId === p.id && viewMode === "project";
+          const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
+          return (
+            <div
+              key={p.id}
+              className={`group relative flex items-center rounded-md ${
+                isActive
+                  ? "bg-[#202123] text-zinc-100"
+                  : "text-zinc-300 hover:bg-[#202123]"
+              }`}
+            >
+              <button
+                className="flex-1 truncate px-3 py-2 text-left text-sm"
+                onClick={() => handleProjectSelect(p.id)}
+              >
+                {p.name}
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMoveMenuConversationId(null);
+                  setRowMenu((prev) =>
+                    prev?.type === "project" && prev.id === p.id
+                      ? null
+                      : { type: "project", id: p.id }
+                  );
+                }}
+                aria-label="Project actions"
+                className="mr-2 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
+              >
+                ⋯
+              </button>
+
+              {isMenuOpen && (
+                <div
+                  onClick={(event) => event.stopPropagation()}
+                  className="absolute right-0 top-full z-30 mt-2 w-40 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1 text-left text-xs shadow-2xl"
+                >
+                  <button
+                    onClick={() => {
+                      renameProject(p.id);
+                      setRowMenu(null);
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1d1d24]"
+                  >
+                    Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      deleteProject(p.id);
+                      setRowMenu(null);
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1d1d24]"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* All chats */}
@@ -734,10 +1082,12 @@ export default function Home() {
 
         {sortedConversations.map((c) => {
           const isActive = selectedConversationId === c.id && viewMode === "chat";
+          const isMenuOpen = rowMenu?.type === "conversation" && rowMenu.id === c.id;
+          const showMoveMenu = moveMenuConversationId === c.id;
           return (
             <div
               key={c.id}
-              className={`group flex items-center rounded-md px-2 text-sm ${
+              className={`group relative flex items-center rounded-md px-2 text-sm ${
                 isActive
                   ? "bg-[#202123] text-zinc-100"
                   : "text-zinc-300 hover:bg-[#202123]"
@@ -752,13 +1102,90 @@ export default function Home() {
               <button
                 onClick={(event) => {
                   event.stopPropagation();
-                  deleteConversation(c.id);
+                  setMoveMenuConversationId(null);
+                  setRowMenu((prev) =>
+                    prev?.type === "conversation" && prev.id === c.id
+                      ? null
+                      : { type: "conversation", id: c.id }
+                  );
                 }}
-                aria-label="Delete chat"
-                className="ml-1 rounded-md p-1 text-xs text-zinc-500 transition hover:text-red-400"
+                aria-label="Conversation actions"
+                className="mr-1 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
               >
-                ×
+                ⋯
               </button>
+
+              {isMenuOpen && (
+                <div
+                  onClick={(event) => event.stopPropagation()}
+                  className="absolute right-0 top-full z-30 mt-2 w-48 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                >
+                  <button
+                    onClick={() => {
+                      renameConversation(c.id);
+                      setRowMenu(null);
+                      setMoveMenuConversationId(null);
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                  >
+                    Rename
+                  </button>
+                  <div className="relative">
+                    <button
+                      onClick={() =>
+                        setMoveMenuConversationId((prev) =>
+                          prev === c.id ? null : c.id
+                        )
+                      }
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                      aria-expanded={showMoveMenu}
+                    >
+                      Move to project
+                      <span className="text-[10px] text-zinc-500">
+                        {showMoveMenu ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {showMoveMenu && (
+                      <div className="mt-2 space-y-1 rounded-xl border border-[#2a2a30] bg-[#0f0f14] p-1">
+                        <button
+                          onClick={() => handleMoveFromMenu(c.id, null)}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                        >
+                          No project
+                        </button>
+                        <div className="max-h-48 overflow-y-auto">
+                          {sortedProjects.map((proj) => (
+                            <button
+                              key={proj.id}
+                              onClick={() => handleMoveFromMenu(c.id, proj.id)}
+                              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21] ${
+                                proj.id === c.project_id
+                                  ? "bg-[#1b1b21]"
+                                  : ""
+                              }`}
+                            >
+                              {proj.name}
+                              {proj.id === c.project_id && (
+                                <span className="text-[10px] text-zinc-500">Current</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      deleteConversation(c.id);
+                      setRowMenu(null);
+                      setMoveMenuConversationId(null);
+                    }}
+                    className="mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1b1b21]"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -829,9 +1256,10 @@ export default function Home() {
             )}
           </div>
 
-          {/* Rename/Delete/Move in header */}
+          {/* Project selector */}
           {viewMode === "chat" && currentConversation && (
             <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+              <span className="hidden text-xs text-zinc-500 sm:inline">Project:</span>
               <select
                 value={currentConversation.project_id || ""}
                 onChange={(e) =>
@@ -849,19 +1277,6 @@ export default function Home() {
                   </option>
                 ))}
               </select>
-              <button
-                onClick={() => renameConversation(currentConversation.id)}
-                className="hover:text-zinc-200"
-              >
-                Rename
-              </button>
-              <span>·</span>
-              <button
-                onClick={() => deleteConversation(currentConversation.id)}
-                className="hover:text-red-400"
-              >
-                Delete
-              </button>
             </div>
           )}
         </header>
@@ -971,7 +1386,10 @@ export default function Home() {
                 ref={chatContainerRef}
                 className="flex h-full flex-col overflow-y-auto overflow-x-hidden px-4 py-6 pb-32"
               >
-                <div className="mx-auto flex max-w-2xl flex-col space-y-4 pb-6">
+                <div
+                  className="mx-auto flex w-full flex-col space-y-4 pb-6"
+                  style={{ maxWidth: MAX_MESSAGE_WIDTH }}
+                >
                   {isLoadingMessages && (
                     <div className="mb-2 text-center text-xs text-zinc-500">
                       Loading messages...
@@ -1004,7 +1422,7 @@ export default function Home() {
                         }`}
                       >
                         <div
-                          className={`relative max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed md:max-w-[70%] ${
+                          className={`relative w-full max-w-[95%] rounded-3xl px-5 py-4 text-[15px] leading-relaxed md:max-w-[85%] ${
                             isAssistant
                               ? "bg-[#202123] text-zinc-100"
                               : "bg-[#1e4fd8] text-white"
@@ -1154,13 +1572,47 @@ export default function Home() {
                       </div>
                     );
                   })}
+
+                  {(searchIndicator || thinkingStatus || (durationStatus && !isStreaming)) && (
+                    <div
+                      className="mx-auto mt-2 flex flex-col items-center gap-2"
+                      style={{ maxWidth: MAX_MESSAGE_WIDTH }}
+                    >
+                      {searchIndicator && (
+                        <StatusBubble
+                          label={searchIndicator.message}
+                          variant={
+                            searchIndicator.variant === "error"
+                              ? "error"
+                              : "search"
+                          }
+                        />
+                      )}
+                      {thinkingStatus && (
+                        <StatusBubble
+                          label={thinkingStatus.label}
+                          variant={
+                            thinkingStatus.phase === "extended"
+                              ? "extended"
+                              : "default"
+                          }
+                        />
+                      )}
+                      {durationStatus && !isStreaming && (
+                        <StatusBubble
+                          label={durationStatus}
+                          variant="duration"
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {showScrollButton && (
+              {showScrollButton && messages.length > 0 && (
                 <button
                   onClick={handleJumpToBottom}
-                  className="pointer-events-auto absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-[#15151a]/90 px-4 py-2 text-sm text-white shadow-xl transition hover:bg-[#1f1f25]"
+                  className="pointer-events-auto absolute bottom-28 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-[#1b1b25]/90 p-3 text-white shadow-xl transition hover:bg-[#242433]"
                   aria-label="Jump to latest message"
                 >
                   <svg
@@ -1181,7 +1633,10 @@ export default function Home() {
 
             {/* Input */}
             <div className="shrink-0 border-t border-[#202123] bg-[#212121] px-4 py-3">
-              <div className="mx-auto flex max-w-2xl flex-col gap-3">
+              <div
+                className="mx-auto flex w-full flex-col gap-3"
+                style={{ maxWidth: MAX_MESSAGE_WIDTH }}
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                   <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-[#35353a] bg-[#1a1b1f] p-1">
                     {MODEL_SEGMENTS.map((segment) => {
@@ -1206,45 +1661,65 @@ export default function Home() {
                     })}
                   </div>
 
-                  <button
-                    onClick={() => setForceWebSearch((prev) => !prev)}
-                    aria-pressed={forceWebSearch}
-                    className={`flex items-center gap-1 rounded-2xl border px-3 py-1 text-[11px] font-medium transition ${
-                      forceWebSearch
-                        ? "border-[#1e4fd8] bg-[#1e4fd8]/20 text-[#8ab4ff]"
-                        : "border-[#3f3f46] text-zinc-400 hover:text-zinc-200"
-                    }`}
-                    title="Force a web search before answering"
-                  >
-                    <span className="text-base leading-none">🌐</span> Web search
-                  </button>
+                  {forceWebSearch && (
+                    <div className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]">
+                      <span className="text-base leading-none">🌐</span>
+                      <span>Web search armed</span>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex items-center">
-                  <div className="flex w-full items-center gap-2 rounded-full border border-[#3f3f46] bg-[#2c2c31] px-2 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
-                    <button
-                      type="button"
-                      aria-label="Insert content"
-                      onClick={() => textareaRef.current?.focus()}
-                      className="flex h-11 w-11 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-5 w-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        strokeLinecap="round"
+                <div className="flex items-end gap-2">
+                  <div className="flex w-full items-end gap-2 rounded-3xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
+                    <div className="relative">
+                      <button
+                        type="button"
+                        aria-label="Insert options"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setComposerMenuOpen((prev) => !prev);
+                        }}
+                        className="flex h-10 w-10 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
                       >
-                        <path d="M12 5v14M5 12h14" />
-                      </svg>
-                    </button>
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-5 w-5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                          strokeLinecap="round"
+                        >
+                          <path d="M12 5v14M5 12h14" />
+                        </svg>
+                      </button>
+
+                      {composerMenuOpen && (
+                        <div
+                          onClick={(event) => event.stopPropagation()}
+                          className="absolute bottom-12 left-0 z-30 w-44 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                        >
+                          <button
+                            onClick={() => {
+                              setForceWebSearch((prev) => !prev);
+                              setComposerMenuOpen(false);
+                            }}
+                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                          >
+                            <span>Web search</span>
+                            {forceWebSearch && (
+                              <span className="text-[#8ab4ff]">On</span>
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </div>
 
                     <div className="flex-1 px-1">
                       <textarea
                         ref={textareaRef}
-                        className="max-h-40 min-h-[48px] w-full resize-none border-none bg-transparent px-0 text-[15px] leading-6 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                        className="w-full resize-none border-none bg-transparent px-0 text-[15px] leading-6 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[24px]"
+                        style={{ maxHeight: MAX_INPUT_HEIGHT }}
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
@@ -1257,7 +1732,7 @@ export default function Home() {
                       type="button"
                       aria-label="Voice input (coming soon)"
                       onClick={() => textareaRef.current?.focus()}
-                      className="flex h-11 w-11 items-center justify-center rounded-full text-white/70 transition hover:text-white"
+                      className="flex h-10 w-10 items-center justify-center rounded-full text-white/70 transition hover:text-white"
                     >
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
@@ -1274,46 +1749,46 @@ export default function Home() {
                         <path d="M12 18.5v2" />
                       </svg>
                     </button>
-
-                    <button
-                      type="button"
-                      onClick={
-                        isStreaming ? handleStopGeneration : () => sendMessage()
-                      }
-                      disabled={!isStreaming && !canSendMessage}
-                      className={`ml-1 flex h-12 w-12 items-center justify-center rounded-full bg-[#00a86b] text-white shadow-lg transition focus:outline-none ${
-                        isStreaming
-                          ? "hover:bg-[#00915c]"
-                          : "hover:bg-[#00bf78] disabled:opacity-50"
-                      }`}
-                      aria-label={isStreaming ? "Stop response" : "Send message"}
-                    >
-                      {isStreaming ? (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-4 w-4"
-                          fill="currentColor"
-                        >
-                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                        </svg>
-                      ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-4 w-4"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 19V5" />
-                          <path d="M6 11l6-6 6 6" />
-                        </svg>
-                      )}
-                    </button>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={
+                      isStreaming ? handleStopGeneration : () => sendMessage()
+                    }
+                    disabled={!isStreaming && !canSendMessage}
+                    className={`flex h-12 w-12 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                      isStreaming
+                        ? "hover:bg-[#225fd0]"
+                        : "hover:bg-[#3c7cff] disabled:opacity-40"
+                    }`}
+                    aria-label={isStreaming ? "Stop response" : "Send message"}
+                  >
+                    {isStreaming ? (
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-4 w-4"
+                        fill="currentColor"
+                      >
+                        <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                      </svg>
+                    ) : (
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-5 w-5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 18V6" />
+                        <path d="M6 12l6-6 6 6" />
+                      </svg>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>

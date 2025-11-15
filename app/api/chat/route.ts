@@ -81,6 +81,37 @@ const SEARCH_KEYWORDS = [
   "check the web",
 ];
 
+type SearchStatusEvent =
+  | { type: "search-start"; query: string }
+  | { type: "search-complete"; query: string; results?: number }
+  | { type: "search-error"; query: string; message?: string };
+
+const RECENT_QUERY_KEYWORDS = [
+  "today",
+  "tonight",
+  "current",
+  "latest",
+  "right now",
+  "breaking",
+  "news",
+  "this week",
+  "this month",
+  "price",
+  "prices",
+  "stock",
+  "stocks",
+  "earnings",
+  "forecast",
+  "version",
+  "update",
+  "release",
+];
+
+function needsRecentResults(query: string) {
+  const normalized = query.toLowerCase();
+  return RECENT_QUERY_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
 function shouldSearchWeb(userText: string) {
   const normalized = userText.toLowerCase();
   return SEARCH_KEYWORDS.some((keyword) => normalized.includes(keyword));
@@ -218,41 +249,7 @@ export async function POST(req: Request) {
       });
     };
 
-    const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
-    if (shouldForceSearch) {
-      await injectManualSearchResult(
-        messagesWithTools,
-        deriveSearchQuery(userText),
-        recordSearch
-      );
-    }
-
-    await runToolCallLoop({
-      openai,
-      model: MODEL_MAP[resolvedModelKey],
-      messages: messagesWithTools,
-      onSearchRecord: recordSearch,
-    });
-
-    const stream = await openai.chat.completions.create({
-      model: MODEL_MAP[resolvedModelKey],
-      messages: messagesWithTools,
-      stream: true,
-      tools: [GOOGLE_SEARCH_TOOL],
-      tool_choice: "none",
-    });
-
     const encoder = new TextEncoder();
-    let fullAssistantMessage = "";
-    const usedWebSearch = searchRecords.length > 0;
-    const metadata = {
-      usedModel: MODEL_MAP[resolvedModelKey],
-      usedModelMode: resolvedModelKey,
-      requestedModelMode: modelMode,
-      usedWebSearch,
-      searchRecords,
-    };
-
     const firstUserMessage = [
       ...historyForModel,
       { role: "user" as const, content: userText },
@@ -261,6 +258,8 @@ export async function POST(req: Request) {
       (msg) => msg.role === "assistant"
     );
 
+    const shouldForceSearch = forceWebSearch || shouldSearchWeb(userText);
+
     const readable = new ReadableStream({
       async start(controller) {
         const enqueueJson = (payload: Record<string, unknown>) => {
@@ -268,10 +267,48 @@ export async function POST(req: Request) {
             encoder.encode(`${JSON.stringify(payload)}\n`)
           );
         };
-
-        enqueueJson({ meta: metadata });
+        const sendStatusUpdate = (status: SearchStatusEvent) => {
+          enqueueJson({ status });
+        };
+        let fullAssistantMessage = "";
 
         try {
+          if (shouldForceSearch) {
+            await injectManualSearchResult(
+              messagesWithTools,
+              deriveSearchQuery(userText),
+              recordSearch,
+              sendStatusUpdate
+            );
+          }
+
+          await runToolCallLoop({
+            openai,
+            model: MODEL_MAP[resolvedModelKey],
+            messages: messagesWithTools,
+            onSearchRecord: recordSearch,
+            onSearchStatus: sendStatusUpdate,
+          });
+
+          const stream = await openai.chat.completions.create({
+            model: MODEL_MAP[resolvedModelKey],
+            messages: messagesWithTools,
+            stream: true,
+            tools: [GOOGLE_SEARCH_TOOL],
+            tool_choice: "none",
+          });
+
+          const usedWebSearch = searchRecords.length > 0;
+          const metadata = {
+            usedModel: MODEL_MAP[resolvedModelKey],
+            usedModelMode: resolvedModelKey,
+            requestedModelMode: modelMode,
+            usedWebSearch,
+            searchRecords,
+          };
+
+          enqueueJson({ meta: metadata });
+
           for await (const chunk of stream) {
             const token = chunk.choices[0]?.delta?.content;
             if (token) {
@@ -281,6 +318,7 @@ export async function POST(req: Request) {
           }
         } catch (err) {
           console.error("Stream error:", err);
+          enqueueJson({ error: "upstream_error" });
         } finally {
           enqueueJson({ done: true });
           if (assistantRow?.id) {
@@ -385,6 +423,7 @@ type ToolLoopArgs = {
   model: string;
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
   onSearchRecord?: (record: SearchRecord) => void;
+  onSearchStatus?: (status: SearchStatusEvent) => void;
 };
 
 async function runToolCallLoop({
@@ -392,8 +431,16 @@ async function runToolCallLoop({
   model,
   messages,
   onSearchRecord,
+  onSearchStatus,
 }: ToolLoopArgs): Promise<void> {
   const MAX_ITERATIONS = 3;
+  const searchCache = new Map<
+    string,
+    {
+      message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
+      record: SearchRecord | null;
+    }
+  >();
 
   for (let i = 0; i < MAX_ITERATIONS; i += 1) {
     const completion = await openai.chat.completions.create({
@@ -416,6 +463,8 @@ async function runToolCallLoop({
       tool_calls: toolCalls,
     });
 
+    let sufficientResultsFound = false;
+
     for (const toolCall of toolCalls) {
       if (
         toolCall.type !== "function" ||
@@ -434,14 +483,46 @@ async function runToolCallLoop({
         console.warn("Failed to parse google_search arguments", error);
       }
 
+      const trimmed = query.trim();
+      const normalized = trimmed.toLowerCase();
+      const cached =
+        normalized && searchCache.has(normalized)
+          ? searchCache.get(normalized)
+          : null;
+
+      if (
+        cached &&
+        cached.record &&
+        cached.record.results.length > 0 &&
+        normalized
+      ) {
+        messages.push(cached.message);
+        continue;
+      }
+
+      const preferFreshResults = needsRecentResults(trimmed);
       const { message: toolResponse, record } = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
-        query
+        trimmed,
+        {
+          preferFreshResults,
+          onSearchStatus,
+        }
       );
       if (record && onSearchRecord) {
         onSearchRecord(record);
       }
+      if (record && record.results.length > 0 && normalized) {
+        searchCache.set(normalized, { message: toolResponse, record });
+      }
+      if (record?.results?.length && record.results.length >= 3) {
+        sufficientResultsFound = true;
+      }
       messages.push(toolResponse);
+    }
+
+    if (sufficientResultsFound) {
+      break;
     }
   }
 }
@@ -449,7 +530,8 @@ async function runToolCallLoop({
 async function injectManualSearchResult(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
   query: string,
-  onSearchRecord?: (record: SearchRecord) => void
+  onSearchRecord?: (record: SearchRecord) => void,
+  onSearchStatus?: (status: SearchStatusEvent) => void
 ) {
   const trimmed = query.trim();
   if (!trimmed) {
@@ -474,7 +556,11 @@ async function injectManualSearchResult(
 
   const { message: toolResponse, record } = await createToolResponseMessage(
     toolCallId,
-    trimmed
+    trimmed,
+    {
+      preferFreshResults: needsRecentResults(trimmed),
+      onSearchStatus,
+    }
   );
   if (record && onSearchRecord) {
     onSearchRecord(record);
@@ -484,7 +570,11 @@ async function injectManualSearchResult(
 
 async function createToolResponseMessage(
   toolCallId: string,
-  query: string
+  query: string,
+  options: {
+    preferFreshResults?: boolean;
+    onSearchStatus?: (status: SearchStatusEvent) => void;
+  } = {}
 ): Promise<{
   message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
   record: SearchRecord | null;
@@ -502,11 +592,19 @@ async function createToolResponseMessage(
   }
 
   try {
-    const results = await googleSearch(trimmed);
+    options.onSearchStatus?.({ type: "search-start", query: trimmed });
+    const results = await googleSearch(trimmed, {
+      preferFreshResults: options.preferFreshResults,
+    });
     const summary = formatSearchSummary(trimmed, results);
     console.info(
       `Google search: query='${trimmed}' results=${results.length}`
     );
+    options.onSearchStatus?.({
+      type: "search-complete",
+      query: trimmed,
+      results: results.length,
+    });
     return {
       message: {
         role: "tool",
@@ -530,6 +628,11 @@ async function createToolResponseMessage(
             : "Unknown Google search error";
 
     console.warn(`Google search skipped: ${message}`);
+    options.onSearchStatus?.({
+      type: "search-error",
+      query: trimmed,
+      message,
+    });
     return {
       message: {
         role: "tool",
@@ -604,7 +707,6 @@ async function ensureChatTitle({
   try {
     const completion = await openai.chat.completions.create({
       model: MODEL_MAP[titleModelKey],
-      temperature: 0.2,
       max_completion_tokens: 32,
       messages: [
         {
