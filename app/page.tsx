@@ -33,7 +33,16 @@ type ConversationMeta = {
 
 type ViewMode = "chat" | "project";
 
+type ModelMode = "auto" | "nano" | "mini" | "full";
+
 const TEST_USER_ID = "test-user-1";
+
+const MODEL_SEGMENTS: { value: ModelMode; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Router" },
+  { value: "nano", label: "Fast", hint: "Nano" },
+  { value: "mini", label: "Balanced", hint: "Mini" },
+  { value: "full", label: "Max", hint: "Full" },
+];
 
 function latestConvTimeForProject(projectId: string, convs: ConversationMeta[]) {
   const filtered = convs.filter(
@@ -128,6 +137,8 @@ export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [modelMode, setModelMode] = useState<ModelMode>("auto");
+  const [forceWebSearch, setForceWebSearch] = useState(false);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
@@ -353,6 +364,8 @@ export default function Home() {
         body: JSON.stringify({
           message: text,
           conversationId,
+          modelMode,
+          forceWebSearch,
         }),
       });
 
@@ -573,21 +586,36 @@ export default function Home() {
           <div className="px-1 py-2 text-[11px] text-zinc-500">No chats yet.</div>
         )}
 
-        {sortedConversations.map((c) => (
-          <button
-            key={c.id}
-            className={`w-full rounded-md px-3 py-2 text-left text-sm ${
-              selectedConversationId === c.id && viewMode === "chat"
-                ? "bg-[#202123] text-zinc-100"
-                : "text-zinc-300 hover:bg-[#202123]"
-            }`}
-            onClick={() => handleConversationSelect(c.id)}
-          >
-            <div className="truncate">
-              {c.title || "Untitled chat"}
+        {sortedConversations.map((c) => {
+          const isActive = selectedConversationId === c.id && viewMode === "chat";
+          return (
+            <div
+              key={c.id}
+              className={`group flex items-center rounded-md px-2 text-sm ${
+                isActive
+                  ? "bg-[#202123] text-zinc-100"
+                  : "text-zinc-300 hover:bg-[#202123]"
+              }`}
+            >
+              <button
+                className="flex-1 truncate px-1 py-2 text-left"
+                onClick={() => handleConversationSelect(c.id)}
+              >
+                {c.title || "Untitled chat"}
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  deleteConversation(c.id);
+                }}
+                aria-label="Delete chat"
+                className="ml-1 rounded-md p-1 text-xs text-zinc-500 transition hover:text-red-400"
+              >
+                ×
+              </button>
             </div>
-          </button>
-        ))}
+          );
+        })}
       </div>
 
       <div className="border-t border-[#202123] px-3 py-3 text-xs text-zinc-500">
@@ -600,9 +628,9 @@ export default function Home() {
   // RENDER
   // ------------------------------------------------------------
   return (
-    <div className="flex h-screen bg-[#212121] text-zinc-100">
+    <div className="flex h-screen min-h-0 overflow-hidden bg-[#212121] text-zinc-100">
       {/* Desktop Sidebar */}
-      <aside className="hidden w-64 flex-col border-r border-[#202123] bg-[#181818] md:flex">
+      <aside className="hidden w-64 min-h-0 flex-col border-r border-[#202123] bg-[#181818] md:flex">
         <SidebarSections />
       </aside>
 
@@ -630,9 +658,9 @@ export default function Home() {
       )}
 
       {/* Main Content */}
-      <main className="flex flex-1 flex-col bg-[#212121]">
+      <main className="flex flex-1 min-h-0 flex-col overflow-hidden bg-[#212121]">
         {/* Header */}
-        <header className="flex items-center justify-between border-b border-[#202123] px-4 py-3">
+        <header className="flex shrink-0 items-center justify-between border-b border-[#202123] px-4 py-3">
           <div className="flex items-center gap-2">
             <button
               className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
@@ -694,7 +722,7 @@ export default function Home() {
 
         {/* PROJECT VIEW */}
         {inProjectView && currentProject ? (
-          <div className="flex-1 overflow-y-auto px-6 py-6">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-6">
             <div className="mx-auto max-w-3xl">
               <h1 className="mb-4 text-lg font-semibold">
                 {currentProject.name}
@@ -717,21 +745,34 @@ export default function Home() {
                 {projectChats.map((c) => (
                   <div
                     key={c.id}
-                    className="flex items-center justify-between rounded-xl bg-[#181818] px-4 py-3 text-sm hover:bg-[#202123]"
+                    className="space-y-2 rounded-xl bg-[#181818] px-4 py-3 text-sm hover:bg-[#202123]"
                   >
-                    <button
-                      className="flex-1 text-left"
-                      onClick={() => {
-                        handleConversationSelect(c.id);
-                        setSidebarOpen(false);
-                      }}
-                    >
-                      <div className="font-medium text-zinc-100">
-                        {c.title || "Untitled chat"}
-                      </div>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="flex-1 text-left"
+                        onClick={() => {
+                          handleConversationSelect(c.id);
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <div className="font-medium text-zinc-100">
+                          {c.title || "Untitled chat"}
+                        </div>
+                      </button>
 
-                    <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteConversation(c.id);
+                        }}
+                        aria-label="Delete chat"
+                        className="rounded-md p-1 text-xs text-zinc-500 transition hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
                       <button
                         onClick={() => renameConversation(c.id)}
                         className="hover:text-zinc-200"
@@ -779,7 +820,7 @@ export default function Home() {
           /* CHAT VIEW */
           <>
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 py-6">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
               <div className="mx-auto flex max-w-2xl flex-col space-y-4">
                 {isLoadingMessages && (
                   <div className="mb-2 text-center text-xs text-zinc-500">
@@ -829,23 +870,63 @@ export default function Home() {
             </div>
 
             {/* Input */}
-            <div className="border-t border-[#202123] bg-[#212121] px-4 py-3">
-              <div className="mx-auto flex max-w-2xl items-center gap-2">
-                <input
-                  className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Type a message…"
-                />
+            <div className="shrink-0 border-t border-[#202123] bg-[#212121] px-4 py-3">
+              <div className="mx-auto flex max-w-2xl flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-[#35353a] bg-[#1a1b1f] p-1">
+                    {MODEL_SEGMENTS.map((segment) => {
+                      const isActive = modelMode === segment.value;
+                      return (
+                        <button
+                          key={segment.value}
+                          className={`rounded-xl px-3 py-1 text-left text-[11px] font-medium transition ${
+                            isActive
+                              ? "bg-[#1e4fd8] text-white shadow-inner"
+                              : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                          onClick={() => setModelMode(segment.value)}
+                          aria-pressed={isActive}
+                        >
+                          <div>{segment.label}</div>
+                          <div className="text-[10px] font-normal text-zinc-300/70">
+                            {segment.hint}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                <button
-                  onClick={sendMessage}
-                  disabled={isSending || !input.trim()}
-                  className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#2658e4] disabled:opacity-50"
-                >
-                  Send
-                </button>
+                  <button
+                    onClick={() => setForceWebSearch((prev) => !prev)}
+                    aria-pressed={forceWebSearch}
+                    className={`flex items-center gap-1 rounded-2xl border px-3 py-1 text-[11px] font-medium transition ${
+                      forceWebSearch
+                        ? "border-[#1e4fd8] bg-[#1e4fd8]/20 text-[#8ab4ff]"
+                        : "border-[#3f3f46] text-zinc-400 hover:text-zinc-200"
+                    }`}
+                    title="Force a web search before answering"
+                  >
+                    <span className="text-base leading-none">🌐</span> Web search
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    className="flex-1 rounded-2xl border border-[#3f3f46] bg-[#303030] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-[#1e4fd8]"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Type a message…"
+                  />
+
+                  <button
+                    onClick={sendMessage}
+                    disabled={isSending || !input.trim()}
+                    className="rounded-2xl bg-[#1e4fd8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#2658e4] disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                </div>
               </div>
             </div>
           </>
