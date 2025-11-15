@@ -154,6 +154,8 @@ export default function Home() {
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [activeAssistantMessageId, setActiveAssistantMessageId] =
+    useState<string | null>(null);
   const [expandedSourcesId, setExpandedSourcesId] = useState<string | null>(
     null
   );
@@ -167,6 +169,12 @@ export default function Home() {
       top: el.scrollHeight,
       behavior: opts.behavior ?? "smooth",
     });
+  }
+
+  function handleJumpToBottom() {
+    scrollToBottom({ behavior: "smooth" });
+    setAutoScrollEnabled(true);
+    setShowScrollButton(false);
   }
 
   // ------------------------------------------------------------
@@ -256,15 +264,16 @@ export default function Home() {
   // ------------------------------------------------------------
   useEffect(() => {
     if (!autoScrollEnabled) return;
-    scrollToBottom({ behavior: "smooth" });
-  }, [messages, autoScrollEnabled]);
+    scrollToBottom({ behavior: isStreaming ? "smooth" : "auto" });
+  }, [messages, autoScrollEnabled, isStreaming]);
 
   useEffect(() => {
     const el = chatContainerRef.current;
     if (!el) return;
     const handleScroll = () => {
-      const nearBottom =
-        el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottom = distanceFromBottom < 120;
       setAutoScrollEnabled(nearBottom);
       setShowScrollButton(!nearBottom);
     };
@@ -412,6 +421,7 @@ export default function Home() {
       const userMessageId = createLocalId();
       const assistantId = createLocalId();
       assistantMessageId = assistantId;
+      setActiveAssistantMessageId(assistantId);
 
       // user msg + empty assistant bubble for streaming
       setMessages((prev) => [
@@ -532,6 +542,9 @@ export default function Home() {
     } finally {
       abortControllerRef.current = null;
       setIsStreaming(false);
+      setActiveAssistantMessageId((current) =>
+        assistantMessageId && current === assistantMessageId ? null : current
+      );
     }
   }
 
@@ -977,6 +990,9 @@ export default function Home() {
                         m.usedWebSearch &&
                         (m.searchRecords?.length || 0) > 0
                     );
+                    const isStreamingAssistantMessage =
+                      isAssistant &&
+                      activeAssistantMessageId === messageId;
 
                     return (
                       <div
@@ -1006,90 +1022,94 @@ export default function Home() {
                                 </div>
                               </div>
 
-                              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
-                                <button
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleCopyMessage(m, messageId);
-                                  }}
-                                  className="rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
-                                >
-                                  {copiedMessageId === messageId ? "Copied" : "Copy"}
-                                </button>
+                              {!isStreamingAssistantMessage && (
+                                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                                  <button
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleCopyMessage(m, messageId);
+                                    }}
+                                    className="rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                  >
+                                    {copiedMessageId === messageId ? "Copied" : "Copy"}
+                                  </button>
 
-                                {hasSources && (
-                                  <>
-                                    <span
-                                      className="h-4 w-px bg-[#38383d]"
-                                      aria-hidden
-                                    />
-                                    <button
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        setExpandedSourcesId((prev) =>
-                                          prev === messageId ? null : messageId
-                                        );
-                                      }}
-                                      className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
-                                      aria-expanded={expandedSourcesId === messageId}
-                                    >
-                                      {expandedSourcesId === messageId
-                                        ? "Hide sources"
-                                        : "Sources"}
-                                    </button>
-                                  </>
-                                )}
-
-                                {m.usedModel && (
-                                  <>
-                                    <span
-                                      className="h-4 w-px bg-[#38383d]"
-                                      aria-hidden
-                                    />
-                                    <div className="relative">
+                                  {hasSources && (
+                                    <>
+                                      <span
+                                        className="h-4 w-px bg-[#38383d]"
+                                        aria-hidden
+                                      />
                                       <button
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          setOpenModelMenuId((prev) =>
+                                          setExpandedSourcesId((prev) =>
                                             prev === messageId ? null : messageId
                                           );
                                         }}
-                                        className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
+                                        className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
+                                        aria-expanded={expandedSourcesId === messageId}
                                       >
-                                        {m.usedModel}
+                                        {expandedSourcesId === messageId
+                                          ? "Hide sources"
+                                          : "Sources"}
                                       </button>
+                                    </>
+                                  )}
 
-                                      {openModelMenuId === messageId && (
-                                        <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
-                                          {(Object.entries(
-                                            MODEL_NAME_MAP
-                                          ) as [Exclude<ModelMode, "auto">, string][]).map(
-                                            ([mode, name]) => (
-                                              <button
-                                                key={mode}
-                                                onClick={(event) => {
-                                                  event.stopPropagation();
-                                                  handleRetryWithModel(mode);
-                                                }}
-                                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                                              >
-                                                <span>Retry with {name}</span>
-                                                {m.usedModelMode === mode && (
-                                                  <span className="text-[10px] text-zinc-500">
-                                                    current
-                                                  </span>
-                                                )}
-                                              </button>
-                                            )
-                                          )}
-                                        </div>
-                                      )}
-                                    </div>
-                                  </>
-                                )}
-                              </div>
+                                  {m.usedModel && (
+                                    <>
+                                      <span
+                                        className="h-4 w-px bg-[#38383d]"
+                                        aria-hidden
+                                      />
+                                      <div className="relative">
+                                        <button
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            setOpenModelMenuId((prev) =>
+                                              prev === messageId ? null : messageId
+                                            );
+                                          }}
+                                          className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
+                                        >
+                                          {m.usedModel}
+                                        </button>
 
-                              {hasSources && expandedSourcesId === messageId && (
+                                        {openModelMenuId === messageId && (
+                                          <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
+                                            {(Object.entries(
+                                              MODEL_NAME_MAP
+                                            ) as [Exclude<ModelMode, "auto">, string][]).map(
+                                              ([mode, name]) => (
+                                                <button
+                                                  key={mode}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    handleRetryWithModel(mode);
+                                                  }}
+                                                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                                                >
+                                                  <span>Retry with {name}</span>
+                                                  {m.usedModelMode === mode && (
+                                                    <span className="text-[10px] text-zinc-500">
+                                                      current
+                                                    </span>
+                                                  )}
+                                                </button>
+                                              )
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+
+                              {hasSources &&
+                                expandedSourcesId === messageId &&
+                                !isStreamingAssistantMessage && (
                                 <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
                                   {m.searchRecords?.map((record, idx) => (
                                     <div key={`${record.query}-${idx}`} className="space-y-2">
@@ -1137,15 +1157,22 @@ export default function Home() {
 
               {showScrollButton && (
                 <button
-                  onClick={() => {
-                    scrollToBottom({ behavior: "smooth" });
-                    setAutoScrollEnabled(true);
-                    setShowScrollButton(false);
-                  }}
-                  className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#15151a] p-3 text-white shadow-lg ring-1 ring-black/40"
-                  aria-label="Scroll to latest"
+                  onClick={handleJumpToBottom}
+                  className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#15151a] p-3 text-white shadow-lg ring-1 ring-black/40 transition hover:bg-[#1f1f25]"
+                  aria-label="Jump to latest message"
                 >
-                  ↓
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
                 </button>
               )}
             </div>
@@ -1204,32 +1231,45 @@ export default function Home() {
                     />
 
                     <button
-                      onClick={() => sendMessage()}
-                      disabled={isStreaming || !input.trim()}
-                      className="absolute bottom-2.5 right-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-[#1e4fd8] text-white shadow-lg transition hover:bg-[#2a5af2] disabled:opacity-50"
-                      aria-label="Send message"
+                      type="button"
+                      onClick={
+                        isStreaming ? handleStopGeneration : () => sendMessage()
+                      }
+                      disabled={!isStreaming && !input.trim()}
+                      className={`absolute right-2.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-white shadow-lg transition focus:outline-none ${
+                        isStreaming
+                          ? "bg-red-500 hover:bg-red-500/90"
+                          : "bg-[#1e4fd8] hover:bg-[#2a5af2] disabled:opacity-50"
+                      }`}
+                      aria-label={isStreaming ? "Stop response" : "Send message"}
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-4 w-4"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path d="M12 5v14m0 0-6-6m6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
+                      {isStreaming ? (
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-3.5 w-3.5"
+                          fill="currentColor"
+                        >
+                          <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                        </svg>
+                      ) : (
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                        >
+                          <path
+                            d="M12 5v14m0 0-6-6m6 6 6-6"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      )}
                     </button>
                   </div>
-
-                  {isStreaming && (
-                    <button
-                      onClick={handleStopGeneration}
-                      className="rounded-full border border-red-500 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-red-300 hover:bg-red-500/10"
-                    >
-                      ⏹ Stop
-                    </button>
-                  )}
                 </div>
               </div>
             </div>
