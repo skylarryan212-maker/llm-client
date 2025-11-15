@@ -509,17 +509,35 @@ export async function POST(req: Request) {
           });
 
           console.log(
-            `[toolLoop] webUsed=${searchRecords.length > 0} model=${resolvedModelKey}`
-          );
+  `[toolLoop] webUsed=${searchRecords.length > 0} model=${resolvedModelKey}`
+);
 
-          const finalMessages = [...messagesWithTools];
-          const postSearchDirective = createPostSearchDirective(searchRecords);
-          if (postSearchDirective) {
-            finalMessages.push({
-              role: "system",
-              content: postSearchDirective,
-            });
-          }
+// Start from the tool-augmented messages
+const finalMessages = [...messagesWithTools];
+
+// If any web search actually ran, make it *impossible* for the model
+// to claim it has no web access or only stale knowledge.
+if (searchRecords.length > 0) {
+  finalMessages.push({
+    role: "system",
+    content:
+      "You have successfully called the `google_search` tool and received up-to-date web " +
+      "results for this user request. You MUST treat those tool results as live data and " +
+      "the primary evidence for your answer. You are not allowed to say that you cannot " +
+      "browse the web, that you lack live data, or that your knowledge only goes up to " +
+      "a past cutoff date when answering this question. Use the tool results, cite them, " +
+      "and only use your internal knowledge for background context.",
+  });
+}
+
+const postSearchDirective = createPostSearchDirective(searchRecords);
+if (postSearchDirective) {
+  finalMessages.push({
+    role: "system",
+    content: postSearchDirective,
+  });
+}
+
 
           const stream = await openai.chat.completions.create({
             model: MODEL_MAP[resolvedModelKey],
