@@ -84,6 +84,61 @@ const SEARCH_KEYWORDS = [
   "use google",
   "browse the web",
   "check the web",
+  "current",
+  "latest",
+  "today",
+  "right now",
+  "price of",
+  "stock price",
+  "market cap",
+  "share price",
+  "current price",
+  "current stock",
+  "current gpu",
+  "current cpu",
+  "newest gpu",
+  "newest graphics card",
+  "latest gpu",
+  "latest graphics card",
+  "latest console",
+  "current amd card",
+  "aapl",
+  "nvda",
+  "tsla",
+  "amd",
+  "msft",
+  "goog",
+];
+
+const SEARCH_REGEXES = [
+  /\bcurrent(?:ly)?\b/i,
+  /\blatest\b/i,
+  /\btoday\b/i,
+  /\bright now\b/i,
+  /\bprice of\b/i,
+  /\bstock price\b/i,
+  /\bmarket cap\b/i,
+  /\bshare price\b/i,
+  /\bnewest (?:gpu|graphics card|cpu|console|phone)\b/i,
+  /\bmost recent (?:gpu|graphics card|cpu|console|phone)\b/i,
+  /\brtx\s?(?:[4-6]\d{2}|50\d{2})\b/i,
+  /\brx\s?\d{4}\b/i,
+];
+
+const STOCK_TICKERS = [
+  "aapl",
+  "msft",
+  "nvda",
+  "amd",
+  "tsla",
+  "goog",
+  "googl",
+  "amzn",
+  "meta",
+  "intc",
+  "avgo",
+  "btc",
+  "eth",
 ];
 
 type SearchStatusEvent =
@@ -95,31 +150,77 @@ const RECENT_QUERY_KEYWORDS = [
   "today",
   "tonight",
   "current",
+  "currently",
   "latest",
   "right now",
   "breaking",
   "news",
   "this week",
   "this month",
+  "this year",
   "price",
+  "price of",
   "prices",
   "stock",
+  "stock price",
   "stocks",
+  "market cap",
   "earnings",
   "forecast",
   "version",
   "update",
   "release",
+  "launch",
+  "newest",
+  "recent",
+  "gpu",
+  "graphics card",
+  "cpu",
+  "console",
+  "rtx",
+  "rx",
+  "ps5",
+  "ps6",
+  "xbox",
+  "coin",
+  "crypto",
+  "btc",
+  "eth",
+  "aapl",
+  "nvda",
+  "tsla",
+  "amd",
+  "msft",
+  "goog",
+  "meta",
 ];
+
+function containsTicker(text: string) {
+  return STOCK_TICKERS.some((ticker) =>
+    new RegExp(`\\b${ticker}\\b`, "i").test(text)
+  );
+}
+
+function matchesSearchRegex(text: string) {
+  return SEARCH_REGEXES.some((regex) => regex.test(text));
+}
 
 function needsRecentResults(query: string) {
   const normalized = query.toLowerCase();
-  return RECENT_QUERY_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  return (
+    RECENT_QUERY_KEYWORDS.some((keyword) => normalized.includes(keyword)) ||
+    matchesSearchRegex(query) ||
+    containsTicker(query)
+  );
 }
 
 function shouldSearchWeb(userText: string) {
   const normalized = userText.toLowerCase();
-  return SEARCH_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  return (
+    SEARCH_KEYWORDS.some((keyword) => normalized.includes(keyword)) ||
+    matchesSearchRegex(userText) ||
+    containsTicker(userText)
+  );
 }
 
 function deriveSearchQuery(userText: string) {
@@ -408,7 +509,7 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a helpful assistant inside a custom LLM client. When google_search tool messages are present, treat them as live web research: read them carefully, ground your answer in the findings, cite sources, and do not claim you lack internet access or browsing ability. If tool results are missing or empty, briefly explain that before relying on prior knowledge. Use conversation history, stay concise unless more detail is requested, and remain helpful and factual.",
+          "You are a helpful assistant inside a custom LLM client with live web access through the google_search function tool. Use google_search for questions that are time-sensitive or likely to change (stock or crypto prices, hardware generations, breaking news, live sports, anything mentioning 'current', 'latest', 'today', etc.). Treat the web results as the primary factual reference for prices, release dates, specs, or event timing—if they contradict older knowledge, trust the web data and reconcile your answer accordingly. Limit yourself to 1–2 search queries per user request: start with one targeted query, then only add a second if the first clearly failed or needs refinement. When you rely on google_search, never claim you lack browsing capability; instead say things like 'Based on the latest web results…' and cite/describe the numbered sources that informed you. Prefer sources from the last 1–2 years whenever the user wants current information, and highlight when the data appears recent. If no web results are returned, state that limitation before falling back to general knowledge.",
       },
       ...historyMessages,
       ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
@@ -500,6 +601,10 @@ export async function POST(req: Request) {
             onSearchRecord: recordSearch,
             onSearchStatus: sendStatusUpdate,
           });
+
+          console.log(
+            `[toolLoop] webUsed=${searchRecords.length > 0} model=${resolvedModelKey}`
+          );
 
           const finalMessages = [...messagesWithTools];
           const stream = await openai.chat.completions.create({
@@ -703,7 +808,7 @@ async function runToolCallLoop({
   onSearchRecord,
   onSearchStatus,
 }: ToolLoopArgs): Promise<void> {
-  const MAX_ITERATIONS = 3;
+  const MAX_ITERATIONS = 2;
   const searchCache = new Map<
     string,
     {
@@ -733,7 +838,8 @@ async function runToolCallLoop({
       tool_calls: toolCalls,
     });
 
-    let sufficientResultsFound = false;
+    let iterationDidSearch = false;
+    let iterationFoundUsableResults = false;
 
     for (const toolCall of toolCalls) {
       if (
@@ -770,12 +876,12 @@ async function runToolCallLoop({
         continue;
       }
 
-      const preferFreshResults = needsRecentResults(trimmed);
+      const preferRecentResults = needsRecentResults(trimmed);
       const { message: toolResponse, record } = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
         trimmed,
         {
-          preferFreshResults,
+          preferRecent: preferRecentResults,
           onSearchStatus,
         }
       );
@@ -785,13 +891,19 @@ async function runToolCallLoop({
       if (record && record.results.length > 0 && normalized) {
         searchCache.set(normalized, { message: toolResponse, record });
       }
-      if (record?.results?.length && record.results.length >= 3) {
-        sufficientResultsFound = true;
+      if (record) {
+        iterationDidSearch = true;
+        if (record.results.length > 0) {
+          iterationFoundUsableResults = true;
+        }
       }
       messages.push(toolResponse);
     }
 
-    if (sufficientResultsFound) {
+    if (!iterationDidSearch) {
+      break;
+    }
+    if (iterationFoundUsableResults) {
       break;
     }
   }
@@ -828,7 +940,7 @@ async function injectManualSearchResult(
     toolCallId,
     trimmed,
     {
-      preferFreshResults: needsRecentResults(trimmed),
+      preferRecent: needsRecentResults(trimmed),
       onSearchStatus,
     }
   );
@@ -842,7 +954,7 @@ async function createToolResponseMessage(
   toolCallId: string,
   query: string,
   options: {
-    preferFreshResults?: boolean;
+    preferRecent?: boolean;
     onSearchStatus?: (status: SearchStatusEvent) => void;
   } = {}
 ): Promise<{
@@ -863,12 +975,13 @@ async function createToolResponseMessage(
 
   try {
     options.onSearchStatus?.({ type: "search-start", query: trimmed });
+    const preferRecent = Boolean(options.preferRecent);
     const results = await googleSearch(trimmed, {
-      preferFreshResults: options.preferFreshResults,
+      preferRecent,
     });
     const summary = formatSearchSummary(trimmed, results);
-    console.info(
-      `Google search: query='${trimmed}' results=${results.length}`
+    console.log(
+      `[googleSearch] query="${trimmed}" preferRecent=${preferRecent} results=${results.length}`
     );
     options.onSearchStatus?.({
       type: "search-complete",
@@ -914,17 +1027,32 @@ async function createToolResponseMessage(
   }
 }
 
+function extractYear(text: string) {
+  const match = text.match(/\b(20\d{2})\b/);
+  return match ? match[1] : null;
+}
+
 function formatSearchSummary(query: string, results: GoogleSearchResult[]) {
+  const header =
+    `Web search results for "${query}":\n` +
+    "Use these findings as the authoritative, up-to-date facts for any time-sensitive detail. If they conflict with your prior knowledge, trust these results.";
+
   if (!results.length) {
-    return `Web search results for "${query}":\nNo results found.`;
+    return (
+      `${header}\nNo results found. Tell the user that live web sources were empty before relying on general knowledge.`
+    );
   }
 
   const lines = results.slice(0, 5).map((item, index) => {
-    const snippet = item.snippet?.replace(/\s+/g, " ") ?? "";
-    return `${index + 1}. ${item.title} (${item.displayLink}) - ${snippet}`;
+    const normalizedSnippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
+    const year = extractYear(`${item.title} ${normalizedSnippet}`);
+    const yearSuffix = year ? ` (source year: ${year})` : "";
+    const title = item.title?.trim() || "Untitled result";
+    const site = item.displayLink?.trim() || item.link || "";
+    return `${index + 1}. ${title} — ${site}${yearSuffix}: ${normalizedSnippet}`;
   });
 
-  return `Web search results for "${query}":\n${lines.join("\n")}\nUse the numbered results above to ground your response.`;
+  return `${header}\n${lines.join("\n")}\nGround your answer in these numbered sources and cite them explicitly.`;
 }
 
 async function ensureChatTitle({

@@ -21,7 +21,7 @@ export class GoogleSearchRequestError extends Error {
 
 type GoogleSearchOptions = {
   /** Bias toward more recent results when true. */
-  preferFreshResults?: boolean;
+  preferRecent?: boolean;
 };
 
 export async function googleSearch(
@@ -38,19 +38,16 @@ export async function googleSearch(
     throw new MissingGoogleConfigError();
   }
 
-  const preferFreshResults = Boolean(options.preferFreshResults);
-  const adjustedQuery = preferFreshResults ? `${query} latest` : query;
-
-  console.info(
-    `[googleSearch] Executing query="${adjustedQuery}" (fresh=${preferFreshResults})`
-  );
+  const preferRecent = Boolean(options.preferRecent);
+  const adjustedQuery = preferRecent ? `${query} latest` : query;
 
   const url = new URL("https://www.googleapis.com/customsearch/v1");
   url.searchParams.set("key", apiKey);
   url.searchParams.set("cx", cx);
   url.searchParams.set("q", adjustedQuery);
-  if (preferFreshResults) {
+  if (preferRecent) {
     url.searchParams.set("sort", "date");
+    url.searchParams.set("dateRestrict", "m6");
   }
 
   let response: Response;
@@ -79,6 +76,10 @@ export async function googleSearch(
   }
 
   const items = Array.isArray(payload?.items) ? payload.items : [];
+
+  if (!items.length) {
+    return [];
+  }
 
   return items.map((item: Partial<GoogleSearchResult>) => ({
     title: (item?.title as string | undefined) || "Untitled result",
