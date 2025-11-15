@@ -14,6 +14,7 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
+import type { SourceChip } from "@/lib/chatTypes";
 
 type SearchSource = {
   title: string;
@@ -36,6 +37,7 @@ type MessageMetadata = {
   searchRecords?: SearchRecord[];
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
+  sources?: SourceChip[];
 };
 
 type ChatMessage = {
@@ -771,6 +773,8 @@ type SendMessageOptions = {
                           meta.searchRecords ??
                           msg.metadata?.searchRecords ??
                           [],
+                        sources:
+                          meta.sources ?? msg.metadata?.sources ?? [],
                         thoughtDurationSeconds: msg.thoughtDurationSeconds,
                         thoughtDurationLabel: msg.thoughtDurationLabel,
                       };
@@ -1584,11 +1588,15 @@ type SendMessageOptions = {
                   {messages.map((m, i) => {
                     const messageId = m.id ?? `msg-${i}`;
                     const isAssistant = m.role === "assistant";
-                    const hasSources = Boolean(
+                    const hasSearchRecords = Boolean(
                       isAssistant &&
                         m.usedWebSearch &&
                         (m.searchRecords?.length || 0) > 0
                     );
+                    const sourceChips = (m.metadata?.sources ?? []).filter(
+                      (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
+                    );
+                    const showSourceChips = sourceChips.length > 0;
                     const isStreamingAssistantMessage =
                       isAssistant &&
                       activeAssistantMessageId === messageId;
@@ -1640,6 +1648,23 @@ type SendMessageOptions = {
                               </div>
                             </div>
 
+                            {showSourceChips && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {sourceChips.map((chip) => (
+                                  <a
+                                    key={`${messageId}-source-${chip.id}-${chip.domain}`}
+                                    href={chip.url}
+                                    target="_blank"
+                                    rel="noreferrer noopener"
+                                    className="rounded-full border border-[#2f2f36] bg-[#141417] px-3 py-1 text-[12px] text-[#bac4ff] transition hover:border-[#5c5cf5]"
+                                    title={chip.title}
+                                  >
+                                    {chip.domain}
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+
                             {!isStreamingAssistantMessage && (
                               <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
                                 <button
@@ -1652,7 +1677,7 @@ type SendMessageOptions = {
                                   {copiedMessageId === messageId ? "Copied" : "Copy"}
                                 </button>
 
-                                {hasSources && (
+                                {hasSearchRecords && (
                                   <>
                                     <span
                                       className="h-4 w-px bg-[#38383d]"
@@ -1725,10 +1750,10 @@ type SendMessageOptions = {
                               </div>
                             )}
 
-                            {hasSources &&
-                              expandedSourcesId === messageId &&
-                              !isStreamingAssistantMessage && (
-                                <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
+                                {hasSearchRecords &&
+                                  expandedSourcesId === messageId &&
+                                  !isStreamingAssistantMessage && (
+                                    <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
                                   {m.searchRecords?.map((record, idx) => (
                                     <div key={`${record.query}-${idx}`} className="space-y-2">
                                       <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
@@ -1756,9 +1781,9 @@ type SendMessageOptions = {
                                               </p>
                                             </div>
                                           ))}
-                                        </div>
-                                      )}
                                     </div>
+                                  )}
+                          </div>
                                   ))}
                                 </div>
                               )}
