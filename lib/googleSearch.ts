@@ -24,8 +24,15 @@ export async function googleSearch(query: string): Promise<GoogleSearchResult[]>
   const cx = process.env.GOOGLE_CX;
 
   if (!apiKey || !cx) {
+    console.error(
+      `[googleSearch] Missing config (key len=${apiKey?.length ?? 0}, cx len=${cx?.length ?? 0})`
+    );
     throw new MissingGoogleConfigError();
   }
+
+  console.info(
+    `[googleSearch] Executing query="${query}" (key len=${apiKey.length}, cx len=${cx.length})`
+  );
 
   const url = new URL("https://www.googleapis.com/customsearch/v1");
   url.searchParams.set("key", apiKey);
