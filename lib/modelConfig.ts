@@ -105,6 +105,15 @@ function autoReasoningForModelAndPrompt(
   return null;
 }
 
+function ensureMiniNanoEffort(
+  effort: ReasoningEffort | null
+): Exclude<ReasoningEffort, "none"> {
+  if (!effort || effort === "none") {
+    return "low";
+  }
+  return effort === "high" || effort === "medium" ? effort : "low";
+}
+
 export function getModelAndReasoningConfig(
   modelFamily: ModelFamily,
   speedMode: SpeedMode,
@@ -116,21 +125,28 @@ export function getModelAndReasoningConfig(
   const trimmedPrompt = promptText.trim();
 
   let chosenEffort: ReasoningEffort | null = null;
+  const isFullFamily = resolvedFamily === "gpt-5.1";
 
   if (speedMode === "instant") {
-    chosenEffort = shouldUseLightReasoning(trimmedPrompt) ? "low" : null;
+    chosenEffort = isFullFamily ? "none" : "low";
   } else if (speedMode === "thinking") {
     chosenEffort = pickMediumOrHigh(trimmedPrompt);
   } else {
-    chosenEffort = autoReasoningForModelAndPrompt(trimmedPrompt, resolvedFamily);
+    const autoEffort = autoReasoningForModelAndPrompt(
+      trimmedPrompt,
+      resolvedFamily
+    );
+    if (isFullFamily) {
+      chosenEffort = autoEffort ?? "none";
+    } else {
+      chosenEffort = ensureMiniNanoEffort(autoEffort);
+    }
   }
 
   const config: ModelConfig = { model };
 
-  if (chosenEffort && chosenEffort !== "none") {
+  if (chosenEffort) {
     config.reasoning = { effort: chosenEffort };
-  } else if (resolvedFamily === "gpt-5.1") {
-    config.reasoning = { effort: "none" };
   }
 
   if (typeof window === "undefined") {
