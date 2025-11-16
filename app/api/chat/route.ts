@@ -622,11 +622,7 @@ export async function POST(req: Request) {
       userText,
       forceWebSearch,
     });
-    const webSearchToolDefinition = { type: "web_search" } as const;
-    const webSearchTool: Tool = webSearchToolDefinition;
-    const allowedToolChoiceList = [
-      webSearchToolDefinition,
-    ] as Array<{ [key: string]: unknown }>;
+    const webSearchTool: Tool = { type: "web_search" };
     const webSearchTools: Tool[] | undefined = allowWebSearch
       ? [webSearchTool]
       : undefined;
@@ -634,7 +630,7 @@ export async function POST(req: Request) {
       ? {
           type: "allowed_tools",
           mode: forceWebSearch ? "required" : "auto",
-          tools: allowedToolChoiceList,
+          tools: [webSearchTool],
         }
       : undefined;
 
