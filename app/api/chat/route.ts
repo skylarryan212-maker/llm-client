@@ -3,19 +3,8 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import {
-  GoogleSearchRequestError,
-  MissingGoogleConfigError,
-  googleSearch,
-  peekCachedSearch,
-} from "@/lib/googleSearch";
-import type { GoogleSearchResult } from "@/lib/googleSearch";
+import type { Response as OpenAIResponse } from "openai/resources/responses/responses";
 import type { SourceChip } from "@/lib/chatTypes";
-import {
-  planSearchQuery,
-  normalizeAndRankSources,
-  type RankedSource,
-} from "@/lib/searchPlanner";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -51,59 +40,121 @@ type PersistedHistoryRow = {
 };
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
+type ModelKey = Exclude<ModelMode, "auto">;
+type ReasoningEffortSetting =
+  | "auto"
+  | "none"
+  | "low"
+  | "medium"
+  | "high";
+type VerbositySetting = "auto" | "low" | "medium" | "high";
+type ConcreteReasoningEffort = Exclude<ReasoningEffortSetting, "auto">;
+type ConcreteVerbosity = Exclude<VerbositySetting, "auto">;
+
+export type RankedSource = {
+  title: string;
+  url: string;
+  snippet: string;
+  domain: string;
+  sourceType: "official" | "news" | "reference" | "other";
+  published: string | null;
+  confidenceScore: number;
+};
 
 type SearchRecord = {
   query: string;
-  rawResults: GoogleSearchResult[];
-  rankedSources: RankedSource[];
   summary: string;
-  fromCache: boolean;
-};
-
-type SearchBudget = { remaining: number };
-type SearchSequenceTracker = { value: number };
-
-type SearchDebugLogger = {
-  step: (stepNumber: number, message: string, meta?: Record<string, unknown>) => void;
-};
-
-type ResponseMetadata = {
-  usedModel: string;
-  usedModelMode: ModelMode;
-  requestedModelMode: ModelMode;
-  usedWebSearch: boolean;
-  searchRecords: SearchRecord[];
-  sources: SourceChip[];
-};
-
-const MODEL_MAP = {
-  nano: "gpt-5-nano-2025-08-07",
-  mini: "gpt-5-mini-2025-08-07",
-  full: "gpt-5.1-2025-11-13",
-} as const;
-
-const GOOGLE_SEARCH_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "google_search",
-    description: "Search the web using Google Custom Search",
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The query to send to Google Custom Search",
-        },
-      },
-      required: ["query"],
-    },
-  },
+  rankedSources: RankedSource[];
+  rawResults?: RankedSource[];
+  fromCache?: boolean;
 };
 
 type SearchStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
   | { type: "search-error"; query: string; message?: string };
+
+type ResponseMetadata = {
+  usedModel: string;
+  usedModelMode: ModelKey;
+  requestedModelMode: ModelMode;
+  usedWebSearch: boolean;
+  searchRecords: SearchRecord[];
+  sources: SourceChip[];
+};
+
+const MODEL_MAP: Record<ModelKey, string> = {
+  nano: "gpt-5-nano-2025-08-07",
+  mini: "gpt-5-mini-2025-08-07",
+  full: "gpt-5.1-2025-11-13",
+};
+
+const MODEL_CAPABILITIES: Record<ModelKey, { supportsReasoning: boolean; supportsVerbosity: boolean }> = {
+  nano: { supportsReasoning: true, supportsVerbosity: true },
+  mini: { supportsReasoning: true, supportsVerbosity: true },
+  full: { supportsReasoning: true, supportsVerbosity: true },
+};
+
+const ROUTER_DEFAULTS: Record<ModelKey, { reasoning: ConcreteReasoningEffort; verbosity: ConcreteVerbosity }> = {
+  nano: { reasoning: "none", verbosity: "low" },
+  mini: { reasoning: "low", verbosity: "medium" },
+  full: { reasoning: "medium", verbosity: "medium" },
+};
+
+const BASE_SYSTEM_PROMPT =
+  "You are a web-connected assistant with access to the `web_search` tool for live information.\n" +
+  "Follow these rules:\n" +
+  "- Use internal knowledge for timeless concepts, math, or historical context.\n" +
+  "- For questions about current events, market conditions, weather, schedules, releases, or other fast-changing facts, prefer calling `web_search` to gather fresh data.\n" +
+  "- When `web_search` returns results, treat them as live, up-to-date sources. Summarize them, cite domains inline using (Source: domain.com), and close with a short Sources list that repeats the referenced domains.\n" +
+  "- Never claim you lack internet access or that your knowledge is outdated in a turn where tool outputs were provided.\n" +
+  "- If the tool returns little or no information, acknowledge that gap before relying on older knowledge.\n" +
+  "- Do not send capability or identity questions to `web_search`; answer those directly.\n" +
+  "- Keep answers clear and grounded, blending background context with any live data you retrieved.";
+
+const FORCE_WEB_SEARCH_PROMPT =
+  "The user explicitly requested live web search. Ensure you call the `web_search` tool for this turn unless it would clearly be redundant.";
+
+const LIVE_DATA_HINTS = [
+  "current",
+  "today",
+  "tonight",
+  "latest",
+  "recent",
+  "breaking",
+  "news",
+  "update",
+  "updated",
+  "now",
+  "right now",
+  "this week",
+  "this month",
+  "this year",
+  "price",
+  "prices",
+  "market",
+  "stock",
+  "stocks",
+  "quote",
+  "report",
+  "earnings",
+  "forecast",
+  "weather",
+  "temperature",
+  "release",
+  "launch",
+  "trend",
+];
+
+const META_QUESTION_PATTERNS = [
+  /\b(?:can|could|would) you (?:browse|access|use) (?:the )?(?:internet|web)/i,
+  /\b(?:do|can) you have internet/i,
+  /\bwhat(?:'s| is) your knowledge cutoff/i,
+  /\bwhen were you (?:trained|last updated)/i,
+  /\bare you able to search/i,
+  /\bwhat model are you/i,
+  /\bhow do your tools work/i,
+];
 
 const PLACEHOLDER_TITLES = [
   "",
@@ -137,6 +188,148 @@ function normalizeGeneratedTitle(input: string | null | undefined) {
   return normalized;
 }
 
+function parseReasoningSetting(value: unknown): ReasoningEffortSetting {
+  const allowed: ReasoningEffortSetting[] = [
+    "auto",
+    "none",
+    "low",
+    "medium",
+    "high",
+  ];
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase() as ReasoningEffortSetting;
+    if (allowed.includes(normalized)) {
+      return normalized;
+    }
+  }
+  return "auto";
+}
+
+function parseVerbositySetting(value: unknown): VerbositySetting {
+  const allowed: VerbositySetting[] = ["auto", "low", "medium", "high"];
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase() as VerbositySetting;
+    if (allowed.includes(normalized)) {
+      return normalized;
+    }
+  }
+  return "auto";
+}
+
+function resolveReasoningSetting(
+  requested: ReasoningEffortSetting,
+  fallback: ConcreteReasoningEffort
+): ConcreteReasoningEffort {
+  return requested === "auto" ? fallback : requested;
+}
+
+function resolveVerbositySetting(
+  requested: VerbositySetting,
+  fallback: ConcreteVerbosity
+): ConcreteVerbosity {
+  return requested === "auto" ? fallback : requested;
+}
+
+function shouldAllowWebSearch({
+  userText,
+  forceWebSearch,
+}: {
+  userText: string;
+  forceWebSearch: boolean;
+}) {
+  if (forceWebSearch) {
+    return true;
+  }
+  const trimmed = userText.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (META_QUESTION_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  return LIVE_DATA_HINTS.some((hint) => lower.includes(hint));
+}
+
+function buildSourceChips(records: SearchRecord[], maxSources = 4): SourceChip[] {
+  if (!records.length) {
+    return [];
+  }
+  const chips: SourceChip[] = [];
+  const seen = new Set<string>();
+  let nextId = 1;
+
+  for (const record of records) {
+    for (const result of record.rankedSources) {
+      const rawUrl = (result.url || "").trim();
+      if (!rawUrl) {
+        continue;
+      }
+      const url = normalizeSourceUrl(rawUrl);
+      const domain =
+        extractDomainFromUrl(url) ||
+        result.domain ||
+        url;
+      const normalizedDomain = domain.toLowerCase();
+      if (seen.has(normalizedDomain)) {
+        continue;
+      }
+      chips.push({
+        id: nextId,
+        title: result.title?.trim() || domain,
+        url,
+        domain,
+      });
+      seen.add(normalizedDomain);
+      nextId += 1;
+      if (chips.length >= maxSources) {
+        return chips;
+      }
+    }
+  }
+
+  return chips;
+}
+
+function normalizeSourceUrl(input: string) {
+  if (!input) {
+    return "";
+  }
+  try {
+    return new URL(input).toString();
+  } catch {
+    try {
+      return new URL(`https://${input}`).toString();
+    } catch {
+      return input;
+    }
+  }
+}
+
+function extractDomainFromUrl(input: string) {
+  if (!input) {
+    return null;
+  }
+  try {
+    const host = new URL(input).hostname;
+    return host.replace(/^www\./i, "");
+  } catch {
+    if (!/^https?:/i.test(input)) {
+      try {
+        const host = new URL(`https://${input}`).hostname;
+        return host.replace(/^www\./i, "");
+      } catch {
+        // fall through
+      }
+    }
+    const sanitized = input
+      .replace(/^https?:\/\//i, "")
+      .split("/")[0]
+      .trim();
+    return sanitized || null;
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -149,6 +342,8 @@ export async function POST(req: Request) {
       ? (requestedModeRaw as ModelMode)
       : "auto";
     const forceWebSearch = Boolean(body.forceWebSearch);
+    const reasoningSetting = parseReasoningSetting(body.reasoningEffort);
+    const verbositySetting = parseVerbositySetting(body.verbosity);
     const retryAssistantMessageId =
       typeof body.retryAssistantMessageId === "string" &&
       body.retryAssistantMessageId.trim().length > 0
@@ -176,7 +371,6 @@ export async function POST(req: Request) {
 
     const supabase = getSupabaseClient();
 
-    // Load the persisted history so the model gets consistent context.
     const { data: historyRows, error: historyError } = await supabase
       .from("messages")
       .select("id, role, content")
@@ -331,7 +525,7 @@ export async function POST(req: Request) {
 
     const openai = getOpenAIClient();
 
-    const { model: resolvedModelKey, titleSuggestion } = await selectModelKey({
+    const routerResult = await routeModel({
       openai,
       history: historyForModel,
       userText,
@@ -340,16 +534,16 @@ export async function POST(req: Request) {
     });
 
     let routerTitlePromise: Promise<string | null> | null = null;
-    if (needsTitle && titleSuggestion) {
+    if (needsTitle && routerResult.titleSuggestion) {
       routerTitlePromise = applyTitleSuggestion({
         supabase,
         conversationId,
-        suggestedTitle: titleSuggestion,
+        suggestedTitle: routerResult.titleSuggestion,
       });
     }
 
     let manualTitlePromise: Promise<string | null> | null = null;
-    if (needsTitle && !titleSuggestion && modelMode !== "auto") {
+    if (needsTitle && !routerResult.titleSuggestion && modelMode !== "auto") {
       manualTitlePromise = requestNanoTitle({
         openai,
         userMessage: userText,
@@ -364,42 +558,41 @@ export async function POST(req: Request) {
       );
     }
 
-    const historyMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
-      historyForModel.map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+    const historyMessages = historyForModel.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
 
-    const baseMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      {
-        role: "system",
-        content:
-          "You are a web-connected assistant. You can call `google_search` to fetch up-to-date information from the public internet.\n" +
-          "Rules:\n" +
-          "1. Call google_search whenever the user asks for current, changing, or post-training facts (recent releases, weather, markets, local info, breaking news, etc.). Keep each query short and human-like.\n" +
-          "2. The tool returns live sources that override your training data. When those results exist you must use them, cite them inline (Source: domain.com), and end with a Sources section that repeats the same domains. Never claim you cannot browse the web or that your knowledge is out of date in those turns.\n" +
-          "3. You may refine at most two google_search calls per user request. If the limit is hit, answer with the information you already have and explain the constraint.\n" +
-          "4. Never send meta/capability/model questions to google_search—answer those from internal knowledge.\n" +
-          "5. Blend internal knowledge with tool data: use background knowledge for stable context, but rely on live sources for time-sensitive specifics and never contradict high-confidence tool data.\n" +
-          "6. If tool results are empty or insufficient, say so before falling back to general knowledge.",
-      },
+    const allowWebSearch = shouldAllowWebSearch({
+      userText,
+      forceWebSearch,
+    });
+
+    const systemMessages = [
+      { role: "system" as const, content: BASE_SYSTEM_PROMPT },
+      ...(forceWebSearch ? ([
+        { role: "system" as const, content: FORCE_WEB_SEARCH_PROMPT },
+      ] as const) : []),
+    ];
+
+    const requestMessages = [
+      ...systemMessages,
       ...historyMessages,
-      ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
+      ...(isRetryRequest ? [] : ([{ role: "user" as const, content: userText }] as const)),
     ];
 
-    const messagesWithTools: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      ...baseMessages,
-    ];
-    const searchRecords: SearchRecord[] = [];
-    const recordSearch = (record: SearchRecord) => {
-      searchRecords.push({
-        query: record.query,
-        summary: record.summary,
-        rawResults: record.rawResults.slice(0, 5),
-        rankedSources: record.rankedSources.slice(0, 5),
-        fromCache: record.fromCache,
-      });
-    };
+    const targetModelKey = routerResult.modelKey;
+    const targetModel = MODEL_MAP[targetModelKey];
+    const resolvedReasoning = resolveReasoningSetting(
+      reasoningSetting,
+      routerResult.defaultReasoningEffort
+    );
+    const resolvedVerbosity = resolveVerbositySetting(
+      verbositySetting,
+      routerResult.defaultVerbosity
+    );
+    const modelSupportsReasoning = MODEL_CAPABILITIES[targetModelKey].supportsReasoning;
+    const modelSupportsVerbosity = MODEL_CAPABILITIES[targetModelKey].supportsVerbosity;
 
     const encoder = new TextEncoder();
     const historyForTitle = isRetryRequest
@@ -422,37 +615,6 @@ export async function POST(req: Request) {
         allowUserOnly: true,
       });
     }
-
-    const plannerView = planSearchQuery(userText, { userText });
-    const searchLogger = createSearchDebugLogger({
-      conversationId,
-      userText,
-    });
-    const plannerAllowsSearch = !plannerView.skipSearch && plannerView.intent !== "meta";
-    searchLogger.step(1, "Planner intent", {
-      reason: plannerView.reason,
-      topic: plannerView.topic ?? "general",
-      preferRecent: plannerView.preferRecent,
-      intent: plannerView.intent,
-    });
-
-    const searchBudget: SearchBudget = { remaining: 2 };
-    const searchSequence: SearchSequenceTracker = { value: 0 };
-    const shouldForceSearch = Boolean(
-      forceWebSearch && plannerAllowsSearch && Boolean(plannerView.query)
-    );
-    searchLogger.step(
-      2,
-      shouldForceSearch
-        ? "User forced pre-search"
-        : "Model will decide on tool calls",
-      shouldForceSearch
-        ? {
-            query: plannerView.query,
-            preferRecent: plannerView.preferRecent,
-          }
-        : undefined
-    );
 
     const readable = new ReadableStream({
       async start(controller) {
@@ -481,132 +643,85 @@ export async function POST(req: Request) {
         announceTitle(routerTitlePromise);
         announceTitle(manualTitlePromise);
 
+        enqueueJson({
+          meta: {
+            requestedModelMode: modelMode,
+            assistantMessageRowId: assistantRowId,
+            userMessageRowId: userRowId,
+          },
+        });
+
         try {
-          if (shouldForceSearch && plannerView.query) {
-            await injectManualSearchResult(
-              messagesWithTools,
-              plannerView.query,
-              {
-                preferRecent: plannerView.preferRecent,
-                onSearchRecord: recordSearch,
-                onSearchStatus: sendStatusUpdate,
-                searchBudget,
-                searchLogger,
-                reason: forceWebSearch
-                  ? "user-forced pre-search"
-                  : "intent planner",
-                searchSequence,
+          const responseStream = await openai.responses.stream({
+            model: targetModel,
+            input: requestMessages,
+            stream: true,
+            tools: allowWebSearch ? ([{ type: "web_search" as const }] as const) : undefined,
+            include: allowWebSearch
+              ? [
+                  "web_search_call.results",
+                  "web_search_call.action.sources",
+                ]
+              : undefined,
+            reasoning:
+              modelSupportsReasoning
+                ? { effort: resolvedReasoning }
+                : undefined,
+            text:
+              modelSupportsVerbosity
+                ? { verbosity: resolvedVerbosity }
+                : undefined,
+          });
+
+          for await (const event of responseStream) {
+            if (event.type === "response.output_text.delta") {
+              const token = event.delta;
+              if (token) {
+                fullAssistantMessage += token;
+                enqueueJson({ token });
               }
-            );
+            } else if (
+              event.type === "response.web_search_call.in_progress" ||
+              event.type === "response.web_search_call.searching"
+            ) {
+              sendStatusUpdate({
+                type: "search-start",
+                query: "web search",
+              });
+            } else if (event.type === "response.web_search_call.completed") {
+              sendStatusUpdate({
+                type: "search-complete",
+                query: "web search",
+              });
+            }
           }
 
-          await runToolCallLoop({
-            openai,
-            model: MODEL_MAP[resolvedModelKey],
-            messages: messagesWithTools,
-            onSearchRecord: recordSearch,
-            onSearchStatus: sendStatusUpdate,
-            searchBudget,
-            searchLogger,
-            searchSequence,
-            userText,
-          });
-
-          console.log(
-  `[toolLoop] webUsed=${searchRecords.length > 0} model=${resolvedModelKey}`
-);
-
-// Start from the tool-augmented messages
-const finalMessages = [...messagesWithTools];
-
-// If any web search actually ran, make it *impossible* for the model
-// to claim it has no web access or only stale knowledge.
-if (searchRecords.length > 0) {
-  finalMessages.push({
-    role: "system",
-    content:
-      "You have successfully called the `google_search` tool and received up-to-date web " +
-      "results for this user request. You MUST treat those tool results as live data and " +
-      "the primary evidence for your answer. You are not allowed to say that you cannot " +
-      "browse the web, that you lack live data, or that your knowledge only goes up to " +
-      "a past cutoff date when answering this question. Use the tool results, cite them, " +
-      "and only use your internal knowledge for background context.",
-  });
-}
-
-const postSearchDirective = createPostSearchDirective(searchRecords);
-if (postSearchDirective) {
-  finalMessages.push({
-    role: "system",
-    content: postSearchDirective,
-  });
-}
-
-
-          const stream = await openai.chat.completions.create({
-            model: MODEL_MAP[resolvedModelKey],
-            messages: finalMessages,
-            stream: true,
-            tools: [GOOGLE_SEARCH_TOOL],
-            tool_choice: "none",
-          });
-
-          const usedWebSearch = searchRecords.length > 0;
-          const sources = buildSourceChips(searchRecords);
+          const finalResponse = await responseStream.finalResponse();
+          if (finalResponse.output_text) {
+            fullAssistantMessage = finalResponse.output_text;
+          }
+          const searchMetadata = extractSearchMetadata(finalResponse);
+          const usedWebSearch = searchMetadata.records.length > 0;
+          const sources = buildSourceChips(searchMetadata.records);
+          if (searchMetadata.failed) {
+            sendStatusUpdate({
+              type: "search-error",
+              query: "web search",
+              message: "Web search failed; using prior knowledge.",
+            });
+          }
           responseMetadata = {
-            usedModel: MODEL_MAP[resolvedModelKey],
-            usedModelMode: resolvedModelKey,
+            usedModel: targetModel,
+            usedModelMode: targetModelKey,
             requestedModelMode: modelMode,
             usedWebSearch,
-            searchRecords,
+            searchRecords: searchMetadata.records,
             sources,
           };
 
-          if (usedWebSearch) {
-            const groundedDomains = searchRecords
-              .flatMap((record) =>
-                record.rankedSources.slice(0, 2).map((source) => source.domain)
-              )
-              .filter(Boolean);
-            searchLogger.step(8, "Live data will override training data", {
-              domains: groundedDomains,
-            });
-            const groundingSummary = searchRecords
-              .map((record) => {
-                const domains = record.rankedSources
-                  .slice(0, 2)
-                  .map((source) => source.domain)
-                  .join(", ");
-                return `${record.query}: ${domains}`;
-              })
-              .join(" | ");
-            searchLogger.step(9, "Answer grounded in", {
-              summary: groundingSummary || "live data available",
-            });
-          } else {
-            searchLogger.step(8, "No live web sources used", {
-              reason: plannerAllowsSearch ? "model skipped" : plannerView.reason,
-            });
-            searchLogger.step(9, "Answer relies on internal knowledge", {
-              summary: "no web citations",
-            });
-          }
-
           enqueueJson({
-            meta: {
-              ...responseMetadata,
-              assistantMessageRowId: assistantRowId,
-              userMessageRowId: userRowId,
-            },
+            meta: responseMetadata,
           });
-
-          for await (const chunk of stream) {
-            const token = chunk.choices[0]?.delta?.content;
-            if (token) {
-              fullAssistantMessage += token;
-              enqueueJson({ token });
-            }
-          }
         } catch (err) {
           console.error("Stream error:", err);
           enqueueJson({ error: "upstream_error" });
@@ -616,7 +731,7 @@ if (postSearchDirective) {
             try {
               const updatePayload: {
                 content: string;
-                metadata?: typeof responseMetadata;
+                metadata?: ResponseMetadata;
               } = { content: fullAssistantMessage };
 
               if (responseMetadata) {
@@ -662,7 +777,7 @@ if (postSearchDirective) {
   }
 }
 
-type SelectModelArgs = {
+type RouteModelArgs = {
   openai: OpenAI;
   history: HistoryMessage[];
   userText: string;
@@ -670,30 +785,36 @@ type SelectModelArgs = {
   requestTitle?: boolean;
 };
 
-type SelectModelResult = {
-  model: keyof typeof MODEL_MAP;
+type RoutedModelConfig = {
+  modelKey: ModelKey;
+  defaultReasoningEffort: ConcreteReasoningEffort;
+  defaultVerbosity: ConcreteVerbosity;
   titleSuggestion?: string | null;
 };
 
-async function selectModelKey({
+async function routeModel({
   openai,
   history,
   userText,
   requestedMode,
   requestTitle = false,
-}: SelectModelArgs): Promise<SelectModelResult> {
+}: RouteModelArgs): Promise<RoutedModelConfig> {
   if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
-    return { model: requestedMode };
+    return {
+      modelKey: requestedMode,
+      defaultReasoningEffort: ROUTER_DEFAULTS[requestedMode].reasoning,
+      defaultVerbosity: ROUTER_DEFAULTS[requestedMode].verbosity,
+    };
   }
 
   try {
-    const completion = await openai.chat.completions.create({
+    const response = await openai.responses.create({
       model: MODEL_MAP.nano,
-      messages: [
+      input: [
         {
           role: "system",
           content:
-            'Given the user message and recent context, respond with minified JSON {\"mode\":\"nano|mini|full\",\"title\":\"...\"}. "mode" selects the response model: nano for trivial or short questions, mini for most normal questions, full for complex or high-stakes reasoning. If a title is not needed, set "title" to an empty string. When a title is requested, keep it to 3-8 words with no punctuation, emojis, or filler.',
+            'Given the user message and recent context, respond with minified JSON {"mode":"nano|mini|full","title":"..."}. "mode" selects the response model: nano for trivial or short questions, mini for most normal questions, full for complex or high-stakes reasoning. If a title is not needed, set "title" to an empty string. When a title is requested, keep it to 3-8 words with no punctuation, emojis, or filler.',
         },
         {
           role: "user",
@@ -701,12 +822,13 @@ async function selectModelKey({
         },
       ],
     });
-
-    const content = completion.choices[0]?.message?.content?.trim() ?? "";
+    const content = response.output_text?.trim() ?? "";
     const parsed = parseRouterResponse(content);
     if (parsed?.mode) {
       return {
-        model: parsed.mode,
+        modelKey: parsed.mode,
+        defaultReasoningEffort: ROUTER_DEFAULTS[parsed.mode].reasoning,
+        defaultVerbosity: ROUTER_DEFAULTS[parsed.mode].verbosity,
         titleSuggestion: requestTitle ? parsed.title ?? "" : undefined,
       };
     }
@@ -714,7 +836,12 @@ async function selectModelKey({
     console.warn("Model router failed, defaulting to mini", error);
   }
 
-  return { model: "mini", titleSuggestion: null };
+  return {
+    modelKey: "mini",
+    defaultReasoningEffort: ROUTER_DEFAULTS.mini.reasoning,
+    defaultVerbosity: ROUTER_DEFAULTS.mini.verbosity,
+    titleSuggestion: null,
+  };
 }
 
 function buildRouterPrompt(
@@ -739,7 +866,7 @@ ${recentBlock}
 Latest user request:
 ${userText}
 
-Respond with JSON containing keys \"mode\" and \"title\". ${titleDirective}`;
+Respond with JSON containing keys "mode" and "title". ${titleDirective}`;
 }
 
 function parseRouterResponse(content: string) {
@@ -748,7 +875,7 @@ function parseRouterResponse(content: string) {
     const rawMode = typeof parsed.mode === "string" ? parsed.mode.toLowerCase() : "";
     const title = typeof parsed.title === "string" ? parsed.title : "";
     if (rawMode === "nano" || rawMode === "mini" || rawMode === "full") {
-      return { mode: rawMode as keyof typeof MODEL_MAP, title };
+      return { mode: rawMode as ModelKey, title };
     }
   } catch {
     // ignore
@@ -756,522 +883,175 @@ function parseRouterResponse(content: string) {
 
   const normalized = content.trim().toLowerCase();
   if (normalized === "nano" || normalized === "mini" || normalized === "full") {
-    return { mode: normalized as keyof typeof MODEL_MAP, title: "" };
+    return { mode: normalized as ModelKey, title: "" };
   }
   return null;
 }
 
-type ToolLoopArgs = {
-  openai: OpenAI;
-  model: string;
-  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
-  onSearchRecord?: (record: SearchRecord) => void;
-  onSearchStatus?: (status: SearchStatusEvent) => void;
-  searchBudget: SearchBudget;
-  searchLogger: SearchDebugLogger;
-  searchSequence: SearchSequenceTracker;
-  userText: string;
-};
-
-async function runToolCallLoop({
-  openai,
-  model,
-  messages,
-  onSearchRecord,
-  onSearchStatus,
-  searchBudget,
-  searchLogger,
-  searchSequence,
-  userText,
-}: ToolLoopArgs): Promise<void> {
-  const MAX_ITERATIONS = 2;
-  const searchCache = new Map<
-    string,
-    {
-      message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
-      record: SearchRecord | null;
+function extractSearchMetadata(response: OpenAIResponse) {
+  const records: SearchRecord[] = [];
+  let failed = false;
+  const outputs = Array.isArray(response.output) ? response.output : [];
+  for (const item of outputs) {
+    if (!item || typeof item !== "object") {
+      continue;
     }
-  >();
-
-  for (let i = 0; i < MAX_ITERATIONS; i += 1) {
-    const completion = await openai.chat.completions.create({
-      model,
-      messages,
-      tools: [GOOGLE_SEARCH_TOOL],
-      tool_choice: "auto",
-    });
-
-    const choice = completion.choices[0];
-    const toolCalls = choice?.message?.tool_calls;
-
-    if (!toolCalls || toolCalls.length === 0) {
-      break;
+    if ((item as { type?: string }).type !== "web_search_call") {
+      continue;
     }
-
-    messages.push({
-      role: "assistant",
-      content: choice.message?.content ?? "",
-      tool_calls: toolCalls,
-    });
-
-    let iterationDidSearch = false;
-    let iterationFoundUsableResults = false;
-
-    for (const toolCall of toolCalls) {
-      if (
-        toolCall.type !== "function" ||
-        toolCall.function?.name !== "google_search"
-      ) {
-        continue;
-      }
-
-      let rawQuery = "";
-      try {
-        const args = JSON.parse(toolCall.function?.arguments || "{}");
-        if (typeof args?.query === "string") {
-          rawQuery = args.query;
-        }
-      } catch (error) {
-        console.warn("Failed to parse google_search arguments", error);
-      }
-
-      const plan = planSearchQuery(rawQuery || userText, { userText });
-      if (plan.skipSearch || plan.intent === "meta") {
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
-          content:
-            plan.intent === "meta"
-              ? "Web search skipped: capability and model questions must be answered without google_search."
-              : `Web search skipped: ${plan.reason ?? "unable to prepare a query"}. Answer using existing information.`,
-        });
-        continue;
-      }
-
-      const normalizedQuery = plan.query.trim();
-      if (!normalizedQuery) {
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
-          content: "Web search skipped: normalized query was empty.",
-        });
-        continue;
-      }
-
-      const cacheKey = normalizedQuery.toLowerCase();
-      const cached = cacheKey && searchCache.has(cacheKey)
-        ? searchCache.get(cacheKey)
-        : null;
-
-      if (
-        cached &&
-        cached.record &&
-        cached.record.rankedSources.length > 0 &&
-        cacheKey
-      ) {
-        messages.push(cached.message);
-        continue;
-      }
-
-      const { message: toolResponse, record } = await createToolResponseMessage(
-        toolCall.id ?? `tool-${Date.now()}`,
-        normalizedQuery,
-        {
-          preferRecent: plan.preferRecent,
-          onSearchStatus,
-          searchBudget,
-          searchLogger,
-          reason: plan.reason ?? "model-request",
-          searchSequence,
-        }
+    const call = item as Record<string, any>;
+    if (call.status === "failed") {
+      failed = true;
+    }
+    const actions = Array.isArray(call.actions) ? call.actions : [];
+    const searchAction = actions.find(
+      (action) => action && typeof action === "object" && action.type === "search"
+    ) as { query?: string; sources?: Array<{ url?: string }> } | undefined;
+    const query =
+      typeof call.query === "string"
+        ? call.query
+        : typeof searchAction?.query === "string"
+          ? searchAction.query
+          : "web search";
+    const rawResults = extractWebSearchResults(call);
+    const rankedSources: RankedSource[] = rawResults.length
+      ? rawResults
+      : buildSourcesFromAction(searchAction);
+    const summaryParts: string[] = [];
+    summaryParts.push(`Query: ${query}`);
+    if (rankedSources.length > 0) {
+      summaryParts.push(
+        `Found ${rankedSources.length} source${rankedSources.length === 1 ? "" : "s"}`
       );
-      if (record && onSearchRecord) {
-        onSearchRecord(record);
-      }
-      if (record && record.rankedSources.length > 0 && cacheKey) {
-        searchCache.set(cacheKey, { message: toolResponse, record });
-      }
-      if (record) {
-        iterationDidSearch = true;
-        if (record.rankedSources.length > 0) {
-          iterationFoundUsableResults = true;
-        }
-      }
-      messages.push(toolResponse);
+    } else if (call.status === "failed") {
+      summaryParts.push("Search failed");
+    } else {
+      summaryParts.push("No sources returned");
     }
-
-    if (!iterationDidSearch) {
-      break;
-    }
-    if (iterationFoundUsableResults) {
-      break;
-    }
+    records.push({
+      query,
+      summary: summaryParts.join(". "),
+      rankedSources,
+      rawResults,
+      fromCache: false,
+    });
   }
+  return { records, failed };
 }
 
-async function injectManualSearchResult(
-  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-  query: string,
-  options: {
-    preferRecent?: boolean;
-    onSearchRecord?: (record: SearchRecord) => void;
-    onSearchStatus?: (status: SearchStatusEvent) => void;
-    searchBudget: SearchBudget;
-    searchLogger: SearchDebugLogger;
-    reason: string;
-    searchSequence: SearchSequenceTracker;
-  }
-) {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return;
-  }
-
-  const toolCallId = `forced-search-${Date.now()}`;
-  messages.push({
-    role: "assistant",
-    content: "",
-    tool_calls: [
-      {
-        id: toolCallId,
-        type: "function",
-        function: {
-          name: "google_search",
-          arguments: JSON.stringify({ query: trimmed }),
-        },
-      },
-    ],
-  });
-
-  const { message: toolResponse, record } = await createToolResponseMessage(
-    toolCallId,
-    trimmed,
-    {
-      preferRecent: options.preferRecent,
-      onSearchStatus: options.onSearchStatus,
-      searchBudget: options.searchBudget,
-      searchLogger: options.searchLogger,
-      reason: options.reason,
-      searchSequence: options.searchSequence,
+function extractWebSearchResults(call: Record<string, any>) {
+  const candidates = [
+    call.results,
+    call.output?.results,
+    call.data?.results,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate
+        .map((result) => normalizeWebSearchResult(result))
+        .filter((result): result is RankedSource => Boolean(result));
     }
-  );
-  if (record && options.onSearchRecord) {
-    options.onSearchRecord(record);
   }
-  messages.push(toolResponse);
+  return [] as RankedSource[];
 }
 
-async function createToolResponseMessage(
-  toolCallId: string,
-  query: string,
-  options: {
-    preferRecent?: boolean;
-    onSearchStatus?: (status: SearchStatusEvent) => void;
-    searchBudget?: SearchBudget;
-    searchLogger?: SearchDebugLogger;
-    reason?: string;
-    searchSequence?: SearchSequenceTracker;
-  } = {}
-): Promise<{
-  message: OpenAI.Chat.Completions.ChatCompletionMessageParam;
-  record: SearchRecord | null;
-}> {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return {
-      message: {
-        role: "tool",
-        tool_call_id: toolCallId,
-        content: "Web search skipped: missing query.",
-      },
-      record: null,
-    };
+function buildSourcesFromAction(
+  action: { sources?: Array<{ url?: string }> } | undefined
+): RankedSource[] {
+  if (!action?.sources) {
+    return [];
   }
-
-  try {
-    const preferRecent = Boolean(options.preferRecent);
-    const searchBudget = options.searchBudget;
-    const searchLogger = options.searchLogger;
-    const cachedAvailability = peekCachedSearch(trimmed, preferRecent);
-    if (searchBudget && searchBudget.remaining <= 0 && !cachedAvailability) {
-      searchLogger?.step(3, "Cache unavailable and budget exhausted", {
-        query: trimmed,
-      });
+  return action.sources
+    .map((source): RankedSource | null => {
+      const url = typeof source?.url === "string" ? source.url : "";
+      if (!url) {
+        return null;
+      }
+      const domain = extractDomainFromUrl(url) || url;
       return {
-        message: {
-          role: "tool",
-          tool_call_id: toolCallId,
-          content:
-            "Web search skipped: the maximum of two google_search calls was reached. Answer using existing live sources or background knowledge.",
-        },
-        record: null,
-      };
-    }
-
-    options.onSearchStatus?.({ type: "search-start", query: trimmed });
-    const searchIndex = options.searchSequence
-      ? (options.searchSequence.value += 1)
-      : 1;
-    const searchResponse = await googleSearch(trimmed, {
-      preferRecent,
-    });
-    if (!searchResponse.fromCache && searchBudget) {
-      searchBudget.remaining = Math.max(0, searchBudget.remaining - 1);
-    }
-
-    if (searchIndex === 1) {
-      searchLogger?.step(
-        3,
-        searchResponse.fromCache ? "Cache hit" : "Cache miss",
-        {
-          query: trimmed,
-          preferRecent,
-          cacheAgeMs: searchResponse.cacheAgeMs,
-        }
-      );
-    } else if (searchIndex === 2) {
-      searchLogger?.step(5, "Second query executed", {
-        reason: options.reason ?? "follow-up",
-      });
-      searchLogger?.step(6, "Refined query", {
-        query: trimmed,
-        cacheHit: searchResponse.fromCache,
-        cacheAgeMs: searchResponse.cacheAgeMs,
-      });
-    }
-
-    const rankedSources = normalizeAndRankSources(searchResponse.results);
-
-    if (searchIndex === 1) {
-      const domains = rankedSources.slice(0, 3).map((source) => source.domain);
-      searchLogger?.step(4, "Result count and domains", {
-        query: trimmed,
-        resultCount: rankedSources.length,
-        domains,
-      });
-    }
-
-    if (rankedSources.length) {
-      searchLogger?.step(7, "High-confidence sources", {
-        sources: rankedSources
-          .slice(0, 3)
-          .map(
-            (source) =>
-              `${source.domain}:${source.sourceType}:${source.confidenceScore.toFixed(2)}`
-          ),
-      });
-    }
-
-    const summary = formatSearchSummary(trimmed, rankedSources, {
-      preferRecent,
-      fromCache: searchResponse.fromCache,
-    });
-    console.log(
-      `[googleSearch] query="${trimmed}" preferRecent=${preferRecent} results=${rankedSources.length}`
-    );
-    options.onSearchStatus?.({
-      type: "search-complete",
-      query: trimmed,
-      results: rankedSources.length,
-    });
-    return {
-      message: {
-        role: "tool",
-        tool_call_id: toolCallId,
-        content: summary,
-      },
-      record: {
-        query: trimmed,
-        rawResults: searchResponse.results,
-        rankedSources,
-        summary,
-        fromCache: searchResponse.fromCache,
-      },
-    };
-  } catch (error) {
-    const message =
-      error instanceof MissingGoogleConfigError
-        ? error.message
-        : error instanceof GoogleSearchRequestError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "Unknown Google search error";
-
-    console.warn(`Google search skipped: ${message}`);
-    options.onSearchStatus?.({
-      type: "search-error",
-      query: trimmed,
-      message,
-    });
-    return {
-      message: {
-        role: "tool",
-        tool_call_id: toolCallId,
-        content: `Web search failed: ${message}`,
-      },
-      record: null,
-    };
-  }
+        title: domain,
+        url,
+        snippet: "",
+        domain,
+        sourceType: "other",
+        published: null,
+        confidenceScore: 0.5,
+      } satisfies RankedSource;
+    })
+    .filter((item): item is RankedSource => item !== null);
 }
 
-function createSearchDebugLogger({
-  conversationId,
-  userText,
-}: {
-  conversationId: string;
-  userText: string;
-}): SearchDebugLogger {
-  const suffix = conversationId ? conversationId.slice(-6) : "unknown";
-  const snippet = userText ? userText.replace(/\s+/g, " ").slice(0, 32) : "";
-  const prefix = snippet
-    ? `[searchDebug:${suffix}:${snippet}]`
-    : `[searchDebug:${suffix}]`;
+function normalizeWebSearchResult(result: unknown): RankedSource | null {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+  const data = result as Record<string, any>;
+  const url =
+    typeof data.url === "string"
+      ? data.url
+      : typeof data.link === "string"
+        ? data.link
+        : "";
+  if (!url) {
+    return null;
+  }
+  const title =
+    typeof data.title === "string"
+      ? data.title
+      : typeof data.name === "string"
+        ? data.name
+        : url;
+  const snippet =
+    typeof data.snippet === "string"
+      ? data.snippet
+      : typeof data.excerpt === "string"
+        ? data.excerpt
+        : typeof data.summary === "string"
+          ? data.summary
+          : "";
+  const published =
+    typeof data.published_at === "string"
+      ? data.published_at
+      : typeof data.date === "string"
+        ? data.date
+        : null;
+  const domain =
+    extractDomainFromUrl(url) ||
+    (typeof data.domain === "string" ? data.domain : undefined) ||
+    (typeof data.site === "string" ? data.site : undefined) ||
+    url;
+  const sourceTypeRaw =
+    typeof data.source_type === "string"
+      ? data.source_type.toLowerCase()
+      : "";
+  const sourceType: RankedSource["sourceType"] =
+    sourceTypeRaw === "official" ||
+    sourceTypeRaw === "news" ||
+    sourceTypeRaw === "reference"
+      ? (sourceTypeRaw as RankedSource["sourceType"])
+      : "other";
+  const confidenceRaw =
+    typeof data.score === "number"
+      ? data.score
+      : typeof data.confidence === "number"
+        ? data.confidence
+        : 0.5;
   return {
-    step(stepNumber, message, meta) {
-      if (meta) {
-        console.log(`${prefix} STEP ${stepNumber}: ${message}`, meta);
-      } else {
-        console.log(`${prefix} STEP ${stepNumber}: ${message}`);
-      }
-    },
+    title,
+    url,
+    snippet,
+    domain,
+    sourceType,
+    published,
+    confidenceScore: clampConfidence(confidenceRaw),
   };
 }
 
-function normalizeSourceUrl(input: string) {
-  if (!input) {
-    return "";
+function clampConfidence(value: number) {
+  if (Number.isNaN(value)) {
+    return 0.5;
   }
-  try {
-    return new URL(input).toString();
-  } catch {
-    try {
-      return new URL(`https://${input}`).toString();
-    } catch {
-      return input;
-    }
-  }
-}
-
-function extractDomainFromUrl(input: string) {
-  if (!input) {
-    return null;
-  }
-  try {
-    const host = new URL(input).hostname;
-    return host.replace(/^www\./i, "");
-  } catch {
-    if (!/^https?:/i.test(input)) {
-      try {
-        const host = new URL(`https://${input}`).hostname;
-        return host.replace(/^www\./i, "");
-      } catch {
-        // fall through
-      }
-    }
-    const sanitized = input
-      .replace(/^https?:\/\//i, "")
-      .split("/")[0]
-      .trim();
-    return sanitized || null;
-  }
-}
-
-function buildSourceChips(
-  records: SearchRecord[],
-  maxSources = 4
-): SourceChip[] {
-  if (!records.length) {
-    return [];
-  }
-  const chips: SourceChip[] = [];
-  const seen = new Set<string>();
-  let nextId = 1;
-
-  for (const record of records) {
-    for (const result of record.rankedSources) {
-      const rawUrl = (result.url || "").trim();
-      if (!rawUrl) {
-        continue;
-      }
-      const url = normalizeSourceUrl(rawUrl);
-      const domain =
-        extractDomainFromUrl(url) ||
-        result.domain ||
-        url;
-      const normalizedDomain = domain.toLowerCase();
-      if (seen.has(normalizedDomain)) {
-        continue;
-      }
-      chips.push({
-        id: nextId,
-        title: result.title?.trim() || domain,
-        url,
-        domain,
-      });
-      seen.add(normalizedDomain);
-      nextId += 1;
-      if (chips.length >= maxSources) {
-        return chips;
-      }
-    }
-  }
-
-  return chips;
-}
-
-function createPostSearchDirective(records: SearchRecord[]) {
-  if (!records.length) {
-    return null;
-  }
-  const summaries = records.map((record, index) => {
-    if (!record.rankedSources.length) {
-      return `${index + 1}. Query "${record.query}" returned no usable live sources.`;
-    }
-    const firstDomain =
-      record.rankedSources[0]?.domain ||
-      extractDomainFromUrl(record.rankedSources[0]?.url || "") ||
-      "the listed sites";
-    const count = Math.min(record.rankedSources.length, 5);
-    return `${index + 1}. Query "${record.query}" produced ${count} ranked source${count === 1 ? "" : "s"} (e.g., ${firstDomain}).`;
-  });
-
-  return (
-    "Live google_search data is available for this reply.\n" +
-    `${summaries.join("\n")}\n` +
-    "Use the ranked sources as authoritative: mention them inline with (Source: domain.com) style hints and end with a Sources section that repeats the same domains. Never claim to lack internet access when these results exist, and if they felt insufficient, say so explicitly before falling back to general knowledge."
-  );
-}
-
-function formatSearchSummary(
-  query: string,
-  results: RankedSource[],
-  options: { preferRecent: boolean; fromCache: boolean }
-) {
-  const headerLines = [
-    "google_search complete:",
-    `Normalized query: "${query}"`,
-    `Source: ${options.fromCache ? "cache (recent)" : "live web"}`,
-    `Recency bias: ${options.preferRecent ? "enabled" : "standard"}`,
-    "Treat these sources as fresher than your training data and cite them inline using (Source: domain.com) hints before ending with a Sources section.",
-  ];
-
-  if (!results.length) {
-    return (
-      `${headerLines.join("\n")}\nNo ranked results were returned. Tell the user the live search was empty before relying on general knowledge.`
-    );
-  }
-
-  const lines = results.slice(0, 5).map((item, index) => {
-    const snippet = item.snippet || "";
-    const published = item.published ? ` (${item.published})` : "";
-    const confidence = `${Math.round(item.confidenceScore * 100)}%`;
-    return `${index + 1}. ${item.title} — ${item.domain}${published} [confidence ${confidence}]: ${snippet}`;
-  });
-
-  return (
-    `${headerLines.join("\n")}\nTop sources:\n${lines.join("\n")}\nUse these domains for inline citations and mention if the evidence felt incomplete before relying on background knowledge.`
-  );
+  return Math.min(1, Math.max(0, value));
 }
 
 async function ensureChatTitle({
@@ -1316,14 +1096,12 @@ async function ensureChatTitle({
     return;
   }
 
-  const titleModelKey: keyof typeof MODEL_MAP = "nano";
+  const titleModelKey: ModelKey = "nano";
 
   try {
-    const completion = await openai.chat.completions.create({
+    const response = await openai.responses.create({
       model: MODEL_MAP[titleModelKey],
-      max_completion_tokens: 32,
-      temperature: 1,
-      messages: [
+      input: [
         {
           role: "system",
           content:
@@ -1339,9 +1117,11 @@ async function ensureChatTitle({
               content: `User message:\n${trimmedUser}\n\nTitle:`,
             },
       ],
+      reasoning: { effort: "none" },
+      text: { verbosity: "low" },
     });
 
-    const rawTitle = completion.choices[0]?.message?.content?.trim() || "";
+    const rawTitle = response.output_text?.trim() || "";
     const normalized = normalizeGeneratedTitle(rawTitle);
     if (!normalized) {
       return;
@@ -1364,11 +1144,9 @@ async function requestNanoTitle({
   userMessage: string;
 }): Promise<string | null> {
   try {
-    const completion = await openai.chat.completions.create({
+    const response = await openai.responses.create({
       model: MODEL_MAP.nano,
-      max_completion_tokens: 24,
-      temperature: 1,
-      messages: [
+      input: [
         {
           role: "system",
           content:
@@ -1379,9 +1157,11 @@ async function requestNanoTitle({
           content: `User message:\n${userMessage}\n\nTitle:`,
         },
       ],
+      reasoning: { effort: "none" },
+      text: { verbosity: "low" },
     });
 
-    return completion.choices[0]?.message?.content?.trim() || null;
+    return response.output_text?.trim() || null;
   } catch (error) {
     console.warn("Nano title request failed", error);
     return null;
@@ -1429,4 +1209,3 @@ async function applyTitleSuggestion({
     return null;
   }
 }
-

@@ -75,6 +75,13 @@ type ConversationMeta = {
 type ViewMode = "chat" | "project";
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
+type ReasoningEffortSetting =
+  | "auto"
+  | "none"
+  | "low"
+  | "medium"
+  | "high";
+type VerbositySetting = "auto" | "low" | "medium" | "high";
 
 const TEST_USER_ID = "test-user-1";
 
@@ -90,6 +97,24 @@ const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
   mini: "gpt-5-mini-2025-08-07",
   full: "gpt-5.1-2025-11-13",
 };
+
+const REASONING_OPTIONS: {
+  value: ReasoningEffortSetting;
+  label: string;
+}[] = [
+  { value: "auto", label: "Auto" },
+  { value: "none", label: "None" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+
+const VERBOSITY_OPTIONS: { value: VerbositySetting; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
 
 const MAX_INPUT_HEIGHT = 176;
 const MIN_INPUT_HEIGHT = 32;
@@ -206,6 +231,9 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [modelMode, setModelMode] = useState<ModelMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffortSetting>("auto");
+  const [verbosity, setVerbosity] = useState<VerbositySetting>("auto");
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
@@ -691,6 +719,8 @@ type SendMessageOptions = {
         conversationId,
         modelMode: chosenMode,
         forceWebSearch: shouldForceWebSearch,
+        reasoningEffort,
+        verbosity,
       };
 
       if (options?.retry?.assistantPersistedId) {
@@ -1935,7 +1965,7 @@ type SendMessageOptions = {
                         {composerMenuOpen && (
                           <div
                             onClick={(event) => event.stopPropagation()}
-                            className="absolute bottom-12 left-0 z-30 w-44 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                            className="absolute bottom-12 left-0 z-30 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
                           >
                             <button
                               onClick={() => {
@@ -1949,6 +1979,52 @@ type SendMessageOptions = {
                                 <span className="text-[#8ab4ff]">On</span>
                               )}
                             </button>
+                            <div className="mt-2 rounded-2xl border border-[#1e1e23] bg-[#0b0b0f] p-2">
+                              <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                                Reasoning effort
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {REASONING_OPTIONS.map((option) => {
+                                  const active = reasoningEffort === option.value;
+                                  return (
+                                    <button
+                                      key={option.value}
+                                      onClick={() => setReasoningEffort(option.value)}
+                                      className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                                        active
+                                          ? "bg-[#1e4fd8] text-white"
+                                          : "text-zinc-300 hover:text-white"
+                                      }`}
+                                    >
+                                      {option.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                            <div className="mt-2 rounded-2xl border border-[#1e1e23] bg-[#0b0b0f] p-2">
+                              <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                                Verbosity
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {VERBOSITY_OPTIONS.map((option) => {
+                                  const active = verbosity === option.value;
+                                  return (
+                                    <button
+                                      key={option.value}
+                                      onClick={() => setVerbosity(option.value)}
+                                      className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                                        active
+                                          ? "bg-[#1e4fd8] text-white"
+                                          : "text-zinc-300 hover:text-white"
+                                      }`}
+                                    >
+                                      {option.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
