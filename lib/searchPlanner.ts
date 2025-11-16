@@ -70,6 +70,11 @@ const FRESH_KEYWORDS = [
   "live",
   "quote",
   "rate",
+  "trend",
+  "report",
+  "today's",
+  "guidance",
+  "outlook",
 ];
 
 const WEATHER_KEYWORDS = [
@@ -80,6 +85,7 @@ const WEATHER_KEYWORDS = [
   "rain",
   "snow",
   "wind",
+  "conditions",
 ];
 
 const HARDWARE_KEYWORDS = [
@@ -100,6 +106,24 @@ const HARDWARE_KEYWORDS = [
   "nvidia",
   "amd",
   "intel",
+  "laptop",
+  "phone",
+  "smartphone",
+  "camera",
+  "tablet",
+  "wearable",
+];
+
+const NEWS_KEYWORDS = [
+  "news",
+  "headline",
+  "breaking",
+  "coverage",
+  "happening",
+  "story",
+  "updates",
+  "reported",
+  "announcement",
 ];
 
 const STOCK_ALIASES: Record<string, string> = {
@@ -121,6 +145,12 @@ const STOCK_ALIASES: Record<string, string> = {
   facebook: "META",
   amd: "AMD",
   intel: "INTC",
+  netflix: "NFLX",
+  nflx: "NFLX",
+  qualcomm: "QCOM",
+  qcom: "QCOM",
+  broadcom: "AVGO",
+  avgo: "AVGO",
 };
 
 const CRYPTO_ALIASES: Record<string, string> = {
@@ -130,6 +160,10 @@ const CRYPTO_ALIASES: Record<string, string> = {
   eth: "ETH",
   solana: "SOL",
   sol: "SOL",
+  ripple: "XRP",
+  xrp: "XRP",
+  cardano: "ADA",
+  ada: "ADA",
 };
 
 const OFFICIAL_DOMAINS = new Set([
@@ -144,6 +178,9 @@ const OFFICIAL_DOMAINS = new Set([
   "metoffice.gov.uk",
   "finance.yahoo.com",
   "investor.apple.com",
+  "samsung.com",
+  "sony.com",
+  "microsoft.com",
 ]);
 
 const REFERENCE_DOMAINS = new Set([
@@ -161,6 +198,8 @@ const NEWS_DOMAINS = new Set([
   "theverge.com",
   "arstechnica.com",
   "cnbc.com",
+  "apnews.com",
+  "techcrunch.com",
 ]);
 
 const MONTH_PATTERN =
@@ -172,8 +211,11 @@ function sanitizeQuery(text: string) {
   return text
     .replace(/^["'“”‘’\s]+/g, "")
     .replace(/["'“”‘’]+$/g, "")
-    .replace(/\b(?:please|kindly|could you|would you|can you|tell me|show me|give me|find|look up|search|google)\b/gi, "")
-    .replace(/\b(?:for me|for us|about)\b/gi, "")
+    .replace(
+      /\b(?:please|kindly|could you|would you|can you|tell me|show me|give me|find|look up|search|google|explain|help me with)\b/gi,
+      ""
+    )
+    .replace(/\b(?:for me|for us|about|on the internet)\b/gi, "")
     .replace(/[?!.]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -200,15 +242,15 @@ function extractWeatherLocation(text: string) {
 function buildWeatherQuery(cleaned: string) {
   const location = extractWeatherLocation(cleaned);
   const base = location
-    ? `${location} current weather temperature humidity`
-    : "current weather temperature humidity";
-  return `${base} site:weather.gov OR site:weather.com`;
+    ? `${location} current weather conditions`
+    : "current weather conditions";
+  return `${base} temperature humidity site:noaa.gov OR site:weather.com OR site:accuweather.com`;
 }
 
 function detectTicker(text: string) {
   const lower = text.toLowerCase();
-  const mentionsStockKeyword = /stock|share|market|price|quote|ticker|trading|close|open/.test(lower);
-  const mentionsCryptoKeyword = /crypto|coin|token|blockchain|price|trading|quote/.test(lower);
+  const mentionsStockKeyword = /stock|share|market|price|quote|ticker|trading|close|open|earnings/.test(lower);
+  const mentionsCryptoKeyword = /crypto|coin|token|blockchain|price|trading|quote|defi/.test(lower);
 
   if (mentionsStockKeyword) {
     for (const [alias, ticker] of Object.entries(STOCK_ALIASES)) {
@@ -235,26 +277,38 @@ function detectTicker(text: string) {
 
 function buildTickerQuery(ticker: string, topic: "stocks" | "crypto") {
   if (topic === "stocks") {
-    return `${ticker} stock price live quote today site:finance.yahoo.com OR site:reuters.com`;
+    return `${ticker} stock price live quote today site:finance.yahoo.com OR site:reuters.com OR site:cnbc.com`;
   }
   return `${ticker} crypto price live quote today site:coinmarketcap.com OR site:coindesk.com`;
 }
 
 function buildHardwareQuery(cleaned: string) {
   const trimmed = cleaned
-    .replace(/\b(latest|current|new|newest|recent|release|launch|gpu|graphics|graphics card|graphics cards|cpu|processor)\b/gi, "")
+    .replace(
+      /\b(latest|current|new|newest|recent|release|launch|gpu|graphics|graphics card|graphics cards|cpu|processor|laptop|phone)\b/gi,
+      ""
+    )
     .trim();
   const target = trimmed || cleaned;
-  return `${target} latest release date specs site:amd.com OR site:nvidia.com OR site:intel.com OR site:wikipedia.org`;
+  return `${target} latest release date specs site:wikipedia.org OR site:theverge.com OR site:tomshardware.com OR site:anandtech.com OR site:amd.com OR site:nvidia.com OR site:intel.com OR site:apple.com`;
 }
 
 function buildNewsQuery(cleaned: string) {
-  return `${cleaned} latest update news`;
+  return `${cleaned} latest updates site:reuters.com OR site:apnews.com OR site:bbc.com`;
 }
 
-export function planSearchQuery(userText: string): NormalizedSearchPlan {
-  const raw = (userText || "").trim();
-  if (!raw) {
+function buildGeneralFreshQuery(cleaned: string) {
+  return `${cleaned} latest updates site:reuters.com OR site:apnews.com OR site:wikipedia.org`;
+}
+
+export function planSearchQuery(
+  inputText: string,
+  options: { userText?: string } = {}
+): NormalizedSearchPlan {
+  const fallback = (options.userText || "").trim();
+  const primary = (inputText || "").trim();
+  const reference = primary || fallback;
+  if (!reference) {
     return {
       skipSearch: true,
       reason: "empty input",
@@ -264,20 +318,34 @@ export function planSearchQuery(userText: string): NormalizedSearchPlan {
       intent: "stable",
     };
   }
-  const lower = raw.toLowerCase();
-  if (META_PATTERNS.some((pattern) => pattern.test(lower))) {
+
+  const metaTarget = (options.userText || reference).toLowerCase();
+  if (META_PATTERNS.some((pattern) => pattern.test(metaTarget))) {
     return {
       skipSearch: true,
       reason: "meta or capability question",
-      query: sanitizeQuery(raw),
+      query: sanitizeQuery(reference),
       preferRecent: false,
       topic: null,
       intent: "meta",
     };
   }
 
-  const cleaned = sanitizeQuery(raw);
-  const tickerInfo = detectTicker(raw);
+  const cleaned = sanitizeQuery(primary || fallback || reference);
+  if (!cleaned) {
+    return {
+      skipSearch: true,
+      reason: "query could not be normalized",
+      query: "",
+      preferRecent: false,
+      topic: null,
+      intent: "stable",
+    };
+  }
+
+  const combinedContext = `${primary} ${fallback}`.trim() || cleaned;
+  const lower = combinedContext.toLowerCase();
+  const tickerInfo = detectTicker(combinedContext);
 
   let topic: SearchTopic | null = null;
   let preferRecent = false;
@@ -289,21 +357,18 @@ export function planSearchQuery(userText: string): NormalizedSearchPlan {
     topic = "weather";
     preferRecent = true;
     intent = "fresh";
-    query = buildWeatherQuery(raw);
+    query = buildWeatherQuery(combinedContext);
   } else if (tickerInfo) {
     topic = tickerInfo.topic;
     preferRecent = true;
     intent = "fresh";
     query = buildTickerQuery(tickerInfo.ticker, tickerInfo.topic);
-  } else if (
-    containsAny(lower, HARDWARE_KEYWORDS) &&
-    /latest|current|new|recent|release|launch/.test(lower)
-  ) {
+  } else if (containsAny(lower, HARDWARE_KEYWORDS) && containsAny(lower, FRESH_KEYWORDS)) {
     topic = "hardware";
     preferRecent = true;
     intent = "fresh";
     query = buildHardwareQuery(cleaned);
-  } else if (containsAny(lower, ["news", "happening", "update", "breaking"])) {
+  } else if (containsAny(lower, NEWS_KEYWORDS)) {
     topic = "news";
     preferRecent = true;
     intent = "fresh";
@@ -312,16 +377,14 @@ export function planSearchQuery(userText: string): NormalizedSearchPlan {
     topic = "general";
     preferRecent = true;
     intent = "fresh";
-    query = buildNewsQuery(cleaned);
+    query = buildGeneralFreshQuery(cleaned);
   }
 
-  const skipSearch = !preferRecent;
-
   return {
-    skipSearch,
-    reason: skipSearch
-      ? "question appears stable or historical"
-      : "live data likely required",
+    skipSearch: false,
+    reason: preferRecent
+      ? "live data likely useful"
+      : "proceeding with normalized query",
     query,
     preferRecent,
     topic,
