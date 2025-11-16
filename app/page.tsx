@@ -129,7 +129,6 @@ const MAX_INPUT_HEIGHT = 176;
 const MIN_INPUT_HEIGHT = 32;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
-const LONG_THINK_THRESHOLD_MS = 3000;
 const MAX_PROJECT_CHAT_PREVIEW = 5;
 
 type ServerStatusEvent =
@@ -138,6 +137,11 @@ type ServerStatusEvent =
   | { type: "search-error"; query: string; message?: string };
 
 type StatusVariant = "default" | "extended" | "search" | "error";
+
+type ThinkingStatus = {
+  phase: "extended";
+  label: string;
+};
 
 function StatusBubble({
   label,
@@ -173,6 +177,23 @@ function StatusBubble({
       />
       <span>{label}</span>
     </div>
+  );
+}
+
+function CheckmarkIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M5 13l4 4L19 7" />
+    </svg>
   );
 }
 
@@ -286,9 +307,9 @@ export default function Home() {
   const [openModelMenuId, setOpenModelMenuId] = useState<string | null>(null);
   const [headerModelMenuOpen, setHeaderModelMenuOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [thinkingStatus, setThinkingStatus] = useState<
-    { phase: "waiting" | "extended" | "responding"; label: string } | null
-  >(null);
+  const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus | null>(
+    null
+  );
   const [searchIndicator, setSearchIndicator] = useState<
     { message: string; variant: "running" | "error" } | null
   >(null);
@@ -308,7 +329,6 @@ export default function Home() {
     firstToken: null as number | null,
     assistantMessageId: null as string | null,
   });
-  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
 
   function scrollToBottom(opts: { behavior?: ScrollBehavior } = {}) {
@@ -485,15 +505,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (thinkingTimerRef.current) {
-        clearTimeout(thinkingTimerRef.current);
-        thinkingTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!searchIndicator || searchIndicator.variant !== "error") {
       return;
     }
@@ -538,9 +549,6 @@ export default function Home() {
     return map;
   }, [sortedConversations]);
 
-  const currentConversation = conversations.find(
-    (c) => c.id === selectedConversationId
-  );
   const currentProject = projects.find((p) => p.id === selectedProjectId);
 
   const projectChats = useMemo(
@@ -564,13 +572,6 @@ export default function Home() {
     speedMode === "auto" && modelFamily === "auto"
       ? modelLabel
       : `${modelLabel} ${SPEED_LABELS[speedMode]}`;
-
-  const clearThinkingTimeout = () => {
-    if (thinkingTimerRef.current) {
-      clearTimeout(thinkingTimerRef.current);
-      thinkingTimerRef.current = null;
-    }
-  };
 
   // ------------------------------------------------------------
   // HELPERS
@@ -705,21 +706,13 @@ type SendMessageOptions = {
       firstToken: null,
       assistantMessageId: null,
     };
-    clearThinkingTimeout();
-    const shouldShowImmediateLongThink =
-      requestedReasoningEffort && requestedReasoningEffort !== "none";
+    const shouldShowImmediateLongThink = Boolean(
+      requestedReasoningEffort && requestedReasoningEffort !== "none"
+    );
     if (shouldShowImmediateLongThink) {
       setThinkingStatus({ phase: "extended", label: "Thinking for longer…" });
     } else {
-      setThinkingStatus({ phase: "waiting", label: "Thinking…" });
-      thinkingTimerRef.current = setTimeout(() => {
-        if (!responseTimingRef.current.firstToken) {
-          setThinkingStatus({
-            phase: "extended",
-            label: "Thinking for longer…",
-          });
-        }
-      }, LONG_THINK_THRESHOLD_MS);
+      setThinkingStatus(null);
     }
 
     try {
@@ -835,7 +828,6 @@ type SendMessageOptions = {
       let buffer = "";
       let finished = false;
       const markResponseFinished = () => {
-        clearThinkingTimeout();
         setThinkingStatus(null);
         setSearchIndicator((prev) =>
           prev?.variant === "running" ? null : prev
@@ -868,6 +860,16 @@ type SendMessageOptions = {
                       .assistantMessageRowId;
                   const userRowId = (meta as { userMessageRowId?: string })
                     .userMessageRowId;
+                  if (typeof meta.reasoningEffort !== "undefined") {
+                    const shouldShowFromMeta =
+                      Boolean(meta.reasoningEffort) &&
+                      meta.reasoningEffort !== "none";
+                    setThinkingStatus(
+                      shouldShowFromMeta
+                        ? { phase: "extended", label: "Thinking for longer…" }
+                        : null
+                    );
+                  }
                   if (userRowId && userMessageId) {
                     setMessages((prev) =>
                       prev.map((msg) =>
@@ -968,11 +970,7 @@ type SendMessageOptions = {
                         ? performance.now()
                         : Date.now();
                     responseTimingRef.current.firstToken = now;
-                    clearThinkingTimeout();
-                    setThinkingStatus({
-                      phase: "responding",
-                      label: "Responding…",
-                    });
+                    setThinkingStatus(null);
                     setSearchIndicator((prev) =>
                       prev?.variant === "running" ? null : prev
                     );
@@ -1040,6 +1038,34 @@ type SendMessageOptions = {
                       variant: "error",
                     });
                   }
+                } else if (payload.sourcesEvent) {
+                  const sourcesEvent = payload.sourcesEvent as {
+                    messageId?: string;
+                    sources?: SourceChip[];
+                  };
+                  if (
+                    sourcesEvent.messageId &&
+                    Array.isArray(sourcesEvent.sources)
+                  ) {
+                    setMessages((prev) =>
+                      prev.map((msg) => {
+                        if (
+                          msg.persistedId === sourcesEvent.messageId ||
+                          (assistantMessageId && msg.id === assistantMessageId)
+                        ) {
+                          const nextMetadata: MessageMetadata = {
+                            ...(msg.metadata || {}),
+                            sources: sourcesEvent.sources,
+                          };
+                          return {
+                            ...msg,
+                            metadata: nextMetadata,
+                          };
+                        }
+                        return msg;
+                      })
+                    );
+                  }
                 } else if (typeof payload.title === "string") {
                   const newTitle = payload.title.trim();
                   if (newTitle && conversationId) {
@@ -1095,7 +1121,6 @@ type SendMessageOptions = {
           );
         }
       }
-      clearThinkingTimeout();
       setThinkingStatus(null);
       setSearchIndicator(null);
       responseTimingRef.current = {
@@ -1112,7 +1137,6 @@ type SendMessageOptions = {
       setActiveAssistantMessageId((current) =>
         assistantMessageId && current === assistantMessageId ? null : current
       );
-      clearThinkingTimeout();
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -1169,7 +1193,6 @@ type SendMessageOptions = {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsStreaming(false);
-    clearThinkingTimeout();
     setThinkingStatus(null);
     setSearchIndicator(null);
     responseTimingRef.current = {
@@ -1384,7 +1407,7 @@ type SendMessageOptions = {
         )}
 
         {sortedProjects.map((p) => {
-          const isActive = selectedProjectId === p.id && viewMode === "project";
+          const isSelectedProject = selectedProjectId === p.id;
           const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
           const projectChatList = projectSidebarChats.get(p.id) || [];
           const topChats = projectChatList.slice(0, MAX_PROJECT_CHAT_PREVIEW);
@@ -1393,7 +1416,7 @@ type SendMessageOptions = {
             <div key={p.id} className="group relative">
               <div
                 className={`flex items-center rounded-md ${
-                  isActive
+                  isSelectedProject
                     ? "bg-[#202123] text-zinc-100"
                     : "text-zinc-300 hover:bg-[#202123]"
                 }`}
@@ -1446,7 +1469,7 @@ type SendMessageOptions = {
                   </div>
                 )}
               </div>
-              {topChats.length > 0 && (
+              {isSelectedProject && topChats.length > 0 && (
                 <div className="ml-6 mt-1 space-y-1 border-l border-[#2a2a30] pl-3">
                   {topChats.map((chat) => {
                     const chatActive =
@@ -1653,103 +1676,141 @@ type SendMessageOptions = {
             >
               ☰
             </button>
-            <div className="relative">
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setHeaderModelMenuOpen((prev) => !prev);
-                }}
-                className="flex items-center gap-2 rounded-xl border border-[#2f2f32] bg-[#141418] px-3 py-1 text-left text-xs text-zinc-200 hover:border-[#4b64ff]"
-              >
-                <span className="text-sm font-semibold text-white">LLM Client</span>
-                <span className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/80">
-                  {headerStatusLabel}
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-semibold text-white">LLM Client</span>
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-expanded={headerModelMenuOpen}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setHeaderModelMenuOpen((prev) => !prev);
+                  }}
+                  className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-left text-xs text-white/80 transition hover:bg-white/10"
+                >
+                  <span className="text-sm font-medium text-white">
+                    {headerStatusLabel}
+                  </span>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     viewBox="0 0 24 24"
-                    className="h-3 w-3"
+                    className={`h-3 w-3 transition ${
+                      headerModelMenuOpen ? "rotate-180" : ""
+                    }`}
                     fill="none"
                     stroke="currentColor"
                     strokeWidth={2}
                   >
                     <path d="M6 9l6 6 6-6" />
                   </svg>
-                </span>
-              </button>
-              {headerModelMenuOpen && (
-                <div
-                  onClick={(event) => event.stopPropagation()}
-                  className="absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-[#2a2a30] bg-[#0f0f13] p-3 text-left text-xs shadow-2xl"
-                >
-                  <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
-                    Speed
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    {SPEED_OPTIONS.map((option) => {
-                      const isActive = speedMode === option.value;
-                      return (
-                        <button
-                          key={option.value}
-                          onClick={() => {
-                            setSpeedMode(option.value);
-                            setHeaderModelMenuOpen(false);
-                          }}
-                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
-                            isActive
-                              ? "bg-[#1e4fd8] text-white"
-                              : "text-zinc-200 hover:bg-[#1b1b21]"
-                          }`}
-                        >
-                          <span>{option.label}</span>
-                          <span className="text-[11px] text-zinc-400">{option.hint}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-3 border-t border-white/5 pt-3">
-                    <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
-                      Exact model
+                </button>
+                {headerModelMenuOpen && (
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    className="absolute right-0 top-full z-40 mt-2 w-72 rounded-2xl border border-[#2a2a30] bg-[#0f0f13] p-3 text-left text-xs shadow-2xl"
+                  >
+                    <div className="px-1 pb-2 text-[10px] uppercase tracking-wide text-zinc-500">
+                      Speed
                     </div>
-                    <button
-                      onClick={() => {
-                        setModelFamily("auto");
-                        setHeaderModelMenuOpen(false);
-                      }}
-                      className={`mb-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
-                        modelFamily === "auto"
-                          ? "bg-[#1e4fd8] text-white"
-                          : "text-zinc-200 hover:bg-[#1b1b21]"
-                      }`}
-                    >
-                      <span>Auto (Router)</span>
-                      {modelFamily === "auto" && (
-                        <span className="text-[10px] text-white/70">current</span>
-                      )}
-                    </button>
-                    {EXACT_MODEL_OPTIONS.map((option) => {
-                      const isActive = modelFamily === option.value;
-                      return (
+                    <div className="flex flex-col gap-1">
+                      {SPEED_OPTIONS.map((option) => {
+                        const isActive = speedMode === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            onClick={() => {
+                              setSpeedMode(option.value);
+                              setHeaderModelMenuOpen(false);
+                            }}
+                            className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                              isActive
+                                ? "bg-white/10 text-white"
+                                : "text-zinc-200 hover:bg-white/5"
+                            }`}
+                          >
+                            <span className="flex flex-col">
+                              <span className="text-sm font-medium">
+                                {option.label}
+                              </span>
+                              <span className="text-[11px] text-zinc-400">
+                                {option.hint}
+                              </span>
+                            </span>
+                            {isActive && (
+                              <span className="text-white">
+                                <CheckmarkIcon className="h-4 w-4" />
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-4 border-t border-white/5 pt-3">
+                      <div className="px-1 pb-2 text-[10px] uppercase tracking-wide text-zinc-500">
+                        Exact model
+                      </div>
+                      <div className="flex flex-col gap-1">
                         <button
-                          key={option.value}
                           onClick={() => {
-                            setModelFamily(option.value);
+                            setModelFamily("auto");
                             setHeaderModelMenuOpen(false);
                           }}
-                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
-                            isActive
-                              ? "bg-[#1e4fd8] text-white"
-                              : "text-zinc-200 hover:bg-[#1b1b21]"
+                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                            modelFamily === "auto"
+                              ? "bg-white/10 text-white"
+                              : "text-zinc-200 hover:bg-white/5"
                           }`}
                         >
-                          <span>{option.label}</span>
-                          <span className="text-[11px] text-zinc-400">{option.hint}</span>
+                          <span className="flex flex-col">
+                            <span className="text-sm font-medium">
+                              Auto (Router)
+                            </span>
+                            <span className="text-[11px] text-zinc-400">
+                              Let the app decide
+                            </span>
+                          </span>
+                          {modelFamily === "auto" && (
+                            <span className="text-white">
+                              <CheckmarkIcon className="h-4 w-4" />
+                            </span>
+                          )}
                         </button>
-                      );
-                    })}
+                        {EXACT_MODEL_OPTIONS.map((option) => {
+                          const isActive = modelFamily === option.value;
+                          return (
+                            <button
+                              key={option.value}
+                              onClick={() => {
+                                setModelFamily(option.value);
+                                setHeaderModelMenuOpen(false);
+                              }}
+                              className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                isActive
+                                  ? "bg-white/10 text-white"
+                                  : "text-zinc-200 hover:bg-white/5"
+                              }`}
+                            >
+                              <span className="flex flex-col">
+                                <span className="text-sm font-medium">
+                                  {option.label}
+                                </span>
+                                <span className="text-[11px] text-zinc-400">
+                                  {option.hint}
+                                </span>
+                              </span>
+                              {isActive && (
+                                <span className="text-white">
+                                  <CheckmarkIcon className="h-4 w-4" />
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
 
@@ -2349,16 +2410,16 @@ type SendMessageOptions = {
         </div>
       )}
 
-      <ConfirmDialog
-        open={Boolean(pendingDeleteConversation)}
-        title="Delete chat?"
-        body={
-          <span>
-            This will delete "
-            {pendingDeleteConversation?.title || "this chat"}
-            ".
-          </span>
-        }
+        <ConfirmDialog
+          open={Boolean(pendingDeleteConversation)}
+          title="Delete chat?"
+          body={
+            <span>
+              This will delete &ldquo;
+              {pendingDeleteConversation?.title || "this chat"}
+              &rdquo;.
+            </span>
+          }
         confirmLoading={deleteConversationLoading}
         onCancel={() => {
           if (!deleteConversationLoading) {
