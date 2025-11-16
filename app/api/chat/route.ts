@@ -622,16 +622,18 @@ export async function POST(req: Request) {
       userText,
       forceWebSearch,
     });
-    const webSearchTool: Tool = { type: "web_search" };
+    const webSearchTool = { type: "web_search" } satisfies Tool & {
+      [key: string]: unknown;
+    };
     const webSearchTools: Tool[] | undefined = allowWebSearch
       ? [webSearchTool]
       : undefined;
     const toolChoice: ToolChoiceAllowed | undefined = allowWebSearch
-      ? {
+      ? ({
           type: "allowed_tools",
           mode: forceWebSearch ? "required" : "auto",
           tools: [webSearchTool],
-        }
+        } satisfies ToolChoiceAllowed)
       : undefined;
 
     const systemMessages = [

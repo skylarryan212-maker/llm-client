@@ -265,19 +265,6 @@ function legacyModeFromFamily(family: ModelFamily): ModelMode {
   }
 }
 
-function formatModelMenuTitle(family: ModelFamily) {
-  switch (family) {
-    case "gpt-5.1":
-      return "GPT-5.1";
-    case "gpt-5-mini":
-      return "GPT-5 Mini";
-    case "gpt-5-nano":
-      return "GPT-5 Nano";
-    default:
-      return "Auto Router";
-  }
-}
-
 function extractDomainFromUrl(url?: string | null) {
   if (!url) return "";
   try {
@@ -344,6 +331,29 @@ export default function Home() {
       setOtherModelsMenuOpen(false);
     }
   }, [headerModelMenuOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem("conversationHistory");
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const hydrated = new Map<string, ChatMessage[]>();
+      parsed.forEach((entry) => {
+        if (
+          Array.isArray(entry) &&
+          typeof entry[0] === "string" &&
+          Array.isArray(entry[1])
+        ) {
+          hydrated.set(entry[0], entry[1] as ChatMessage[]);
+        }
+      });
+      conversationHistoryRef.current = hydrated;
+    } catch (error) {
+      console.warn("Failed to hydrate conversation history", error);
+    }
+  }, []);
   const [rowMenu, setRowMenu] = useState<
     { type: "conversation" | "project"; id: string } | null
   >(null);
@@ -361,6 +371,28 @@ export default function Home() {
   });
   const longThinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
+  const conversationHistoryRef = useRef(new Map<string, ChatMessage[]>());
+
+  const persistConversationHistory = useCallback(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const serialized = JSON.stringify(
+        Array.from(conversationHistoryRef.current.entries())
+      );
+      window.localStorage.setItem("conversationHistory", serialized);
+    } catch (error) {
+      console.warn("Failed to persist conversation history", error);
+    }
+  }, []);
+
+  const removeConversationFromCache = useCallback(
+    (conversationId: string) => {
+      if (!conversationHistoryRef.current.has(conversationId)) return;
+      conversationHistoryRef.current.delete(conversationId);
+      persistConversationHistory();
+    },
+    [persistConversationHistory]
+  );
 
   const clearLongThinkTimer = useCallback(() => {
     if (longThinkTimerRef.current) {
@@ -471,41 +503,53 @@ export default function Home() {
 
       if (error) {
         console.error("Load messages error", error);
-        setMessages([]);
+        if (!(conversationHistoryRef.current.get(conversationId)?.length ?? 0)) {
+          setMessages([]);
+        }
       } else {
         console.log(
           `[historyDebug] loaded ${data?.length ?? 0} messages for conversationId=${conversationId}`
         );
-        setMessages(
-          (data || []).map((m) => {
-            const metadata =
-              ((m as { metadata?: MessageMetadata }).metadata || {}) as MessageMetadata;
-            const thoughtSeconds = metadata.thoughtDurationSeconds;
-            const thoughtLabel =
-              metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
-                ? metadata.thoughtDurationLabel
-                : typeof thoughtSeconds === "number"
-                  ? formatThoughtDurationLabel(thoughtSeconds)
-                  : undefined;
-            return {
-              id: (m as { id?: string }).id,
-              persistedId: (m as { id?: string }).id,
-              role: m.role,
-              content: m.content,
-              usedModel: metadata.usedModel,
-              usedModelMode: metadata.usedModelMode,
-              usedModelFamily: metadata.usedModelFamily,
-              requestedModelFamily: metadata.requestedModelFamily,
-              speedMode: metadata.speedMode,
-              reasoningEffort: metadata.reasoningEffort,
-              usedWebSearch: metadata.usedWebSearch,
-              searchRecords: metadata.searchRecords || [],
-              metadata,
-              thoughtDurationSeconds: thoughtSeconds,
-              thoughtDurationLabel: thoughtLabel,
-            } as ChatMessage;
-          })
-        );
+        const nextMessages = (data || []).map((m) => {
+          const metadata =
+            ((m as { metadata?: MessageMetadata }).metadata || {}) as MessageMetadata;
+          const thoughtSeconds = metadata.thoughtDurationSeconds;
+          const thoughtLabel =
+            metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
+              ? metadata.thoughtDurationLabel
+              : typeof thoughtSeconds === "number"
+                ? formatThoughtDurationLabel(thoughtSeconds)
+                : undefined;
+          return {
+            id: (m as { id?: string }).id,
+            persistedId: (m as { id?: string }).id,
+            role: m.role,
+            content: m.content,
+            usedModel: metadata.usedModel,
+            usedModelMode: metadata.usedModelMode,
+            usedModelFamily: metadata.usedModelFamily,
+            requestedModelFamily: metadata.requestedModelFamily,
+            speedMode: metadata.speedMode,
+            reasoningEffort: metadata.reasoningEffort,
+            usedWebSearch: metadata.usedWebSearch,
+            searchRecords: metadata.searchRecords || [],
+            metadata,
+            thoughtDurationSeconds: thoughtSeconds,
+            thoughtDurationLabel: thoughtLabel,
+          } as ChatMessage;
+        });
+
+        if (
+          nextMessages.length === 0 &&
+          (conversationHistoryRef.current.get(conversationId)?.length ?? 0) > 0
+        ) {
+          console.warn(
+            "Skipping empty history update because cached messages exist",
+            conversationId
+          );
+        } else {
+          setMessages(nextMessages);
+        }
       }
 
       if (!opts.silent) setIsLoadingMessages(false);
@@ -519,6 +563,15 @@ export default function Home() {
       return;
     }
 
+    const cachedMessages = conversationHistoryRef.current.get(
+      selectedConversationId
+    );
+    if (cachedMessages) {
+      setMessages(cachedMessages);
+    } else {
+      setMessages([]);
+    }
+
     loadMessages(selectedConversationId);
   }, [selectedConversationId, loadMessages]);
 
@@ -529,6 +582,12 @@ export default function Home() {
     if (!autoScrollEnabled) return;
     scrollToBottom({ behavior: isStreaming ? "smooth" : "auto" });
   }, [messages, autoScrollEnabled, isStreaming]);
+
+  useEffect(() => {
+    if (!selectedConversationId) return;
+    conversationHistoryRef.current.set(selectedConversationId, messages);
+    persistConversationHistory();
+  }, [messages, selectedConversationId, persistConversationHistory]);
 
   useEffect(() => {
     const el = chatContainerRef.current;
@@ -643,8 +702,6 @@ export default function Home() {
   const modelShortLabel =
     modelFamily === "auto" ? "Auto" : describeModelFamily(modelFamily);
   const headerStatusLabel = `LLM Client ${modelShortLabel} ${SPEED_LABELS[speedMode]}`;
-  const currentModelTitle = formatModelMenuTitle(modelFamily);
-  const currentSpeedLabel = SPEED_LABELS[speedMode];
 
   // ------------------------------------------------------------
   // HELPERS
@@ -1369,6 +1426,7 @@ type SendMessageOptions = {
   async function deleteConversation(id: string) {
     await supabase.from("messages").delete().eq("conversation_id", id);
     await supabase.from("conversations").delete().eq("id", id);
+    removeConversationFromCache(id);
 
     setConversations((prev) => {
       const filtered = prev.filter((c) => c.id !== id);
@@ -1780,25 +1838,20 @@ type SendMessageOptions = {
                 <button
                   type="button"
                   aria-expanded={headerModelMenuOpen}
+                  aria-label="Choose model and speed"
                   onClick={(event) => {
                     event.stopPropagation();
                     setHeaderModelMenuOpen((prev) => !prev);
                   }}
-                  className="group flex items-center gap-3 text-left text-white/80 transition hover:text-white"
+                  className={`flex h-8 w-8 items-center justify-center rounded-full border border-white/15 text-white/80 transition hover:text-white ${
+                    headerModelMenuOpen ? "bg-white/5" : ""
+                  }`}
                 >
-                  <div className="text-left">
-                    <div className="text-sm font-semibold text-white">
-                      {currentModelTitle}
-                    </div>
-                    <div className="text-[11px] text-white/60">
-                      {currentSpeedLabel}
-                    </div>
-                  </div>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     viewBox="0 0 24 24"
                     className={`h-3 w-3 transition ${
-                      headerModelMenuOpen ? "rotate-180" : ""
+                      headerModelMenuOpen ? "-rotate-180" : ""
                     }`}
                     fill="none"
                     stroke="currentColor"
@@ -1857,78 +1910,68 @@ type SendMessageOptions = {
                         <div className="text-[11px] text-white/60">
                           Mini &amp; Nano presets
                         </div>
-                        <div
-                          className="relative mt-2"
-                          onMouseEnter={() => setOtherModelsMenuOpen(true)}
-                          onMouseLeave={() => setOtherModelsMenuOpen(false)}
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOtherModelsMenuOpen((prev) => !prev);
+                          }}
+                          className="mt-2 flex w-full items-center justify-between rounded-xl border border-white/10 px-3 py-2 text-left text-white/80 transition hover:text-white"
+                          aria-expanded={otherModelsMenuOpen}
                         >
-                          <button
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setOtherModelsMenuOpen((prev) => !prev);
-                            }}
-                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-white/80 transition hover:text-white"
-                            aria-expanded={otherModelsMenuOpen}
+                          <span className="text-sm font-medium text-white">
+                            Other Models
+                          </span>
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className={`h-3.5 w-3.5 transition ${
+                              otherModelsMenuOpen ? "rotate-180 text-white" : "text-white/60"
+                            }`}
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
                           >
-                            <span className="text-sm font-medium text-white">
-                              Other Models
-                            </span>
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className={`h-3.5 w-3.5 transition ${
-                                otherModelsMenuOpen ? "text-white" : "text-white/60"
-                              }`}
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth={2}
-                            >
-                              <path d="M9 6l6 6-6 6" />
-                            </svg>
-                          </button>
-                          {otherModelsMenuOpen && (
-                            <div
-                              className="absolute left-0 top-full z-40 mt-2 w-full rounded-2xl border border-white/10 bg-[#111116] text-left text-xs text-white shadow-2xl md:left-full md:top-0 md:mt-0 md:ml-3 md:w-[18rem]"
-                            >
-                              <div className="max-h-[60vh] space-y-4 overflow-y-auto px-3 py-3">
-                                {OTHER_MODEL_GROUPS.map((group) => (
-                                  <div key={group.family} className="space-y-1">
-                                    <div className="text-xs uppercase tracking-wide text-white/60">
-                                      {group.label}
-                                    </div>
-                                    <div className="flex flex-col gap-1">
-                                      {SPEED_OPTIONS.map((option) => {
-                                        const isComboActive =
-                                          modelFamily === group.family &&
-                                          speedMode === option.value;
-                                        return (
-                                          <button
-                                            key={`${group.family}-${option.value}`}
-                                            onClick={() => {
-                                              setModelFamily(group.family);
-                                              setSpeedMode(option.value);
-                                              setHeaderModelMenuOpen(false);
-                                            }}
-                                            className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                                              isComboActive
-                                                ? "bg-white/10 text-white font-semibold"
-                                                : "text-white/70 hover:bg-white/5"
-                                            }`}
-                                          >
-                                            <span>{`${group.shortLabel} ${option.label}`}</span>
-                                            {isComboActive && (
-                                              <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
-                                            )}
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                ))}
+                            <path d="M6 9l6 6 6-6" />
+                          </svg>
+                        </button>
+                        {otherModelsMenuOpen && (
+                          <div className="mt-3 max-h-[60vh] space-y-4 overflow-y-auto rounded-2xl border border-white/10 bg-[#111116] px-3 py-3 text-left text-xs text-white shadow-2xl">
+                            {OTHER_MODEL_GROUPS.map((group) => (
+                              <div key={group.family} className="space-y-1">
+                                <div className="text-xs uppercase tracking-wide text-white/60">
+                                  {group.label}
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  {SPEED_OPTIONS.map((option) => {
+                                    const isComboActive =
+                                      modelFamily === group.family &&
+                                      speedMode === option.value;
+                                    return (
+                                      <button
+                                        key={`${group.family}-${option.value}`}
+                                        onClick={() => {
+                                          setModelFamily(group.family);
+                                          setSpeedMode(option.value);
+                                          setHeaderModelMenuOpen(false);
+                                        }}
+                                        className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                          isComboActive
+                                            ? "bg-white/10 text-white font-semibold"
+                                            : "text-white/70 hover:bg-white/5"
+                                        }`}
+                                      >
+                                        <span>{`${group.shortLabel} ${option.label}`}</span>
+                                        {isComboActive && (
+                                          <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                        </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2403,7 +2446,7 @@ type SendMessageOptions = {
                       {composerMenuOpen && (
                         <div
                           onClick={(event) => event.stopPropagation()}
-                          className="absolute left-0 top-full z-30 mt-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                          className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
                         >
                           <button
                             onClick={() => {
