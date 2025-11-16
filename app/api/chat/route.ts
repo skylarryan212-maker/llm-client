@@ -66,6 +66,38 @@ type SearchRecord = {
   fromCache?: boolean;
 };
 
+type WebSearchAction = {
+  type?: string;
+  query?: string;
+  sources?: Array<{ url?: string }>;
+  results?: unknown;
+  content?: unknown;
+};
+
+type WebSearchOutputEntry = {
+  results?: unknown;
+  content?: unknown;
+  text?: string;
+};
+
+type WebSearchCall = {
+  type?: string;
+  status?: string;
+  query?: string;
+  actions?: WebSearchAction[];
+  results?: unknown;
+  output?: { results?: unknown } | WebSearchOutputEntry[];
+  data?: { results?: unknown };
+  metadata?: { results?: unknown };
+};
+
+function isWebSearchCall(value: unknown): value is WebSearchCall {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return (value as { type?: string }).type === "web_search_call";
+}
+
 type SearchStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
@@ -144,6 +176,19 @@ const LIVE_DATA_HINTS = [
   "release",
   "launch",
   "trend",
+];
+
+const DIRECT_WEB_REQUEST_PATTERNS = [
+  /\bsearch (?:the )?(?:web|internet)\b/i,
+  /\bsearch online\b/i,
+  /\bweb search\b/i,
+  /\blook up\b/i,
+  /\bfind (?:online|on the web)\b/i,
+  /\bcheck (?:the )?(?:internet|web)\b/i,
+  /\bbrowse the web\b/i,
+  /\bgoogle (?:it|this)?\b/i,
+  /\bnews sources?\b/i,
+  /\bcitations?\b/i,
 ];
 
 const META_QUESTION_PATTERNS = [
@@ -233,7 +278,19 @@ function shouldAllowWebSearch({
     return false;
   }
   const lower = trimmed.toLowerCase();
-  return LIVE_DATA_HINTS.some((hint) => lower.includes(hint));
+  if (DIRECT_WEB_REQUEST_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return true;
+  }
+  if (LIVE_DATA_HINTS.some((hint) => lower.includes(hint))) {
+    return true;
+  }
+  if (/https?:\/\//i.test(trimmed) || /\bwww\./i.test(trimmed)) {
+    return true;
+  }
+  if (/\bsources?\b/i.test(trimmed) || /\breference\b/i.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 function buildSourceChips(records: SearchRecord[], maxSources = 4): SourceChip[] {
@@ -550,6 +607,12 @@ export async function POST(req: Request) {
       userText,
       forceWebSearch,
     });
+    const webSearchTools = allowWebSearch
+      ? ([{ type: "web_search" as const }] as const)
+      : undefined;
+    const forcedToolChoice = allowWebSearch && forceWebSearch
+      ? ({ type: "web_search" as const })
+      : undefined;
 
     const systemMessages = [
       { role: "system" as const, content: BASE_SYSTEM_PROMPT },
@@ -628,6 +691,7 @@ export async function POST(req: Request) {
             speedMode,
             assistantMessageRowId: assistantRowId,
             userMessageRowId: userRowId,
+            reasoningEffort: modelConfig.reasoning?.effort,
           },
         });
 
@@ -636,7 +700,8 @@ export async function POST(req: Request) {
             model: targetModel,
             input: requestMessages,
             stream: true,
-            tools: allowWebSearch ? ([{ type: "web_search" as const }] as const) : undefined,
+            tools: webSearchTools,
+            tool_choice: forcedToolChoice,
             include: allowWebSearch
               ? [
                   "web_search_call.results",
@@ -707,8 +772,19 @@ export async function POST(req: Request) {
           };
 
           enqueueJson({
-            meta: responseMetadata,
+            meta: {
+              ...responseMetadata,
+              assistantMessageRowId: assistantRowId,
+            },
           });
+          if (assistantRowId) {
+            enqueueJson({
+              sourcesEvent: {
+                messageId: assistantRowId,
+                sources: responseMetadata.sources,
+              },
+            });
+          }
           console.log(
             `[sourcesDebug] sending sources event for conversationId=${conversationId} messageId=${assistantRowId} count=${responseMetadata.sources.length}`
           );
@@ -875,20 +951,16 @@ function extractSearchMetadata(response: OpenAIResponse) {
   let failed = false;
   const outputs = Array.isArray(response.output) ? response.output : [];
   for (const item of outputs) {
-    if (!item || typeof item !== "object") {
+    if (!isWebSearchCall(item)) {
       continue;
     }
-    if ((item as { type?: string }).type !== "web_search_call") {
-      continue;
-    }
-    const call = item as Record<string, any>;
+    const call = item;
     if (call.status === "failed") {
       failed = true;
     }
+    logWebSearchCall(call);
     const actions = Array.isArray(call.actions) ? call.actions : [];
-    const searchAction = actions.find(
-      (action) => action && typeof action === "object" && action.type === "search"
-    ) as { query?: string; sources?: Array<{ url?: string }> } | undefined;
+    const searchAction = actions.find((action) => action?.type === "search");
     const query =
       typeof call.query === "string"
         ? call.query
@@ -921,7 +993,17 @@ function extractSearchMetadata(response: OpenAIResponse) {
   return { records, failed };
 }
 
-function extractWebSearchResults(call: Record<string, any>) {
+function logWebSearchCall(call: WebSearchCall) {
+  try {
+    const serialized = JSON.stringify(call);
+    const trimmed = serialized.length > 2000 ? `${serialized.slice(0, 2000)}…` : serialized;
+    console.log(`[webSearchDebug] raw web_search result: ${trimmed}`);
+  } catch (error) {
+    console.log("[webSearchDebug] unable to serialize web_search result", error);
+  }
+}
+
+function extractWebSearchResults(call: WebSearchCall) {
   const aggregated: RankedSource[] = [];
   const pushCandidates = (candidate: unknown) => {
     if (!Array.isArray(candidate)) {
@@ -952,16 +1034,25 @@ function extractWebSearchResults(call: Record<string, any>) {
   };
 
   pushCandidates(call.results);
-  pushCandidates(call.output?.results);
-  pushCandidates(call.data?.results);
-  pushCandidates(call.metadata?.results);
+  if (call.output && !Array.isArray(call.output)) {
+    pushCandidates(call.output.results);
+  }
+  if (call.data?.results) {
+    pushCandidates(call.data.results);
+  }
+  if (call.metadata?.results) {
+    pushCandidates(call.metadata.results);
+  }
 
   if (Array.isArray(call.output)) {
     for (const entry of call.output) {
-      pushCandidates((entry as { results?: unknown }).results);
-      inspectContent((entry as { content?: unknown }).content);
-      if (typeof (entry as { text?: unknown }).text === "string") {
-        const parsed = safeJsonParse((entry as { text: string }).text);
+      if (!entry) {
+        continue;
+      }
+      pushCandidates(entry.results);
+      inspectContent(entry.content);
+      if (typeof entry.text === "string") {
+        const parsed = safeJsonParse(entry.text);
         if (Array.isArray((parsed as { results?: unknown })?.results)) {
           pushCandidates((parsed as { results?: unknown }).results);
         }
@@ -975,9 +1066,7 @@ function extractWebSearchResults(call: Record<string, any>) {
 
   if (Array.isArray(call.actions)) {
     for (const action of call.actions) {
-      if (Array.isArray((action as { results?: unknown }).results)) {
-        pushCandidates((action as { results?: unknown }).results);
-      }
+      pushCandidates(action?.results);
     }
   }
 
@@ -992,9 +1081,7 @@ function safeJsonParse(value: string) {
   }
 }
 
-function buildSourcesFromAction(
-  action: { sources?: Array<{ url?: string }> } | undefined
-): RankedSource[] {
+function buildSourcesFromAction(action: WebSearchAction | undefined): RankedSource[] {
   if (!action?.sources) {
     return [];
   }
@@ -1022,7 +1109,7 @@ function normalizeWebSearchResult(result: unknown): RankedSource | null {
   if (!result || typeof result !== "object") {
     return null;
   }
-  const data = result as Record<string, any>;
+  const data = result as Record<string, unknown>;
   const url =
     typeof data.url === "string"
       ? data.url

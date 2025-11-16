@@ -115,32 +115,32 @@ export function getModelAndReasoningConfig(
   const model = MODEL_ID_MAP[resolvedFamily];
   const trimmedPrompt = promptText.trim();
 
+  let chosenEffort: ReasoningEffort | null = null;
+
   if (speedMode === "instant") {
-    const needsLightReasoning = shouldUseLightReasoning(trimmedPrompt);
-    if (!needsLightReasoning) {
-      if (resolvedFamily === "gpt-5.1") {
-        return { model, reasoning: { effort: "none" } };
-      }
-      return { model };
-    }
-    return { model, reasoning: { effort: "low" } };
+    chosenEffort = shouldUseLightReasoning(trimmedPrompt) ? "low" : null;
+  } else if (speedMode === "thinking") {
+    chosenEffort = pickMediumOrHigh(trimmedPrompt);
+  } else {
+    chosenEffort = autoReasoningForModelAndPrompt(trimmedPrompt, resolvedFamily);
   }
 
-  if (speedMode === "thinking") {
-    return { model, reasoning: { effort: pickMediumOrHigh(trimmedPrompt) } };
+  const config: ModelConfig = { model };
+
+  if (chosenEffort && chosenEffort !== "none") {
+    config.reasoning = { effort: chosenEffort };
+  } else if (resolvedFamily === "gpt-5.1") {
+    config.reasoning = { effort: "none" };
   }
 
-  const autoEffort = autoReasoningForModelAndPrompt(
-    trimmedPrompt,
-    resolvedFamily
-  );
-  if (!autoEffort || autoEffort === "none") {
-    if (resolvedFamily === "gpt-5.1") {
-      return { model, reasoning: { effort: "none" } };
-    }
-    return { model };
+  if (typeof window === "undefined") {
+    const effortLabel = config.reasoning?.effort ?? "none/omitted";
+    console.log(
+      `[modelConfigDebug] model=${model} family=${resolvedFamily} speedMode=${speedMode} effort=${effortLabel}`
+    );
   }
-  return { model, reasoning: { effort: autoEffort } };
+
+  return config;
 }
 
 export function describeModelFamily(family: ModelFamily) {
