@@ -3,7 +3,11 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import type { Response as OpenAIResponse } from "openai/resources/responses/responses";
+import type {
+  Response as OpenAIResponse,
+  Tool,
+  ToolChoiceAllowed,
+} from "openai/resources/responses/responses";
 import type { SourceChip } from "@/lib/chatTypes";
 import {
   getModelAndReasoningConfig,
@@ -607,12 +611,17 @@ export async function POST(req: Request) {
       userText,
       forceWebSearch,
     });
-    const webSearchTools = allowWebSearch
-      ? ([{ type: "web_search" as const }] as const)
+    const webSearchTools: Tool[] | undefined = allowWebSearch
+      ? [{ type: "web_search" }]
       : undefined;
-    const forcedToolChoice = allowWebSearch && forceWebSearch
-      ? ({ type: "web_search" as const })
-      : undefined;
+    const forcedToolChoice: ToolChoiceAllowed | undefined =
+      allowWebSearch && forceWebSearch
+        ? {
+            type: "allowed_tools",
+            mode: "required",
+            tools: [{ type: "web_search" }],
+          }
+        : undefined;
 
     const systemMessages = [
       { role: "system" as const, content: BASE_SYSTEM_PROMPT },
