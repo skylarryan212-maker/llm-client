@@ -5,6 +5,12 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import type { Response as OpenAIResponse } from "openai/resources/responses/responses";
 import type { SourceChip } from "@/lib/chatTypes";
+import {
+  getModelAndReasoningConfig,
+  type ModelFamily,
+  type ReasoningEffort,
+  type SpeedMode,
+} from "@/lib/modelConfig";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -41,15 +47,6 @@ type PersistedHistoryRow = {
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
 type ModelKey = Exclude<ModelMode, "auto">;
-type ReasoningEffortSetting =
-  | "auto"
-  | "none"
-  | "low"
-  | "medium"
-  | "high";
-type VerbositySetting = "auto" | "low" | "medium" | "high";
-type ConcreteReasoningEffort = Exclude<ReasoningEffortSetting, "auto">;
-type ConcreteVerbosity = Exclude<VerbositySetting, "auto">;
 
 export type RankedSource = {
   title: string;
@@ -77,7 +74,10 @@ type SearchStatusEvent =
 type ResponseMetadata = {
   usedModel: string;
   usedModelMode: ModelKey;
-  requestedModelMode: ModelMode;
+  usedModelFamily: Exclude<ModelFamily, "auto">;
+  requestedModelFamily: ModelFamily;
+  speedMode: SpeedMode;
+  reasoningEffort?: ReasoningEffort;
   usedWebSearch: boolean;
   searchRecords: SearchRecord[];
   sources: SourceChip[];
@@ -89,16 +89,16 @@ const MODEL_MAP: Record<ModelKey, string> = {
   full: "gpt-5.1-2025-11-13",
 };
 
-const MODEL_CAPABILITIES: Record<ModelKey, { supportsReasoning: boolean; supportsVerbosity: boolean }> = {
-  nano: { supportsReasoning: true, supportsVerbosity: true },
-  mini: { supportsReasoning: true, supportsVerbosity: true },
-  full: { supportsReasoning: true, supportsVerbosity: true },
+const MODEL_FAMILY_TO_MODE: Record<Exclude<ModelFamily, "auto">, ModelKey> = {
+  "gpt-5-nano": "nano",
+  "gpt-5-mini": "mini",
+  "gpt-5.1": "full",
 };
 
-const ROUTER_DEFAULTS: Record<ModelKey, { reasoning: ConcreteReasoningEffort; verbosity: ConcreteVerbosity }> = {
-  nano: { reasoning: "none", verbosity: "low" },
-  mini: { reasoning: "low", verbosity: "medium" },
-  full: { reasoning: "medium", verbosity: "medium" },
+const MODEL_KEY_TO_FAMILY: Record<ModelKey, Exclude<ModelFamily, "auto">> = {
+  nano: "gpt-5-nano",
+  mini: "gpt-5-mini",
+  full: "gpt-5.1",
 };
 
 const BASE_SYSTEM_PROMPT =
@@ -188,46 +188,31 @@ function normalizeGeneratedTitle(input: string | null | undefined) {
   return normalized;
 }
 
-function parseReasoningSetting(value: unknown): ReasoningEffortSetting {
-  const allowed: ReasoningEffortSetting[] = [
+function parseSpeedMode(value: unknown): SpeedMode {
+  const allowed: SpeedMode[] = ["auto", "instant", "thinking"];
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase() as SpeedMode;
+    if (allowed.includes(normalized)) {
+      return normalized;
+    }
+  }
+  return "auto";
+}
+
+function parseModelFamily(value: unknown): ModelFamily {
+  const allowed: ModelFamily[] = [
     "auto",
-    "none",
-    "low",
-    "medium",
-    "high",
+    "gpt-5.1",
+    "gpt-5-mini",
+    "gpt-5-nano",
   ];
   if (typeof value === "string") {
-    const normalized = value.toLowerCase() as ReasoningEffortSetting;
+    const normalized = value.toLowerCase() as ModelFamily;
     if (allowed.includes(normalized)) {
       return normalized;
     }
   }
   return "auto";
-}
-
-function parseVerbositySetting(value: unknown): VerbositySetting {
-  const allowed: VerbositySetting[] = ["auto", "low", "medium", "high"];
-  if (typeof value === "string") {
-    const normalized = value.toLowerCase() as VerbositySetting;
-    if (allowed.includes(normalized)) {
-      return normalized;
-    }
-  }
-  return "auto";
-}
-
-function resolveReasoningSetting(
-  requested: ReasoningEffortSetting,
-  fallback: ConcreteReasoningEffort
-): ConcreteReasoningEffort {
-  return requested === "auto" ? fallback : requested;
-}
-
-function resolveVerbositySetting(
-  requested: VerbositySetting,
-  fallback: ConcreteVerbosity
-): ConcreteVerbosity {
-  return requested === "auto" ? fallback : requested;
 }
 
 function shouldAllowWebSearch({
@@ -335,15 +320,13 @@ export async function POST(req: Request) {
     const body = await req.json();
     const userText = (body.message ?? "").toString().trim();
     const conversationId = (body.conversationId ?? "").toString();
-    const requestedModeRaw =
-      typeof body.modelMode === "string" ? body.modelMode : "auto";
-    const allowedModes: ModelMode[] = ["auto", "nano", "mini", "full"];
-    const modelMode = allowedModes.includes(requestedModeRaw as ModelMode)
-      ? (requestedModeRaw as ModelMode)
-      : "auto";
+    const requestedModelFamily = parseModelFamily(body.modelFamily);
+    const speedMode = parseSpeedMode(body.speedMode);
+    const requestedMode: ModelMode =
+      requestedModelFamily === "auto"
+        ? "auto"
+        : MODEL_FAMILY_TO_MODE[requestedModelFamily];
     const forceWebSearch = Boolean(body.forceWebSearch);
-    const reasoningSetting = parseReasoningSetting(body.reasoningEffort);
-    const verbositySetting = parseVerbositySetting(body.verbosity);
     const retryAssistantMessageId =
       typeof body.retryAssistantMessageId === "string" &&
       body.retryAssistantMessageId.trim().length > 0
@@ -529,8 +512,8 @@ export async function POST(req: Request) {
       openai,
       history: historyForModel,
       userText,
-      requestedMode: modelMode,
-      requestTitle: needsTitle && modelMode === "auto",
+      requestedMode,
+      requestTitle: needsTitle && requestedMode === "auto",
     });
 
     let routerTitlePromise: Promise<string | null> | null = null;
@@ -543,7 +526,7 @@ export async function POST(req: Request) {
     }
 
     let manualTitlePromise: Promise<string | null> | null = null;
-    if (needsTitle && !routerResult.titleSuggestion && modelMode !== "auto") {
+    if (needsTitle && !routerResult.titleSuggestion && requestedMode !== "auto") {
       manualTitlePromise = requestNanoTitle({
         openai,
         userMessage: userText,
@@ -582,17 +565,13 @@ export async function POST(req: Request) {
     ];
 
     const targetModelKey = routerResult.modelKey;
-    const targetModel = MODEL_MAP[targetModelKey];
-    const resolvedReasoning = resolveReasoningSetting(
-      reasoningSetting,
-      routerResult.defaultReasoningEffort
+    const targetModelFamily = MODEL_KEY_TO_FAMILY[targetModelKey];
+    const modelConfig = getModelAndReasoningConfig(
+      targetModelFamily,
+      speedMode,
+      userText
     );
-    const resolvedVerbosity = resolveVerbositySetting(
-      verbositySetting,
-      routerResult.defaultVerbosity
-    );
-    const modelSupportsReasoning = MODEL_CAPABILITIES[targetModelKey].supportsReasoning;
-    const modelSupportsVerbosity = MODEL_CAPABILITIES[targetModelKey].supportsVerbosity;
+    const targetModel = modelConfig.model;
 
     const encoder = new TextEncoder();
     const historyForTitle = isRetryRequest
@@ -645,7 +624,8 @@ export async function POST(req: Request) {
 
         enqueueJson({
           meta: {
-            requestedModelMode: modelMode,
+            requestedModelFamily,
+            speedMode,
             assistantMessageRowId: assistantRowId,
             userMessageRowId: userRowId,
           },
@@ -663,14 +643,7 @@ export async function POST(req: Request) {
                   "web_search_call.action.sources",
                 ]
               : undefined,
-            reasoning:
-              modelSupportsReasoning
-                ? { effort: resolvedReasoning }
-                : undefined,
-            text:
-              modelSupportsVerbosity
-                ? { verbosity: resolvedVerbosity }
-                : undefined,
+            reasoning: modelConfig.reasoning,
           });
 
           for await (const event of responseStream) {
@@ -703,6 +676,17 @@ export async function POST(req: Request) {
           const searchMetadata = extractSearchMetadata(finalResponse);
           const usedWebSearch = searchMetadata.records.length > 0;
           const sources = buildSourceChips(searchMetadata.records);
+          if (sources.length > 0) {
+            console.log(
+              `[sourcesDebug] aggregated sources count=${sources.length} conversationId=${conversationId} domains=${sources
+                .map((src) => src.domain)
+                .join(",")}`
+            );
+          } else {
+            console.log(
+              `[sourcesDebug] aggregated sources count=0 conversationId=${conversationId}`
+            );
+          }
           if (searchMetadata.failed) {
             sendStatusUpdate({
               type: "search-error",
@@ -713,7 +697,10 @@ export async function POST(req: Request) {
           responseMetadata = {
             usedModel: targetModel,
             usedModelMode: targetModelKey,
-            requestedModelMode: modelMode,
+            usedModelFamily: targetModelFamily,
+            requestedModelFamily,
+            speedMode,
+            reasoningEffort: modelConfig.reasoning?.effort,
             usedWebSearch,
             searchRecords: searchMetadata.records,
             sources,
@@ -722,6 +709,9 @@ export async function POST(req: Request) {
           enqueueJson({
             meta: responseMetadata,
           });
+          console.log(
+            `[sourcesDebug] sending sources event for conversationId=${conversationId} messageId=${assistantRowId} count=${responseMetadata.sources.length}`
+          );
         } catch (err) {
           console.error("Stream error:", err);
           enqueueJson({ error: "upstream_error" });
@@ -787,8 +777,6 @@ type RouteModelArgs = {
 
 type RoutedModelConfig = {
   modelKey: ModelKey;
-  defaultReasoningEffort: ConcreteReasoningEffort;
-  defaultVerbosity: ConcreteVerbosity;
   titleSuggestion?: string | null;
 };
 
@@ -802,8 +790,6 @@ async function routeModel({
   if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
     return {
       modelKey: requestedMode,
-      defaultReasoningEffort: ROUTER_DEFAULTS[requestedMode].reasoning,
-      defaultVerbosity: ROUTER_DEFAULTS[requestedMode].verbosity,
     };
   }
 
@@ -827,8 +813,6 @@ async function routeModel({
     if (parsed?.mode) {
       return {
         modelKey: parsed.mode,
-        defaultReasoningEffort: ROUTER_DEFAULTS[parsed.mode].reasoning,
-        defaultVerbosity: ROUTER_DEFAULTS[parsed.mode].verbosity,
         titleSuggestion: requestTitle ? parsed.title ?? "" : undefined,
       };
     }
@@ -838,8 +822,6 @@ async function routeModel({
 
   return {
     modelKey: "mini",
-    defaultReasoningEffort: ROUTER_DEFAULTS.mini.reasoning,
-    defaultVerbosity: ROUTER_DEFAULTS.mini.verbosity,
     titleSuggestion: null,
   };
 }
@@ -940,19 +922,74 @@ function extractSearchMetadata(response: OpenAIResponse) {
 }
 
 function extractWebSearchResults(call: Record<string, any>) {
-  const candidates = [
-    call.results,
-    call.output?.results,
-    call.data?.results,
-  ];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate
-        .map((result) => normalizeWebSearchResult(result))
-        .filter((result): result is RankedSource => Boolean(result));
+  const aggregated: RankedSource[] = [];
+  const pushCandidates = (candidate: unknown) => {
+    if (!Array.isArray(candidate)) {
+      return;
+    }
+    for (const item of candidate) {
+      const normalized = normalizeWebSearchResult(item);
+      if (normalized) {
+        aggregated.push(normalized);
+      }
+    }
+  };
+
+  const inspectContent = (content: unknown) => {
+    if (Array.isArray(content)) {
+      for (const entry of content) {
+        if (Array.isArray((entry as { results?: unknown }).results)) {
+          pushCandidates((entry as { results?: unknown }).results);
+        }
+        if (typeof (entry as { text?: unknown }).text === "string") {
+          const parsed = safeJsonParse((entry as { text: string }).text);
+          if (Array.isArray((parsed as { results?: unknown })?.results)) {
+            pushCandidates((parsed as { results?: unknown }).results);
+          }
+        }
+      }
+    }
+  };
+
+  pushCandidates(call.results);
+  pushCandidates(call.output?.results);
+  pushCandidates(call.data?.results);
+  pushCandidates(call.metadata?.results);
+
+  if (Array.isArray(call.output)) {
+    for (const entry of call.output) {
+      pushCandidates((entry as { results?: unknown }).results);
+      inspectContent((entry as { content?: unknown }).content);
+      if (typeof (entry as { text?: unknown }).text === "string") {
+        const parsed = safeJsonParse((entry as { text: string }).text);
+        if (Array.isArray((parsed as { results?: unknown })?.results)) {
+          pushCandidates((parsed as { results?: unknown }).results);
+        }
+      }
     }
   }
-  return [] as RankedSource[];
+
+  if (aggregated.length > 0) {
+    return aggregated;
+  }
+
+  if (Array.isArray(call.actions)) {
+    for (const action of call.actions) {
+      if (Array.isArray((action as { results?: unknown }).results)) {
+        pushCandidates((action as { results?: unknown }).results);
+      }
+    }
+  }
+
+  return aggregated;
+}
+
+function safeJsonParse(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function buildSourcesFromAction(
@@ -1096,11 +1133,21 @@ async function ensureChatTitle({
     return;
   }
 
-  const titleModelKey: ModelKey = "nano";
+  const titleModelFamily: Exclude<ModelFamily, "auto"> = "gpt-5-nano";
+  const titleModelConfig = getModelAndReasoningConfig(
+    titleModelFamily,
+    "instant",
+    trimmedAssistant || trimmedUser
+  );
+  console.log(
+    `[titleDebug] generating title for conversationId=${conversationId} using model=${titleModelConfig.model} effort=${
+      titleModelConfig.reasoning?.effort ?? "omitted"
+    }`
+  );
 
   try {
     const response = await openai.responses.create({
-      model: MODEL_MAP[titleModelKey],
+      model: titleModelConfig.model,
       input: [
         {
           role: "system",
@@ -1117,8 +1164,7 @@ async function ensureChatTitle({
               content: `User message:\n${trimmedUser}\n\nTitle:`,
             },
       ],
-      reasoning: { effort: "none" },
-      text: { verbosity: "low" },
+      reasoning: titleModelConfig.reasoning,
     });
 
     const rawTitle = response.output_text?.trim() || "";
@@ -1143,9 +1189,19 @@ async function requestNanoTitle({
   openai: OpenAI;
   userMessage: string;
 }): Promise<string | null> {
+  const modelConfig = getModelAndReasoningConfig(
+    "gpt-5-nano",
+    "instant",
+    userMessage
+  );
+  console.log(
+    `[titleDebug] generating quick title using model=${modelConfig.model} effort=${
+      modelConfig.reasoning?.effort ?? "omitted"
+    }`
+  );
   try {
     const response = await openai.responses.create({
-      model: MODEL_MAP.nano,
+      model: modelConfig.model,
       input: [
         {
           role: "system",
@@ -1157,8 +1213,7 @@ async function requestNanoTitle({
           content: `User message:\n${userMessage}\n\nTitle:`,
         },
       ],
-      reasoning: { effort: "none" },
-      text: { verbosity: "low" },
+      reasoning: modelConfig.reasoning,
     });
 
     return response.output_text?.trim() || null;

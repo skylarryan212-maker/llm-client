@@ -15,6 +15,14 @@ import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
 import type { SourceChip } from "@/lib/chatTypes";
+import {
+  describeModelFamily,
+  getModelAndReasoningConfig,
+  type ModelFamily,
+  type ReasoningEffort,
+  type SpeedMode,
+} from "@/lib/modelConfig";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 type SearchSource = {
   title: string;
@@ -37,7 +45,11 @@ type SearchRecord = {
 type MessageMetadata = {
   usedModel?: string;
   usedModelMode?: ModelMode;
+  usedModelFamily?: ModelFamily;
   requestedModelMode?: ModelMode;
+  requestedModelFamily?: ModelFamily;
+  speedMode?: SpeedMode;
+  reasoningEffort?: ReasoningEffort;
   usedWebSearch?: boolean;
   searchRecords?: SearchRecord[];
   thoughtDurationSeconds?: number;
@@ -52,6 +64,10 @@ type ChatMessage = {
   content: string;
   usedModel?: string;
   usedModelMode?: ModelMode;
+  usedModelFamily?: ModelFamily;
+  requestedModelFamily?: ModelFamily;
+  speedMode?: SpeedMode;
+  reasoningEffort?: ReasoningEffort;
   usedWebSearch?: boolean;
   searchRecords?: SearchRecord[];
   metadata?: MessageMetadata;
@@ -75,45 +91,38 @@ type ConversationMeta = {
 type ViewMode = "chat" | "project";
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
-type ReasoningEffortSetting =
-  | "auto"
-  | "none"
-  | "low"
-  | "medium"
-  | "high";
-type VerbositySetting = "auto" | "low" | "medium" | "high";
 
 const TEST_USER_ID = "test-user-1";
 
-const MODEL_SEGMENTS: { value: ModelMode; label: string; hint: string }[] = [
-  { value: "auto", label: "Auto", hint: "Router" },
-  { value: "nano", label: "Fast", hint: "Nano" },
-  { value: "mini", label: "Normal", hint: "Mini" },
-  { value: "full", label: "Deep", hint: "5.1" },
+const SPEED_OPTIONS: { value: SpeedMode; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Balanced" },
+  { value: "instant", label: "Instant", hint: "Fast replies" },
+  { value: "thinking", label: "Thinking", hint: "Deeper reasoning" },
 ];
 
-const MODEL_NAME_MAP: Record<Exclude<ModelMode, "auto">, string> = {
-  nano: "gpt-5-nano-2025-08-07",
-  mini: "gpt-5-mini-2025-08-07",
-  full: "gpt-5.1-2025-11-13",
+const SPEED_LABELS: Record<SpeedMode, string> = {
+  auto: "Auto",
+  instant: "Instant",
+  thinking: "Thinking",
 };
 
-const REASONING_OPTIONS: {
-  value: ReasoningEffortSetting;
+const EXACT_MODEL_OPTIONS: {
+  value: Exclude<ModelFamily, "auto">;
   label: string;
+  hint: string;
 }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "none", label: "None" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
+  { value: "gpt-5-nano", label: "GPT 5 Nano", hint: "Fast & light" },
+  { value: "gpt-5-mini", label: "GPT 5 Mini", hint: "Balanced" },
+  { value: "gpt-5.1", label: "GPT 5.1", hint: "Most capable" },
 ];
 
-const VERBOSITY_OPTIONS: { value: VerbositySetting; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
+const MODEL_RETRY_OPTIONS: {
+  value: Exclude<ModelFamily, "auto">;
+  label: string;
+}[] = [
+  { value: "gpt-5-nano", label: "GPT 5 Nano" },
+  { value: "gpt-5-mini", label: "GPT 5 Mini" },
+  { value: "gpt-5.1", label: "GPT 5.1" },
 ];
 
 const MAX_INPUT_HEIGHT = 176;
@@ -121,6 +130,7 @@ const MIN_INPUT_HEIGHT = 32;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
 const LONG_THINK_THRESHOLD_MS = 3000;
+const MAX_PROJECT_CHAT_PREVIEW = 5;
 
 type ServerStatusEvent =
   | { type: "search-start"; query: string }
@@ -221,6 +231,19 @@ function getNewestConversation(conversations: ConversationMeta[]) {
   )[0];
 }
 
+function legacyModeFromFamily(family: ModelFamily): ModelMode {
+  switch (family) {
+    case "gpt-5-nano":
+      return "nano";
+    case "gpt-5-mini":
+      return "mini";
+    case "gpt-5.1":
+      return "full";
+    default:
+      return "auto";
+  }
+}
+
 export default function Home() {
   // ------------------------------------------------------------
   // STATE
@@ -229,11 +252,9 @@ export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [modelMode, setModelMode] = useState<ModelMode>("auto");
+  const [modelFamily, setModelFamily] = useState<ModelFamily>("auto");
+  const [speedMode, setSpeedMode] = useState<SpeedMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
-  const [reasoningEffort, setReasoningEffort] =
-    useState<ReasoningEffortSetting>("auto");
-  const [verbosity, setVerbosity] = useState<VerbositySetting>("auto");
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
@@ -263,6 +284,7 @@ export default function Home() {
     null
   );
   const [openModelMenuId, setOpenModelMenuId] = useState<string | null>(null);
+  const [headerModelMenuOpen, setHeaderModelMenuOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [thinkingStatus, setThinkingStatus] = useState<
     { phase: "waiting" | "extended" | "responding"; label: string } | null
@@ -276,6 +298,11 @@ export default function Home() {
   >(null);
   const [moveMenuConversationId, setMoveMenuConversationId] =
     useState<string | null>(null);
+  const [pendingDeleteConversation, setPendingDeleteConversation] = useState<
+    { id: string; title: string } | null
+  >(null);
+  const [deleteConversationLoading, setDeleteConversationLoading] =
+    useState(false);
   const responseTimingRef = useRef({
     start: null as number | null,
     firstToken: null as number | null,
@@ -361,6 +388,9 @@ export default function Home() {
         console.error("Load messages error", error);
         setMessages([]);
       } else {
+        console.log(
+          `[historyDebug] loaded ${data?.length ?? 0} messages for conversationId=${conversationId}`
+        );
         setMessages(
           (data || []).map((m) => {
             const metadata =
@@ -379,6 +409,10 @@ export default function Home() {
               content: m.content,
               usedModel: metadata.usedModel,
               usedModelMode: metadata.usedModelMode,
+              usedModelFamily: metadata.usedModelFamily,
+              requestedModelFamily: metadata.requestedModelFamily,
+              speedMode: metadata.speedMode,
+              reasoningEffort: metadata.reasoningEffort,
               usedWebSearch: metadata.usedWebSearch,
               searchRecords: metadata.searchRecords || [],
               metadata,
@@ -444,6 +478,7 @@ export default function Home() {
       setComposerMenuOpen(false);
       setRowMenu(null);
       setMoveMenuConversationId(null);
+      setHeaderModelMenuOpen(false);
     };
     window.addEventListener("click", handleWindowClick);
     return () => window.removeEventListener("click", handleWindowClick);
@@ -489,6 +524,20 @@ export default function Home() {
     [projects, conversations]
   );
 
+  const projectSidebarChats = useMemo(() => {
+    const map = new Map<string, ConversationMeta[]>();
+    sortedConversations.forEach((conversation) => {
+      if (!conversation.project_id) {
+        return;
+      }
+      if (!map.has(conversation.project_id)) {
+        map.set(conversation.project_id, []);
+      }
+      map.get(conversation.project_id)?.push(conversation);
+    });
+    return map;
+  }, [sortedConversations]);
+
   const currentConversation = conversations.find(
     (c) => c.id === selectedConversationId
   );
@@ -509,6 +558,12 @@ export default function Home() {
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const canSendMessage = input.trim().length > 0;
+  const modelLabel =
+    modelFamily === "auto" ? "Auto" : describeModelFamily(modelFamily);
+  const headerStatusLabel =
+    speedMode === "auto" && modelFamily === "auto"
+      ? modelLabel
+      : `${modelLabel} ${SPEED_LABELS[speedMode]}`;
 
   const clearThinkingTimeout = () => {
     if (thinkingTimerRef.current) {
@@ -607,7 +662,8 @@ type RetryOptions = {
 
 type SendMessageOptions = {
   messageOverride?: string;
-  modelOverride?: ModelMode;
+  modelOverride?: ModelFamily;
+  speedOverride?: SpeedMode;
   retry?: RetryOptions;
 };
 
@@ -623,7 +679,17 @@ type SendMessageOptions = {
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
     const text = sourceText.trim();
-    const chosenMode = options?.modelOverride ?? modelMode;
+    const chosenFamily = options?.modelOverride ?? modelFamily;
+    const chosenSpeed = options?.speedOverride ?? speedMode;
+    const requestedLegacyMode = legacyModeFromFamily(chosenFamily);
+    const previewFamilyForReasoning =
+      chosenFamily === "auto" ? "gpt-5-mini" : chosenFamily;
+    const previewModelConfig = getModelAndReasoningConfig(
+      previewFamilyForReasoning,
+      chosenSpeed,
+      text
+    );
+    const requestedReasoningEffort = previewModelConfig.reasoning?.effort;
     if (!options?.messageOverride) {
       setInput("");
     }
@@ -640,12 +706,21 @@ type SendMessageOptions = {
       assistantMessageId: null,
     };
     clearThinkingTimeout();
-    setThinkingStatus({ phase: "waiting", label: "Thinking…" });
-    thinkingTimerRef.current = setTimeout(() => {
-      if (!responseTimingRef.current.firstToken) {
-        setThinkingStatus({ phase: "extended", label: "Thinking for longer…" });
-      }
-    }, LONG_THINK_THRESHOLD_MS);
+    const shouldShowImmediateLongThink =
+      requestedReasoningEffort && requestedReasoningEffort !== "none";
+    if (shouldShowImmediateLongThink) {
+      setThinkingStatus({ phase: "extended", label: "Thinking for longer…" });
+    } else {
+      setThinkingStatus({ phase: "waiting", label: "Thinking…" });
+      thinkingTimerRef.current = setTimeout(() => {
+        if (!responseTimingRef.current.firstToken) {
+          setThinkingStatus({
+            phase: "extended",
+            label: "Thinking for longer…",
+          });
+        }
+      }, LONG_THINK_THRESHOLD_MS);
+    }
 
     try {
       if (!conversationId && isRetry) {
@@ -666,42 +741,57 @@ type SendMessageOptions = {
       responseTimingRef.current.assistantMessageId = assistantMessageId;
       setActiveAssistantMessageId(assistantMessageId);
 
-      if (!isRetry) {
-        const newUserMessageId = createLocalId();
-        userMessageId = newUserMessageId;
-        const activeAssistantId = assistantMessageId!;
-        setMessages((prev) => [
-          ...prev,
-          { id: newUserMessageId, role: "user", content: text },
-          {
-            id: activeAssistantId,
-            role: "assistant",
-            content: "",
-            metadata: { requestedModelMode: chosenMode },
+    if (!isRetry) {
+      const newUserMessageId = createLocalId();
+      userMessageId = newUserMessageId;
+      const activeAssistantId = assistantMessageId!;
+      setMessages((prev) => [
+        ...prev,
+        { id: newUserMessageId, role: "user", content: text },
+        {
+          id: activeAssistantId,
+          role: "assistant",
+          content: "",
+          metadata: {
+            requestedModelMode: requestedLegacyMode,
+            requestedModelFamily: chosenFamily,
+            speedMode: chosenSpeed,
+            reasoningEffort: requestedReasoningEffort,
           },
-        ]);
-      } else {
+          requestedModelFamily: chosenFamily,
+          speedMode: chosenSpeed,
+          reasoningEffort: requestedReasoningEffort,
+        },
+      ]);
+    } else {
         if (assistantMessageId) {
           pendingMetadataPersistRef.current.delete(assistantMessageId);
         }
-        setMessages((prev) =>
-          prev.map((msg) => {
-            if (msg.id !== assistantMessageId) return msg;
-            return {
-              ...msg,
-              content: "",
-              usedModel: undefined,
-              usedModelMode: undefined,
-              usedWebSearch: undefined,
-              searchRecords: [],
-              thoughtDurationSeconds: undefined,
-              thoughtDurationLabel: undefined,
-              metadata: {
-                requestedModelMode: chosenMode,
-              },
-            };
-          })
-        );
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== assistantMessageId) return msg;
+          return {
+            ...msg,
+            content: "",
+            usedModel: undefined,
+            usedModelMode: undefined,
+            usedModelFamily: undefined,
+            usedWebSearch: undefined,
+            searchRecords: [],
+            thoughtDurationSeconds: undefined,
+            thoughtDurationLabel: undefined,
+            metadata: {
+              requestedModelMode: requestedLegacyMode,
+              requestedModelFamily: chosenFamily,
+              speedMode: chosenSpeed,
+              reasoningEffort: requestedReasoningEffort,
+            },
+            requestedModelFamily: chosenFamily,
+            speedMode: chosenSpeed,
+            reasoningEffort: requestedReasoningEffort,
+          };
+        })
+      );
         setExpandedSourcesId((prev) =>
           prev === assistantMessageId ? null : prev
         );
@@ -717,10 +807,9 @@ type SendMessageOptions = {
       const requestBody: Record<string, unknown> = {
         message: text,
         conversationId,
-        modelMode: chosenMode,
+        modelFamily: chosenFamily,
+        speedMode: chosenSpeed,
         forceWebSearch: shouldForceWebSearch,
-        reasoningEffort,
-        verbosity,
       };
 
       if (options?.retry?.assistantPersistedId) {
@@ -791,15 +880,37 @@ type SendMessageOptions = {
                   setMessages((prev) =>
                     prev.map((msg) => {
                       if (msg.id !== assistantMessageId) return msg;
+                      const resolvedRequestedFamily =
+                        meta.requestedModelFamily ??
+                        msg.metadata?.requestedModelFamily ??
+                        chosenFamily;
+                      const resolvedSpeedMode =
+                        meta.speedMode ??
+                        msg.metadata?.speedMode ??
+                        chosenSpeed;
+                      const resolvedReasoning =
+                        meta.reasoningEffort ??
+                        msg.metadata?.reasoningEffort ??
+                        requestedReasoningEffort;
                       const mergedMetadata: MessageMetadata = {
                         ...(msg.metadata || {}),
                         usedModel: meta.usedModel ?? msg.metadata?.usedModel,
                         usedModelMode:
-                          meta.usedModelMode ?? msg.metadata?.usedModelMode,
+                          meta.usedModelMode ??
+                          msg.metadata?.usedModelMode ??
+                          (meta.usedModelFamily
+                            ? legacyModeFromFamily(meta.usedModelFamily)
+                            : undefined),
+                        usedModelFamily:
+                          meta.usedModelFamily ??
+                          msg.metadata?.usedModelFamily,
                         requestedModelMode:
                           meta.requestedModelMode ??
                           msg.metadata?.requestedModelMode ??
-                          chosenMode,
+                          legacyModeFromFamily(resolvedRequestedFamily),
+                        requestedModelFamily: resolvedRequestedFamily,
+                        speedMode: resolvedSpeedMode,
+                        reasoningEffort: resolvedReasoning,
                         usedWebSearch:
                           typeof meta.usedWebSearch === "boolean"
                             ? meta.usedWebSearch
@@ -816,7 +927,17 @@ type SendMessageOptions = {
                       return {
                         ...msg,
                         usedModel: meta.usedModel ?? msg.usedModel,
-                        usedModelMode: meta.usedModelMode ?? msg.usedModelMode,
+                        usedModelMode:
+                          meta.usedModelMode ??
+                          msg.usedModelMode ??
+                          (meta.usedModelFamily
+                            ? legacyModeFromFamily(meta.usedModelFamily)
+                            : undefined),
+                        usedModelFamily:
+                          meta.usedModelFamily ?? msg.usedModelFamily,
+                        requestedModelFamily: resolvedRequestedFamily,
+                        speedMode: resolvedSpeedMode,
+                        reasoningEffort: resolvedReasoning,
                         usedWebSearch:
                           typeof meta.usedWebSearch === "boolean"
                             ? meta.usedWebSearch
@@ -1010,7 +1131,7 @@ type SendMessageOptions = {
   }
 
   async function handleRetryWithModel(
-    targetMode: ModelMode,
+    targetFamily: Exclude<ModelFamily, "auto">,
     targetMessage: ChatMessage
   ) {
     if (!targetMessage.id) return;
@@ -1027,14 +1148,14 @@ type SendMessageOptions = {
       console.warn("Retry unavailable until messages finish saving");
       return;
     }
-    setModelMode(targetMode);
+    setModelFamily(targetFamily);
     setOpenModelMenuId(null);
     setExpandedSourcesId((prev) =>
       prev === targetMessage.id ? null : prev
     );
     await sendMessage({
       messageOverride: relatedUserMessage.content,
-      modelOverride: targetMode,
+      modelOverride: targetFamily,
       retry: {
         assistantMessageId: targetMessage.id,
         assistantPersistedId: targetMessage.persistedId,
@@ -1127,8 +1248,6 @@ type SendMessageOptions = {
   }
 
   async function deleteConversation(id: string) {
-    if (!window.confirm("Delete this chat?")) return;
-
     await supabase.from("messages").delete().eq("conversation_id", id);
     await supabase.from("conversations").delete().eq("id", id);
 
@@ -1148,6 +1267,25 @@ type SendMessageOptions = {
       return filtered;
     });
   }
+
+  const requestDeleteConversation = (id: string) => {
+    const target = conversations.find((c) => c.id === id);
+    setPendingDeleteConversation({
+      id,
+      title: target?.title?.trim() || "Untitled chat",
+    });
+  };
+
+  const confirmDeleteConversation = async () => {
+    if (!pendingDeleteConversation) return;
+    setDeleteConversationLoading(true);
+    try {
+      await deleteConversation(pendingDeleteConversation.id);
+    } finally {
+      setDeleteConversationLoading(false);
+      setPendingDeleteConversation(null);
+    }
+  };
 
   async function moveConversation(id: string, newProjectId: string | null) {
     await supabase
@@ -1248,60 +1386,93 @@ type SendMessageOptions = {
         {sortedProjects.map((p) => {
           const isActive = selectedProjectId === p.id && viewMode === "project";
           const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
+          const projectChatList = projectSidebarChats.get(p.id) || [];
+          const topChats = projectChatList.slice(0, MAX_PROJECT_CHAT_PREVIEW);
+          const hasMoreChats = projectChatList.length > MAX_PROJECT_CHAT_PREVIEW;
           return (
-            <div
-              key={p.id}
-              className={`group relative flex items-center rounded-md ${
-                isActive
-                  ? "bg-[#202123] text-zinc-100"
-                  : "text-zinc-300 hover:bg-[#202123]"
-              }`}
-            >
-              <button
-                className="flex-1 truncate px-3 py-2 text-left text-sm"
-                onClick={() => handleProjectSelect(p.id)}
+            <div key={p.id} className="group relative">
+              <div
+                className={`flex items-center rounded-md ${
+                  isActive
+                    ? "bg-[#202123] text-zinc-100"
+                    : "text-zinc-300 hover:bg-[#202123]"
+                }`}
               >
-                {p.name}
-              </button>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setMoveMenuConversationId(null);
-                  setRowMenu((prev) =>
-                    prev?.type === "project" && prev.id === p.id
-                      ? null
-                      : { type: "project", id: p.id }
-                  );
-                }}
-                aria-label="Project actions"
-                className="mr-2 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
-              >
-                ⋯
-              </button>
-
-              {isMenuOpen && (
-                <div
-                  onClick={(event) => event.stopPropagation()}
-                  className="absolute right-0 top-full z-30 mt-2 w-40 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1 text-left text-xs shadow-2xl"
+                <button
+                  className="flex-1 truncate px-3 py-2 text-left text-sm"
+                  onClick={() => handleProjectSelect(p.id)}
                 >
-                  <button
-                    onClick={() => {
-                      renameProject(p.id);
-                      setRowMenu(null);
-                    }}
-                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1d1d24]"
+                  {p.name}
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setMoveMenuConversationId(null);
+                    setRowMenu((prev) =>
+                      prev?.type === "project" && prev.id === p.id
+                        ? null
+                        : { type: "project", id: p.id }
+                    );
+                  }}
+                  aria-label="Project actions"
+                  className="mr-2 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
+                >
+                  ⋯
+                </button>
+
+                {isMenuOpen && (
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    className="absolute right-0 top-full z-30 mt-2 w-40 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1 text-left text-xs shadow-2xl"
                   >
-                    Rename
-                  </button>
-                  <button
-                    onClick={() => {
-                      deleteProject(p.id);
-                      setRowMenu(null);
-                    }}
-                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1d1d24]"
-                  >
-                    Delete
-                  </button>
+                    <button
+                      onClick={() => {
+                        renameProject(p.id);
+                        setRowMenu(null);
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1d1d24]"
+                    >
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => {
+                        deleteProject(p.id);
+                        setRowMenu(null);
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1d1d24]"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+              {topChats.length > 0 && (
+                <div className="ml-6 mt-1 space-y-1 border-l border-[#2a2a30] pl-3">
+                  {topChats.map((chat) => {
+                    const chatActive =
+                      selectedConversationId === chat.id && viewMode === "chat";
+                    return (
+                      <button
+                        key={chat.id}
+                        className={`block w-full truncate rounded-md px-2 py-1 text-left text-[12px] ${
+                          chatActive
+                            ? "bg-[#202123] text-white"
+                            : "text-zinc-400 hover:text-white"
+                        }`}
+                        onClick={() => handleConversationSelect(chat.id)}
+                      >
+                        {chat.title || "Untitled chat"}
+                      </button>
+                    );
+                  })}
+                  {hasMoreChats && (
+                    <button
+                      className="block w-full truncate rounded-md px-2 py-1 text-left text-[12px] text-zinc-500 hover:text-white"
+                      onClick={() => handleProjectSelect(p.id)}
+                    >
+                      Show more
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1417,7 +1588,7 @@ type SendMessageOptions = {
                   </div>
                   <button
                     onClick={() => {
-                      deleteConversation(c.id);
+                      requestDeleteConversation(c.id);
                       setRowMenu(null);
                       setMoveMenuConversationId(null);
                     }}
@@ -1482,19 +1653,104 @@ type SendMessageOptions = {
             >
               ☰
             </button>
-            <span className="text-sm font-semibold">LLM Client</span>
-
-            {viewMode === "chat" && currentConversation && (
-              <span className="hidden text-xs text-zinc-500 sm:inline">
-                {currentConversation.title || "Untitled chat"}
-              </span>
-            )}
-
-            {inProjectView && currentProject && (
-              <span className="hidden text-xs text-zinc-500 sm:inline">
-                Project · {currentProject.name}
-              </span>
-            )}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setHeaderModelMenuOpen((prev) => !prev);
+                }}
+                className="flex items-center gap-2 rounded-xl border border-[#2f2f32] bg-[#141418] px-3 py-1 text-left text-xs text-zinc-200 hover:border-[#4b64ff]"
+              >
+                <span className="text-sm font-semibold text-white">LLM Client</span>
+                <span className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/80">
+                  {headerStatusLabel}
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    className="h-3 w-3"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </span>
+              </button>
+              {headerModelMenuOpen && (
+                <div
+                  onClick={(event) => event.stopPropagation()}
+                  className="absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-[#2a2a30] bg-[#0f0f13] p-3 text-left text-xs shadow-2xl"
+                >
+                  <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                    Speed
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {SPEED_OPTIONS.map((option) => {
+                      const isActive = speedMode === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          onClick={() => {
+                            setSpeedMode(option.value);
+                            setHeaderModelMenuOpen(false);
+                          }}
+                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
+                            isActive
+                              ? "bg-[#1e4fd8] text-white"
+                              : "text-zinc-200 hover:bg-[#1b1b21]"
+                          }`}
+                        >
+                          <span>{option.label}</span>
+                          <span className="text-[11px] text-zinc-400">{option.hint}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 border-t border-white/5 pt-3">
+                    <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                      Exact model
+                    </div>
+                    <button
+                      onClick={() => {
+                        setModelFamily("auto");
+                        setHeaderModelMenuOpen(false);
+                      }}
+                      className={`mb-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
+                        modelFamily === "auto"
+                          ? "bg-[#1e4fd8] text-white"
+                          : "text-zinc-200 hover:bg-[#1b1b21]"
+                      }`}
+                    >
+                      <span>Auto (Router)</span>
+                      {modelFamily === "auto" && (
+                        <span className="text-[10px] text-white/70">current</span>
+                      )}
+                    </button>
+                    {EXACT_MODEL_OPTIONS.map((option) => {
+                      const isActive = modelFamily === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          onClick={() => {
+                            setModelFamily(option.value);
+                            setHeaderModelMenuOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] transition ${
+                            isActive
+                              ? "bg-[#1e4fd8] text-white"
+                              : "text-zinc-200 hover:bg-[#1b1b21]"
+                          }`}
+                        >
+                          <span>{option.label}</span>
+                          <span className="text-[11px] text-zinc-400">{option.hint}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
         </header>
@@ -1539,16 +1795,16 @@ type SendMessageOptions = {
                         </div>
                       </button>
 
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteConversation(c.id);
-                        }}
-                        aria-label="Delete chat"
-                        className="rounded-md p-1 text-xs text-zinc-500 transition hover:text-red-400"
-                      >
-                        ×
-                      </button>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        requestDeleteConversation(c.id);
+                      }}
+                      aria-label="Delete chat"
+                      className="rounded-md p-1 text-xs text-zinc-500 transition hover:text-red-400"
+                    >
+                      ×
+                    </button>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
@@ -1582,7 +1838,7 @@ type SendMessageOptions = {
                       <span>·</span>
 
                       <button
-                        onClick={() => deleteConversation(c.id)}
+                        onClick={() => requestDeleteConversation(c.id)}
                         className="hover:text-red-400"
                       >
                         Delete
@@ -1751,32 +2007,42 @@ type SendMessageOptions = {
                                         }}
                                         className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
                                       >
-                                        {m.usedModel}
+                                        {m.usedModelFamily
+                                          ? describeModelFamily(m.usedModelFamily)
+                                          : m.usedModel}
                                       </button>
 
                                       {openModelMenuId === messageId && (
                                         <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
-                                          {(Object.entries(
-                                            MODEL_NAME_MAP
-                                          ) as [Exclude<ModelMode, "auto">, string][]).map(
-                                            ([mode, name]) => (
+                                          {MODEL_RETRY_OPTIONS.map((option) => {
+                                            const legacyMode =
+                                              option.value === "gpt-5-nano"
+                                                ? "nano"
+                                                : option.value === "gpt-5-mini"
+                                                  ? "mini"
+                                                  : "full";
+                                            const isCurrent =
+                                              m.usedModelFamily === option.value ||
+                                              (!m.usedModelFamily &&
+                                                m.usedModelMode === legacyMode);
+                                            return (
                                               <button
-                                                key={mode}
+                                                key={option.value}
                                                 onClick={(event) => {
                                                   event.stopPropagation();
-                                                  handleRetryWithModel(mode, m);
+                                                  handleRetryWithModel(option.value, m);
                                                 }}
                                                 className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
                                               >
-                                                <span>Retry with {name}</span>
-                                                {m.usedModelMode === mode && (
+                                                <span>Retry with {option.label}</span>
+                                                {isCurrent && (
                                                   <span className="text-[10px] text-zinc-500">
                                                     current
                                                   </span>
                                                 )}
                                               </button>
-                                            )
-                                          )}
+                                            );
+                                          })}
                                         </div>
                                       )}
                                     </div>
@@ -1900,29 +2166,6 @@ type SendMessageOptions = {
               >
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-[#35353a] bg-[#1a1b1f] p-1">
-                      {MODEL_SEGMENTS.map((segment) => {
-                        const isActive = modelMode === segment.value;
-                        return (
-                          <button
-                            key={segment.value}
-                            className={`rounded-xl px-3 py-1 text-left text-[11px] font-medium transition ${
-                              isActive
-                                ? "bg-[#1e4fd8] text-white shadow-inner"
-                                : "text-zinc-400 hover:text-zinc-200"
-                            }`}
-                            onClick={() => setModelMode(segment.value)}
-                            aria-pressed={isActive}
-                          >
-                            <div>{segment.label}</div>
-                            <div className="text-[10px] font-normal text-zinc-300/70">
-                              {segment.hint}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-
                     {forceWebSearch && (
                       <button
                         type="button"
@@ -1979,52 +2222,6 @@ type SendMessageOptions = {
                                 <span className="text-[#8ab4ff]">On</span>
                               )}
                             </button>
-                            <div className="mt-2 rounded-2xl border border-[#1e1e23] bg-[#0b0b0f] p-2">
-                              <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
-                                Reasoning effort
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {REASONING_OPTIONS.map((option) => {
-                                  const active = reasoningEffort === option.value;
-                                  return (
-                                    <button
-                                      key={option.value}
-                                      onClick={() => setReasoningEffort(option.value)}
-                                      className={`rounded-full px-2.5 py-1 text-[11px] transition ${
-                                        active
-                                          ? "bg-[#1e4fd8] text-white"
-                                          : "text-zinc-300 hover:text-white"
-                                      }`}
-                                    >
-                                      {option.label}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                            <div className="mt-2 rounded-2xl border border-[#1e1e23] bg-[#0b0b0f] p-2">
-                              <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-zinc-500">
-                                Verbosity
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {VERBOSITY_OPTIONS.map((option) => {
-                                  const active = verbosity === option.value;
-                                  return (
-                                    <button
-                                      key={option.value}
-                                      onClick={() => setVerbosity(option.value)}
-                                      className={`rounded-full px-2.5 py-1 text-[11px] transition ${
-                                        active
-                                          ? "bg-[#1e4fd8] text-white"
-                                          : "text-zinc-300 hover:text-white"
-                                      }`}
-                                    >
-                                      {option.label}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
                           </div>
                         )}
                       </div>
@@ -2151,6 +2348,29 @@ type SendMessageOptions = {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(pendingDeleteConversation)}
+        title="Delete chat?"
+        body={
+          <span>
+            This will delete "
+            {pendingDeleteConversation?.title || "this chat"}
+            ".
+          </span>
+        }
+        confirmLoading={deleteConversationLoading}
+        onCancel={() => {
+          if (!deleteConversationLoading) {
+            setPendingDeleteConversation(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteConversationLoading) {
+            void confirmDeleteConversation();
+          }
+        }}
+      />
     </div>
   );
 }
