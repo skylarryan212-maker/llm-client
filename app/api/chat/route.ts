@@ -8,7 +8,7 @@ import type {
   Tool,
   ToolChoiceAllowed,
 } from "openai/resources/responses/responses";
-import type { SourceChip } from "@/lib/chatTypes";
+import type { Source, SourceChip } from "@/lib/chatTypes";
 import {
   getModelAndReasoningConfig,
   type ModelFamily,
@@ -117,6 +117,7 @@ type ResponseMetadata = {
   usedWebSearch: boolean;
   searchRecords: SearchRecord[];
   sources: SourceChip[];
+  sourceList: Source[];
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
@@ -337,6 +338,32 @@ function buildSourceChips(records: SearchRecord[], maxSources = 4): SourceChip[]
   return chips;
 }
 
+function buildSourceList(records: SearchRecord[], maxSources = 8): Source[] {
+  if (!records.length) {
+    return [];
+  }
+  const sources: Source[] = [];
+  const seen = new Set<string>();
+
+  records.forEach((record) => {
+    record.rankedSources.forEach((result) => {
+      const normalizedUrl = normalizeSourceUrl(result.url);
+      if (!normalizedUrl || seen.has(normalizedUrl)) {
+        return;
+      }
+      seen.add(normalizedUrl);
+      sources.push({
+        title: result.title || result.domain || normalizedUrl,
+        url: normalizedUrl,
+        snippet: result.snippet || record.summary,
+        domain: result.domain,
+      });
+    });
+  });
+
+  return sources.slice(0, maxSources);
+}
+
 function normalizeSourceUrl(input: string) {
   if (!input) {
     return "";
@@ -518,16 +545,17 @@ export async function POST(req: Request) {
       !hasAssistantHistory && isPlaceholderTitle(existingConversationTitle);
 
     let userRowId: string | null = null;
-    let assistantRowId: string | null = null;
+    let assistantRowId: string | null = isRetryRequest
+      ? retryAssistantMessageId ?? null
+      : null;
 
     if (isRetryRequest && retryAssistantMessageId) {
-      assistantRowId = retryAssistantMessageId;
       userRowId = retryUserMessageId ?? null;
       try {
         await supabase
           .from("messages")
           .update({ content: "", metadata: null })
-          .eq("id", assistantRowId)
+          .eq("id", retryAssistantMessageId)
           .eq("conversation_id", conversationId);
       } catch (error) {
         console.warn("Failed to clear assistant message before retry", error);
@@ -548,23 +576,6 @@ export async function POST(req: Request) {
       }
 
       userRowId = userRow?.id ?? null;
-
-      const { data: assistantRow, error: assistantInsertError } =
-        await supabase
-          .from("messages")
-          .insert({
-            conversation_id: conversationId,
-            role: "assistant",
-            content: "",
-          })
-          .select("id")
-          .single();
-
-      if (assistantInsertError) {
-        console.error("Failed to seed assistant message", assistantInsertError);
-      }
-
-      assistantRowId = assistantRow?.id ?? null;
     }
 
     const openai = getOpenAIClient();
@@ -611,17 +622,17 @@ export async function POST(req: Request) {
       userText,
       forceWebSearch,
     });
+    const webSearchTool: Tool = { type: "web_search" };
     const webSearchTools: Tool[] | undefined = allowWebSearch
-      ? [{ type: "web_search" }]
+      ? [webSearchTool]
       : undefined;
-    const forcedToolChoice: ToolChoiceAllowed | undefined =
-      allowWebSearch && forceWebSearch
-        ? {
-            type: "allowed_tools",
-            mode: "required",
-            tools: [{ type: "web_search" }],
-          }
-        : undefined;
+    const toolChoice: ToolChoiceAllowed | undefined = allowWebSearch
+      ? {
+          type: "allowed_tools",
+          mode: forceWebSearch ? "required" : "auto",
+          tools: [webSearchTool],
+        }
+      : undefined;
 
     const systemMessages = [
       { role: "system" as const, content: BASE_SYSTEM_PROMPT },
@@ -710,7 +721,7 @@ export async function POST(req: Request) {
             input: requestMessages,
             stream: true,
             tools: webSearchTools,
-            tool_choice: forcedToolChoice,
+            tool_choice: toolChoice,
             include: allowWebSearch
               ? [
                   "web_search_call.results",
@@ -750,11 +761,10 @@ export async function POST(req: Request) {
           const searchMetadata = extractSearchMetadata(finalResponse);
           const usedWebSearch = searchMetadata.records.length > 0;
           const sources = buildSourceChips(searchMetadata.records);
-          if (sources.length > 0) {
+          const sourceList = buildSourceList(searchMetadata.records);
+          if (sources.length > 0 || sourceList.length > 0) {
             console.log(
-              `[sourcesDebug] aggregated sources count=${sources.length} conversationId=${conversationId} domains=${sources
-                .map((src) => src.domain)
-                .join(",")}`
+              `[sourcesDebug] aggregated sources chips=${sources.length} list=${sourceList.length} conversationId=${conversationId}`
             );
           } else {
             console.log(
@@ -778,49 +788,63 @@ export async function POST(req: Request) {
             usedWebSearch,
             searchRecords: searchMetadata.records,
             sources,
+            sourceList,
           };
+
+          if (!assistantRowId) {
+            try {
+              const { data, error } = await supabase
+                .from("messages")
+                .insert({
+                  conversation_id: conversationId,
+                  role: "assistant",
+                  content: fullAssistantMessage,
+                  metadata: responseMetadata,
+                })
+                .select("id")
+                .single();
+              if (error) {
+                console.error("Failed to persist assistant message", error);
+              }
+              assistantRowId = data?.id ?? null;
+            } catch (persistErr) {
+              console.error("Assistant message insert failed", persistErr);
+            }
+          } else {
+            try {
+              await supabase
+                .from("messages")
+                .update({
+                  content: fullAssistantMessage,
+                  metadata: responseMetadata,
+                })
+                .eq("id", assistantRowId);
+            } catch (persistErr) {
+              console.error("Assistant message update failed", persistErr);
+            }
+          }
 
           enqueueJson({
             meta: {
               ...responseMetadata,
               assistantMessageRowId: assistantRowId,
+              userMessageRowId: userRowId,
             },
           });
-          if (assistantRowId) {
-            enqueueJson({
-              sourcesEvent: {
-                messageId: assistantRowId,
-                sources: responseMetadata.sources,
-              },
-            });
-          }
+          enqueueJson({
+            type: "sources",
+            conversationId,
+            messageId: assistantRowId,
+            sources: sourceList,
+          });
           console.log(
-            `[sourcesDebug] sending sources event for conversationId=${conversationId} messageId=${assistantRowId} count=${responseMetadata.sources.length}`
+            `[sourcesDebug] emitted sources payload conversationId=${conversationId} messageId=${assistantRowId} chips=${responseMetadata.sources.length} list=${sourceList.length}`
           );
         } catch (err) {
           console.error("Stream error:", err);
           enqueueJson({ error: "upstream_error" });
         } finally {
           enqueueJson({ done: true });
-          if (assistantRowId) {
-            try {
-              const updatePayload: {
-                content: string;
-                metadata?: ResponseMetadata;
-              } = { content: fullAssistantMessage };
-
-              if (responseMetadata) {
-                updatePayload.metadata = responseMetadata;
-              }
-
-              await supabase
-                .from("messages")
-                .update(updatePayload)
-                .eq("id", assistantRowId);
-            } catch (persistErr) {
-              console.error("Failed to persist assistant response", persistErr);
-            }
-          }
 
           if (isFirstAssistantResponse && fullAssistantMessage.trim()) {
             await ensureChatTitle({
@@ -1006,7 +1030,7 @@ function logWebSearchCall(call: WebSearchCall) {
   try {
     const serialized = JSON.stringify(call);
     const trimmed = serialized.length > 2000 ? `${serialized.slice(0, 2000)}…` : serialized;
-    console.log(`[webSearchDebug] raw web_search result: ${trimmed}`);
+    console.log(`[webSearchDebug] result=${trimmed}`);
   } catch (error) {
     console.log("[webSearchDebug] unable to serialize web_search result", error);
   }
