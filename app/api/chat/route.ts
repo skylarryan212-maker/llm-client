@@ -374,13 +374,14 @@ export async function POST(req: Request) {
       {
         role: "system",
         content:
-          "You are a modern, web-augmented assistant. google_search provides live data that overrides any stale training cutoff.\n" +
-          "- Use intent detection to decide whether a search is required; when you do search, craft a precise query and keep total google_search calls to two or fewer.\n" +
-          "- Never send meta/capability questions (about your knowledge, browsing ability, etc.) to google_search—answer those directly without a web call.\n" +
-          "- When tool output exists, trust it over memory, never say you lack internet access, and never cite an outdated knowledge cutoff.\n" +
-          "- Ground every factual statement in the provided sources, include inline hints like (Source: reuters.com), and end with a short Sources section matching those domains.\n" +
-          "- Use internal knowledge only for background context or to craft better searches; live tool data must be the primary evidence.\n" +
-          "- If tool results are empty or irrelevant, explain that clearly before relying on general knowledge.",
+          "You are a web-connected assistant. You can call `google_search` to fetch up-to-date information from the public internet.\n" +
+          "Rules:\n" +
+          "1. Call google_search whenever the user asks for current, changing, or post-training facts (recent releases, weather, markets, local info, breaking news, etc.). Keep each query short and human-like.\n" +
+          "2. The tool returns live sources that override your training data. When those results exist you must use them, cite them inline (Source: domain.com), and end with a Sources section that repeats the same domains. Never claim you cannot browse the web or that your knowledge is out of date in those turns.\n" +
+          "3. You may refine at most two google_search calls per user request. If the limit is hit, answer with the information you already have and explain the constraint.\n" +
+          "4. Never send meta/capability/model questions to google_search—answer those from internal knowledge.\n" +
+          "5. Blend internal knowledge with tool data: use background knowledge for stable context, but rely on live sources for time-sensitive specifics and never contradict high-confidence tool data.\n" +
+          "6. If tool results are empty or insufficient, say so before falling back to general knowledge.",
       },
       ...historyMessages,
       ...(isRetryRequest ? [] : ([{ role: "user", content: userText }] as const)),
@@ -422,34 +423,36 @@ export async function POST(req: Request) {
       });
     }
 
-    const searchPlan = planSearchQuery(userText);
+    const plannerView = planSearchQuery(userText, { userText });
     const searchLogger = createSearchDebugLogger({
       conversationId,
       userText,
     });
-    const planAllowsSearch = searchPlan.intent !== "meta";
-    const willUsePlannedSearch =
-      planAllowsSearch &&
-      (forceWebSearch || (!searchPlan.skipSearch && Boolean(searchPlan.query)));
-    const requiresRecentData =
-      planAllowsSearch && !searchPlan.skipSearch && searchPlan.preferRecent;
-    searchLogger.step(1, willUsePlannedSearch ? "Should search: yes" : "Should search: no", {
-      reason: forceWebSearch ? "user forced" : searchPlan.reason,
-      topic: searchPlan.topic ?? "unknown",
-      planIntent: searchPlan.intent,
+    const plannerAllowsSearch = !plannerView.skipSearch && plannerView.intent !== "meta";
+    searchLogger.step(1, "Planner intent", {
+      reason: plannerView.reason,
+      topic: plannerView.topic ?? "general",
+      preferRecent: plannerView.preferRecent,
+      intent: plannerView.intent,
     });
-    if (willUsePlannedSearch && searchPlan.query) {
-      searchLogger.step(2, "Normalized query prepared", {
-        query: searchPlan.query,
-        preferRecent: searchPlan.preferRecent,
-        topic: searchPlan.topic ?? "general",
-      });
-    }
 
     const searchBudget: SearchBudget = { remaining: 2 };
     const searchSequence: SearchSequenceTracker = { value: 0 };
-    const shouldForceSearch =
-      willUsePlannedSearch && planAllowsSearch && Boolean(searchPlan.query);
+    const shouldForceSearch = Boolean(
+      forceWebSearch && plannerAllowsSearch && Boolean(plannerView.query)
+    );
+    searchLogger.step(
+      2,
+      shouldForceSearch
+        ? "User forced pre-search"
+        : "Model will decide on tool calls",
+      shouldForceSearch
+        ? {
+            query: plannerView.query,
+            preferRecent: plannerView.preferRecent,
+          }
+        : undefined
+    );
 
     const readable = new ReadableStream({
       async start(controller) {
@@ -479,12 +482,12 @@ export async function POST(req: Request) {
         announceTitle(manualTitlePromise);
 
         try {
-          if (shouldForceSearch && searchPlan.query) {
+          if (shouldForceSearch && plannerView.query) {
             await injectManualSearchResult(
               messagesWithTools,
-              searchPlan.query,
+              plannerView.query,
               {
-                preferRecent: searchPlan.preferRecent,
+                preferRecent: plannerView.preferRecent,
                 onSearchRecord: recordSearch,
                 onSearchStatus: sendStatusUpdate,
                 searchBudget,
@@ -506,6 +509,7 @@ export async function POST(req: Request) {
             searchBudget,
             searchLogger,
             searchSequence,
+            userText,
           });
 
           console.log(
@@ -581,7 +585,7 @@ if (postSearchDirective) {
             });
           } else {
             searchLogger.step(8, "No live web sources used", {
-              reason: willUsePlannedSearch ? "search returned nothing" : "search skipped",
+              reason: plannerAllowsSearch ? "model skipped" : plannerView.reason,
             });
             searchLogger.step(9, "Answer relies on internal knowledge", {
               summary: "no web citations",
@@ -766,6 +770,7 @@ type ToolLoopArgs = {
   searchBudget: SearchBudget;
   searchLogger: SearchDebugLogger;
   searchSequence: SearchSequenceTracker;
+  userText: string;
 };
 
 async function runToolCallLoop({
@@ -777,6 +782,7 @@ async function runToolCallLoop({
   searchBudget,
   searchLogger,
   searchSequence,
+  userText,
 }: ToolLoopArgs): Promise<void> {
   const MAX_ITERATIONS = 2;
   const searchCache = new Map<
@@ -819,61 +825,71 @@ async function runToolCallLoop({
         continue;
       }
 
-      let query = "";
+      let rawQuery = "";
       try {
         const args = JSON.parse(toolCall.function?.arguments || "{}");
         if (typeof args?.query === "string") {
-          query = args.query;
+          rawQuery = args.query;
         }
       } catch (error) {
         console.warn("Failed to parse google_search arguments", error);
       }
 
-      const trimmed = query.trim();
-      const normalized = trimmed.toLowerCase();
-      const cached =
-        normalized && searchCache.has(normalized)
-          ? searchCache.get(normalized)
-          : null;
+      const plan = planSearchQuery(rawQuery || userText, { userText });
+      if (plan.skipSearch || plan.intent === "meta") {
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
+          content:
+            plan.intent === "meta"
+              ? "Web search skipped: capability and model questions must be answered without google_search."
+              : `Web search skipped: ${plan.reason ?? "unable to prepare a query"}. Answer using existing information.`,
+        });
+        continue;
+      }
+
+      const normalizedQuery = plan.query.trim();
+      if (!normalizedQuery) {
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
+          content: "Web search skipped: normalized query was empty.",
+        });
+        continue;
+      }
+
+      const cacheKey = normalizedQuery.toLowerCase();
+      const cached = cacheKey && searchCache.has(cacheKey)
+        ? searchCache.get(cacheKey)
+        : null;
 
       if (
         cached &&
         cached.record &&
         cached.record.rankedSources.length > 0 &&
-        normalized
+        cacheKey
       ) {
         messages.push(cached.message);
         continue;
       }
 
-      const derivedPlan = planSearchQuery(trimmed);
-      if (derivedPlan.intent === "meta") {
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id ?? `tool-${Date.now()}`,
-          content:
-            "Web search skipped: capability and meta questions are answered without google_search.",
-        });
-        continue;
-      }
-      const preferRecentResults = derivedPlan.preferRecent;
       const { message: toolResponse, record } = await createToolResponseMessage(
         toolCall.id ?? `tool-${Date.now()}`,
-        trimmed,
+        normalizedQuery,
         {
-          preferRecent: preferRecentResults,
+          preferRecent: plan.preferRecent,
           onSearchStatus,
           searchBudget,
           searchLogger,
-          reason: "model-request",
+          reason: plan.reason ?? "model-request",
           searchSequence,
         }
       );
       if (record && onSearchRecord) {
         onSearchRecord(record);
       }
-      if (record && record.rankedSources.length > 0 && normalized) {
-        searchCache.set(normalized, { message: toolResponse, record });
+      if (record && record.rankedSources.length > 0 && cacheKey) {
+        searchCache.set(cacheKey, { message: toolResponse, record });
       }
       if (record) {
         iterationDidSearch = true;
@@ -985,7 +1001,8 @@ async function createToolResponseMessage(
         message: {
           role: "tool",
           tool_call_id: toolCallId,
-          content: "Web search skipped: query budget exhausted.",
+          content:
+            "Web search skipped: the maximum of two google_search calls was reached. Answer using existing live sources or background knowledge.",
         },
         record: null,
       };
@@ -1045,7 +1062,10 @@ async function createToolResponseMessage(
       });
     }
 
-    const summary = formatSearchSummary(trimmed, rankedSources);
+    const summary = formatSearchSummary(trimmed, rankedSources, {
+      preferRecent,
+      fromCache: searchResponse.fromCache,
+    });
     console.log(
       `[googleSearch] query="${trimmed}" preferRecent=${preferRecent} results=${rankedSources.length}`
     );
@@ -1223,14 +1243,22 @@ function createPostSearchDirective(records: SearchRecord[]) {
   );
 }
 
-function formatSearchSummary(query: string, results: RankedSource[]) {
-  const header =
-    `Live web sources for "${query}":\n` +
-    "Treat these as fresher than your training data. Cite them inline using (Source: domain.com) hints and end with a Sources section that lists the same domains.";
+function formatSearchSummary(
+  query: string,
+  results: RankedSource[],
+  options: { preferRecent: boolean; fromCache: boolean }
+) {
+  const headerLines = [
+    "google_search complete:",
+    `Normalized query: "${query}"`,
+    `Source: ${options.fromCache ? "cache (recent)" : "live web"}`,
+    `Recency bias: ${options.preferRecent ? "enabled" : "standard"}`,
+    "Treat these sources as fresher than your training data and cite them inline using (Source: domain.com) hints before ending with a Sources section.",
+  ];
 
   if (!results.length) {
     return (
-      `${header}\nNo ranked results were returned. Tell the user that live web sources were empty before relying on general knowledge.`
+      `${headerLines.join("\n")}\nNo ranked results were returned. Tell the user the live search was empty before relying on general knowledge.`
     );
   }
 
@@ -1242,8 +1270,7 @@ function formatSearchSummary(query: string, results: RankedSource[]) {
   });
 
   return (
-    `${header}\n${lines.join("\n")}\n` +
-    "Use these exact domains for inline hints and mention if the evidence felt incomplete before using background knowledge."
+    `${headerLines.join("\n")}\nTop sources:\n${lines.join("\n")}\nUse these domains for inline citations and mention if the evidence felt incomplete before relying on background knowledge.`
   );
 }
 
