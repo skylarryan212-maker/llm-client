@@ -14,7 +14,7 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
-import type { SourceChip } from "@/lib/chatTypes";
+import type { Source, SourceChip } from "@/lib/chatTypes";
 import {
   describeModelFamily,
   getModelAndReasoningConfig,
@@ -55,6 +55,7 @@ type MessageMetadata = {
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
   sources?: SourceChip[];
+  sourceList?: Source[];
 };
 
 type ChatMessage = {
@@ -106,15 +107,6 @@ const SPEED_LABELS: Record<SpeedMode, string> = {
   thinking: "Thinking",
 };
 
-const EXACT_MODEL_OPTIONS: {
-  value: Exclude<ModelFamily, "auto">;
-  label: string;
-  hint: string;
-}[] = [
-  { value: "gpt-5-nano", label: "GPT 5 Nano", hint: "Fast & light" },
-  { value: "gpt-5-mini", label: "GPT 5 Mini", hint: "Balanced" },
-  { value: "gpt-5.1", label: "GPT 5.1", hint: "Most capable" },
-];
 
 const MODEL_RETRY_OPTIONS: {
   value: Exclude<ModelFamily, "auto">;
@@ -123,6 +115,15 @@ const MODEL_RETRY_OPTIONS: {
   { value: "gpt-5-nano", label: "GPT 5 Nano" },
   { value: "gpt-5-mini", label: "GPT 5 Mini" },
   { value: "gpt-5.1", label: "GPT 5.1" },
+];
+
+const OTHER_MODEL_GROUPS: Array<{
+  family: Exclude<ModelFamily, "auto" | "gpt-5.1">;
+  label: string;
+  shortLabel: string;
+}> = [
+  { family: "gpt-5-mini", label: "GPT-5 Mini", shortLabel: "5 Mini" },
+  { family: "gpt-5-nano", label: "GPT-5 Nano", shortLabel: "5 Nano" },
 ];
 
 const MAX_INPUT_HEIGHT = 176;
@@ -138,10 +139,9 @@ type ServerStatusEvent =
 
 type StatusVariant = "default" | "extended" | "search" | "error";
 
-type ThinkingStatus = {
-  phase: "extended";
-  label: string;
-};
+type ThinkingStatus =
+  | { variant: "thinking"; label: string }
+  | { variant: "extended"; label: string };
 
 function StatusBubble({
   label,
@@ -151,14 +151,14 @@ function StatusBubble({
   variant?: StatusVariant;
 }) {
   const baseClassMap: Record<StatusVariant, string> = {
-    default: "border-white/10 bg-[#15151a]/80 text-zinc-200",
+    default: "border-white/5 bg-[#1b1b20]/90 text-zinc-400",
     extended: "border-[#4b64ff]/30 bg-[#1a1c2b]/80 text-[#b7c6ff]",
     search: "border-[#4b64ff]/30 bg-[#152033]/80 text-[#9bb8ff]",
     error: "border-red-500/40 bg-[#30161a]/85 text-red-200",
   };
 
   const dotMap: Record<StatusVariant, string> = {
-    default: "bg-zinc-400",
+    default: "bg-zinc-500",
     extended: "bg-[#8ab4ff]",
     search: "bg-[#8ab4ff]",
     error: "bg-red-400",
@@ -265,6 +265,29 @@ function legacyModeFromFamily(family: ModelFamily): ModelMode {
   }
 }
 
+function formatModelMenuTitle(family: ModelFamily) {
+  switch (family) {
+    case "gpt-5.1":
+      return "GPT-5.1";
+    case "gpt-5-mini":
+      return "GPT-5 Mini";
+    case "gpt-5-nano":
+      return "GPT-5 Nano";
+    default:
+      return "Auto Router";
+  }
+}
+
+function extractDomainFromUrl(url?: string | null) {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    return url.replace(/^https?:\/\//i, "").split("/")[0] ?? "";
+  }
+}
+
 export default function Home() {
   // ------------------------------------------------------------
   // STATE
@@ -273,7 +296,7 @@ export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [modelFamily, setModelFamily] = useState<ModelFamily>("auto");
+  const [modelFamily, setModelFamily] = useState<ModelFamily>("gpt-5.1");
   const [speedMode, setSpeedMode] = useState<SpeedMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
 
@@ -306,6 +329,7 @@ export default function Home() {
   );
   const [openModelMenuId, setOpenModelMenuId] = useState<string | null>(null);
   const [headerModelMenuOpen, setHeaderModelMenuOpen] = useState(false);
+  const [otherModelsMenuOpen, setOtherModelsMenuOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus | null>(
     null
@@ -314,6 +338,12 @@ export default function Home() {
     { message: string; variant: "running" | "error" } | null
   >(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!headerModelMenuOpen) {
+      setOtherModelsMenuOpen(false);
+    }
+  }, [headerModelMenuOpen]);
   const [rowMenu, setRowMenu] = useState<
     { type: "conversation" | "project"; id: string } | null
   >(null);
@@ -329,7 +359,42 @@ export default function Home() {
     firstToken: null as number | null,
     assistantMessageId: null as string | null,
   });
+  const longThinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
+
+  const clearLongThinkTimer = useCallback(() => {
+    if (longThinkTimerRef.current) {
+      clearTimeout(longThinkTimerRef.current);
+      longThinkTimerRef.current = null;
+    }
+  }, []);
+
+  const resetThinkingIndicator = useCallback(() => {
+    clearLongThinkTimer();
+    setThinkingStatus(null);
+  }, [clearLongThinkTimer]);
+
+  const showThinkingIndicator = useCallback(
+    (effort?: ReasoningEffort | null) => {
+      clearLongThinkTimer();
+      if (!effort) {
+        setThinkingStatus(null);
+        return;
+      }
+      if (effort === "medium" || effort === "high") {
+        setThinkingStatus({ variant: "extended", label: "Thinking for longer…" });
+        return;
+      }
+      setThinkingStatus({ variant: "thinking", label: "Thinking" });
+      if (effort === "low") {
+        longThinkTimerRef.current = setTimeout(() => {
+          setThinkingStatus({ variant: "extended", label: "Thinking for longer…" });
+          longThinkTimerRef.current = null;
+        }, 4000);
+      }
+    },
+    [clearLongThinkTimer]
+  );
 
   function scrollToBottom(opts: { behavior?: ScrollBehavior } = {}) {
     const el = chatContainerRef.current;
@@ -499,6 +564,7 @@ export default function Home() {
       setRowMenu(null);
       setMoveMenuConversationId(null);
       setHeaderModelMenuOpen(false);
+      setOtherModelsMenuOpen(false);
     };
     window.addEventListener("click", handleWindowClick);
     return () => window.removeEventListener("click", handleWindowClick);
@@ -511,6 +577,8 @@ export default function Home() {
     const timeout = setTimeout(() => setSearchIndicator(null), 5000);
     return () => clearTimeout(timeout);
   }, [searchIndicator]);
+
+  useEffect(() => () => clearLongThinkTimer(), [clearLongThinkTimer]);
 
   // ------------------------------------------------------------
   // MEMOIZED SORTED LISTS
@@ -550,6 +618,12 @@ export default function Home() {
   }, [sortedConversations]);
 
   const currentProject = projects.find((p) => p.id === selectedProjectId);
+  const selectedConversationMeta = useMemo(
+    () => conversations.find((c) => c.id === selectedConversationId) ?? null,
+    [conversations, selectedConversationId]
+  );
+  const sidebarActiveProjectId =
+    selectedProjectId ?? selectedConversationMeta?.project_id ?? null;
 
   const projectChats = useMemo(
     () =>
@@ -566,12 +640,11 @@ export default function Home() {
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const canSendMessage = input.trim().length > 0;
-  const modelLabel =
+  const modelShortLabel =
     modelFamily === "auto" ? "Auto" : describeModelFamily(modelFamily);
-  const headerStatusLabel =
-    speedMode === "auto" && modelFamily === "auto"
-      ? modelLabel
-      : `${modelLabel} ${SPEED_LABELS[speedMode]}`;
+  const headerStatusLabel = `LLM Client ${modelShortLabel} ${SPEED_LABELS[speedMode]}`;
+  const currentModelTitle = formatModelMenuTitle(modelFamily);
+  const currentSpeedLabel = SPEED_LABELS[speedMode];
 
   // ------------------------------------------------------------
   // HELPERS
@@ -691,6 +764,9 @@ type SendMessageOptions = {
       text
     );
     const requestedReasoningEffort = previewModelConfig.reasoning?.effort;
+    console.log(
+      `[reasoningDebug] model=${previewModelConfig.model} effort=${previewModelConfig.reasoning?.effort ?? "none"} speed=${chosenSpeed}`
+    );
     if (!options?.messageOverride) {
       setInput("");
     }
@@ -706,14 +782,8 @@ type SendMessageOptions = {
       firstToken: null,
       assistantMessageId: null,
     };
-    const shouldShowImmediateLongThink = Boolean(
-      requestedReasoningEffort && requestedReasoningEffort !== "none"
-    );
-    if (shouldShowImmediateLongThink) {
-      setThinkingStatus({ phase: "extended", label: "Thinking for longer…" });
-    } else {
-      setThinkingStatus(null);
-    }
+    resetThinkingIndicator();
+    showThinkingIndicator(requestedReasoningEffort ?? null);
 
     try {
       if (!conversationId && isRetry) {
@@ -828,7 +898,7 @@ type SendMessageOptions = {
       let buffer = "";
       let finished = false;
       const markResponseFinished = () => {
-        setThinkingStatus(null);
+        resetThinkingIndicator();
         setSearchIndicator((prev) =>
           prev?.variant === "running" ? null : prev
         );
@@ -860,15 +930,11 @@ type SendMessageOptions = {
                       .assistantMessageRowId;
                   const userRowId = (meta as { userMessageRowId?: string })
                     .userMessageRowId;
-                  if (typeof meta.reasoningEffort !== "undefined") {
-                    const shouldShowFromMeta =
-                      Boolean(meta.reasoningEffort) &&
-                      meta.reasoningEffort !== "none";
-                    setThinkingStatus(
-                      shouldShowFromMeta
-                        ? { phase: "extended", label: "Thinking for longer…" }
-                        : null
-                    );
+                  if (
+                    typeof meta.reasoningEffort !== "undefined" &&
+                    !responseTimingRef.current.firstToken
+                  ) {
+                    showThinkingIndicator(meta.reasoningEffort);
                   }
                   if (userRowId && userMessageId) {
                     setMessages((prev) =>
@@ -923,6 +989,8 @@ type SendMessageOptions = {
                           [],
                         sources:
                           meta.sources ?? msg.metadata?.sources ?? [],
+                        sourceList:
+                          meta.sourceList ?? msg.metadata?.sourceList ?? [],
                         thoughtDurationSeconds: msg.thoughtDurationSeconds,
                         thoughtDurationLabel: msg.thoughtDurationLabel,
                       };
@@ -970,7 +1038,7 @@ type SendMessageOptions = {
                         ? performance.now()
                         : Date.now();
                     responseTimingRef.current.firstToken = now;
-                    setThinkingStatus(null);
+                    resetThinkingIndicator();
                     setSearchIndicator((prev) =>
                       prev?.variant === "running" ? null : prev
                     );
@@ -1038,33 +1106,61 @@ type SendMessageOptions = {
                       variant: "error",
                     });
                   }
-                } else if (payload.sourcesEvent) {
-                  const sourcesEvent = payload.sourcesEvent as {
+                } else if (payload.type === "sources") {
+                  const sourcesEvent = payload as {
+                    type: "sources";
+                    conversationId?: string;
                     messageId?: string;
-                    sources?: SourceChip[];
+                    sources?: Source[];
                   };
                   if (
-                    sourcesEvent.messageId &&
-                    Array.isArray(sourcesEvent.sources)
+                    sourcesEvent.conversationId &&
+                    sourcesEvent.conversationId !== selectedConversationId
                   ) {
-                    setMessages((prev) =>
-                      prev.map((msg) => {
-                        if (
-                          msg.persistedId === sourcesEvent.messageId ||
-                          (assistantMessageId && msg.id === assistantMessageId)
-                        ) {
-                          const nextMetadata: MessageMetadata = {
-                            ...(msg.metadata || {}),
-                            sources: sourcesEvent.sources,
-                          };
-                          return {
-                            ...msg,
-                            metadata: nextMetadata,
-                          };
-                        }
+                    continue;
+                  }
+                  if (!Array.isArray(sourcesEvent.sources)) {
+                    continue;
+                  }
+                  let metadataForPersist: MessageMetadata | null = null;
+                  let localMessageId: string | null = null;
+                  let resolvedPersistedId: string | null = null;
+                  setMessages((prev) =>
+                    prev.map((msg) => {
+                      const matchesPersisted =
+                        msg.persistedId === sourcesEvent.messageId;
+                      const matchesActive =
+                        assistantMessageId &&
+                        msg.id === assistantMessageId &&
+                        !msg.persistedId;
+                      if (!matchesPersisted && !matchesActive) {
                         return msg;
-                      })
-                    );
+                      }
+                      const nextMetadata: MessageMetadata = {
+                        ...(msg.metadata || {}),
+                        sourceList: sourcesEvent.sources ?? [],
+                      };
+                      metadataForPersist = nextMetadata;
+                      localMessageId = msg.id ?? null;
+                      resolvedPersistedId = msg.persistedId ?? null;
+                      return {
+                        ...msg,
+                        metadata: nextMetadata,
+                      };
+                    })
+                  );
+                  if (metadataForPersist) {
+                    if (resolvedPersistedId) {
+                      persistMessageMetadata(
+                        resolvedPersistedId,
+                        metadataForPersist
+                      );
+                    } else if (localMessageId) {
+                      pendingMetadataPersistRef.current.set(
+                        localMessageId,
+                        metadataForPersist
+                      );
+                    }
                   }
                 } else if (typeof payload.title === "string") {
                   const newTitle = payload.title.trim();
@@ -1121,7 +1217,7 @@ type SendMessageOptions = {
           );
         }
       }
-      setThinkingStatus(null);
+      resetThinkingIndicator();
       setSearchIndicator(null);
       responseTimingRef.current = {
         start: null,
@@ -1193,7 +1289,7 @@ type SendMessageOptions = {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsStreaming(false);
-    setThinkingStatus(null);
+    resetThinkingIndicator();
     setSearchIndicator(null);
     responseTimingRef.current = {
       start: null,
@@ -1407,7 +1503,7 @@ type SendMessageOptions = {
         )}
 
         {sortedProjects.map((p) => {
-          const isSelectedProject = selectedProjectId === p.id;
+          const isSelectedProject = sidebarActiveProjectId === p.id;
           const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
           const projectChatList = projectSidebarChats.get(p.id) || [];
           const topChats = projectChatList.slice(0, MAX_PROJECT_CHAT_PREVIEW);
@@ -1668,7 +1764,7 @@ type SendMessageOptions = {
       {/* Main Content */}
       <main className="flex flex-1 min-h-0 flex-col bg-[#212121]">
         {/* Header */}
-        <header className="flex shrink-0 items-center justify-between border-b border-[#202123] px-4 py-3">
+        <header className="flex shrink-0 items-center justify-between border-b border-[#2a2a2a] bg-transparent px-4 py-3">
           <div className="flex items-center gap-2">
             <button
               className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
@@ -1677,7 +1773,9 @@ type SendMessageOptions = {
               ☰
             </button>
             <div className="flex items-center gap-3">
-              <span className="text-sm font-semibold text-white">LLM Client</span>
+              <span className="text-sm font-semibold text-white">
+                {headerStatusLabel}
+              </span>
               <div className="relative">
                 <button
                   type="button"
@@ -1686,11 +1784,16 @@ type SendMessageOptions = {
                     event.stopPropagation();
                     setHeaderModelMenuOpen((prev) => !prev);
                   }}
-                  className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-left text-xs text-white/80 transition hover:bg-white/10"
+                  className="group flex items-center gap-3 text-left text-white/80 transition hover:text-white"
                 >
-                  <span className="text-sm font-medium text-white">
-                    {headerStatusLabel}
-                  </span>
+                  <div className="text-left">
+                    <div className="text-sm font-semibold text-white">
+                      {currentModelTitle}
+                    </div>
+                    <div className="text-[11px] text-white/60">
+                      {currentSpeedLabel}
+                    </div>
+                  </div>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     viewBox="0 0 24 24"
@@ -1707,105 +1810,125 @@ type SendMessageOptions = {
                 {headerModelMenuOpen && (
                   <div
                     onClick={(event) => event.stopPropagation()}
-                    className="absolute right-0 top-full z-40 mt-2 w-72 rounded-2xl border border-[#2a2a30] bg-[#0f0f13] p-3 text-left text-xs shadow-2xl"
+                    className="absolute right-0 top-full z-40 mt-3 min-w-[18rem] rounded-2xl border border-white/10 bg-[#111116] text-left text-xs text-white shadow-2xl"
+                    style={{ width: "min(20rem, calc(100vw - 2rem))" }}
                   >
-                    <div className="px-1 pb-2 text-[10px] uppercase tracking-wide text-zinc-500">
-                      Speed
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      {SPEED_OPTIONS.map((option) => {
-                        const isActive = speedMode === option.value;
-                        return (
-                          <button
-                            key={option.value}
-                            onClick={() => {
-                              setSpeedMode(option.value);
-                              setHeaderModelMenuOpen(false);
-                            }}
-                            className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                              isActive
-                                ? "bg-white/10 text-white"
-                                : "text-zinc-200 hover:bg-white/5"
-                            }`}
-                          >
-                            <span className="flex flex-col">
-                              <span className="text-sm font-medium">
-                                {option.label}
-                              </span>
-                              <span className="text-[11px] text-zinc-400">
-                                {option.hint}
-                              </span>
-                            </span>
-                            {isActive && (
-                              <span className="text-white">
-                                <CheckmarkIcon className="h-4 w-4" />
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div className="mt-4 border-t border-white/5 pt-3">
-                      <div className="px-1 pb-2 text-[10px] uppercase tracking-wide text-zinc-500">
-                        Exact model
+                    <div className="max-h-[70vh] space-y-5 overflow-y-auto px-4 py-4">
+                      <div>
+                        <div className="text-sm font-semibold text-white">GPT-5.1</div>
+                        <div className="text-[11px] text-white/60">Speed controls</div>
                       </div>
                       <div className="flex flex-col gap-1">
-                        <button
-                          onClick={() => {
-                            setModelFamily("auto");
-                            setHeaderModelMenuOpen(false);
-                          }}
-                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                            modelFamily === "auto"
-                              ? "bg-white/10 text-white"
-                              : "text-zinc-200 hover:bg-white/5"
-                          }`}
-                        >
-                          <span className="flex flex-col">
-                            <span className="text-sm font-medium">
-                              Auto (Router)
-                            </span>
-                            <span className="text-[11px] text-zinc-400">
-                              Let the app decide
-                            </span>
-                          </span>
-                          {modelFamily === "auto" && (
-                            <span className="text-white">
-                              <CheckmarkIcon className="h-4 w-4" />
-                            </span>
-                          )}
-                        </button>
-                        {EXACT_MODEL_OPTIONS.map((option) => {
-                          const isActive = modelFamily === option.value;
+                        {SPEED_OPTIONS.map((option) => {
+                          const isActive =
+                            modelFamily === "gpt-5.1" &&
+                            speedMode === option.value;
                           return (
                             <button
                               key={option.value}
                               onClick={() => {
-                                setModelFamily(option.value);
+                                setModelFamily("gpt-5.1");
+                                setSpeedMode(option.value);
                                 setHeaderModelMenuOpen(false);
                               }}
                               className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
                                 isActive
-                                  ? "bg-white/10 text-white"
-                                  : "text-zinc-200 hover:bg-white/5"
+                                  ? "bg-white/10 text-white font-semibold"
+                                  : "text-white/70 hover:bg-white/5"
                               }`}
                             >
                               <span className="flex flex-col">
-                                <span className="text-sm font-medium">
-                                  {option.label}
-                                </span>
-                                <span className="text-[11px] text-zinc-400">
+                                <span className="text-sm">{option.label}</span>
+                                <span className="text-[11px] text-white/60">
                                   {option.hint}
                                 </span>
                               </span>
                               {isActive && (
-                                <span className="text-white">
-                                  <CheckmarkIcon className="h-4 w-4" />
-                                </span>
+                                <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
                               )}
                             </button>
                           );
                         })}
+                      </div>
+                      <div className="pt-1">
+                        <div className="text-sm font-semibold text-white">
+                          Other Models
+                        </div>
+                        <div className="text-[11px] text-white/60">
+                          Mini &amp; Nano presets
+                        </div>
+                        <div
+                          className="relative mt-2"
+                          onMouseEnter={() => setOtherModelsMenuOpen(true)}
+                          onMouseLeave={() => setOtherModelsMenuOpen(false)}
+                        >
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOtherModelsMenuOpen((prev) => !prev);
+                            }}
+                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-white/80 transition hover:text-white"
+                            aria-expanded={otherModelsMenuOpen}
+                          >
+                            <span className="text-sm font-medium text-white">
+                              Other Models
+                            </span>
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className={`h-3.5 w-3.5 transition ${
+                                otherModelsMenuOpen ? "text-white" : "text-white/60"
+                              }`}
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={2}
+                            >
+                              <path d="M9 6l6 6-6 6" />
+                            </svg>
+                          </button>
+                          {otherModelsMenuOpen && (
+                            <div
+                              className="absolute left-0 top-full z-40 mt-2 w-full rounded-2xl border border-white/10 bg-[#111116] text-left text-xs text-white shadow-2xl md:left-full md:top-0 md:mt-0 md:ml-3 md:w-[18rem]"
+                            >
+                              <div className="max-h-[60vh] space-y-4 overflow-y-auto px-3 py-3">
+                                {OTHER_MODEL_GROUPS.map((group) => (
+                                  <div key={group.family} className="space-y-1">
+                                    <div className="text-xs uppercase tracking-wide text-white/60">
+                                      {group.label}
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                      {SPEED_OPTIONS.map((option) => {
+                                        const isComboActive =
+                                          modelFamily === group.family &&
+                                          speedMode === option.value;
+                                        return (
+                                          <button
+                                            key={`${group.family}-${option.value}`}
+                                            onClick={() => {
+                                              setModelFamily(group.family);
+                                              setSpeedMode(option.value);
+                                              setHeaderModelMenuOpen(false);
+                                            }}
+                                            className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                              isComboActive
+                                                ? "bg-white/10 text-white font-semibold"
+                                                : "text-white/70 hover:bg-white/5"
+                                            }`}
+                                          >
+                                            <span>{`${group.shortLabel} ${option.label}`}</span>
+                                            {isComboActive && (
+                                              <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1813,7 +1936,6 @@ type SendMessageOptions = {
               </div>
             </div>
           </div>
-
         </header>
 
         {/* PROJECT VIEW */}
@@ -1940,11 +2062,16 @@ type SendMessageOptions = {
                   {messages.map((m, i) => {
                     const messageId = m.id ?? `msg-${i}`;
                     const isAssistant = m.role === "assistant";
-                    const hasSearchRecords = Boolean(
-                      isAssistant &&
-                        m.usedWebSearch &&
-                        (m.searchRecords?.length || 0) > 0
+                    const rawSourceList = m.metadata?.sourceList ?? [];
+                    const displayableSources = rawSourceList.filter(
+                      (source) => Boolean(source?.url)
                     );
+                    const usedWebSearchFlag = Boolean(
+                      m.usedWebSearch || m.metadata?.usedWebSearch
+                    );
+                    const showSourcesButton =
+                      isAssistant &&
+                      (usedWebSearchFlag || rawSourceList.length > 0);
                     const sourceChips = (m.metadata?.sources ?? []).filter(
                       (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
                     );
@@ -2029,7 +2156,7 @@ type SendMessageOptions = {
                                   {copiedMessageId === messageId ? "Copied" : "Copy"}
                                 </button>
 
-                                {hasSearchRecords && (
+                                {showSourcesButton && (
                                   <>
                                     <span
                                       className="h-4 w-px bg-[#38383d]"
@@ -2043,7 +2170,9 @@ type SendMessageOptions = {
                                         );
                                       }}
                                       className="rounded-full border border-[#35353a] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]"
-                                      aria-expanded={expandedSourcesId === messageId}
+                                      aria-expanded={
+                                        expandedSourcesId === messageId
+                                      }
                                     >
                                       {expandedSourcesId === messageId
                                         ? "Hide sources"
@@ -2112,47 +2241,53 @@ type SendMessageOptions = {
                               </div>
                             )}
 
-                                {hasSearchRecords &&
-                                  expandedSourcesId === messageId &&
-                                  !isStreamingAssistantMessage && (
-                                    <div className="mt-3 space-y-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
-                                  {m.searchRecords?.map((record, idx) => {
-                                    const ranked = record.rankedSources ?? [];
-                                    return (
-                                      <div key={`${record.query}-${idx}`} className="space-y-2">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                                          {record.query}
-                                        </div>
-                                        {ranked.length === 0 ? (
-                                          <p className="text-[12px] text-zinc-400">
-                                            {record.summary}
-                                          </p>
-                                        ) : (
-                                          <div className="space-y-2">
-                                            {ranked.map((result, sourceIdx) => (
-                                              <div
-                                                key={`${result.url}-${sourceIdx}`}
-                                                className="rounded-xl bg-[#1b1b20] p-2"
+                                {showSourcesButton &&
+                                  expandedSourcesId === messageId && (
+                                    <div className="mt-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200">
+                                      {displayableSources.length > 0 ? (
+                                        <div className="space-y-2">
+                                          {displayableSources.map((source, idx) => {
+                                            const domain =
+                                              source.domain ||
+                                              extractDomainFromUrl(source.url);
+                                            const title =
+                                              source.title?.trim().length
+                                                ? source.title
+                                                : domain || source.url;
+                                            return (
+                                              <a
+                                                key={`${source.url}-${idx}`}
+                                                href={source.url}
+                                                target="_blank"
+                                                rel="noreferrer noopener"
+                                                className="block rounded-xl border border-[#2f2f36] bg-[#1b1b20] p-3 transition hover:border-[#5c5cf5]"
                                               >
-                                                <div className="text-[13px] font-semibold text-zinc-100">
-                                                  {result.title}
+                                                <div className="text-[13px] font-semibold text-white">
+                                                  {title}
                                                 </div>
-                                                <div className="text-[11px] text-zinc-500">
-                                                  {result.domain}
-                                                  {result.published && ` • ${result.published}`}
-                                                </div>
-                                                <p className="mt-1 text-[12px] text-zinc-300">
-                                                  {result.snippet}
-                                                </p>
-                                              </div>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
+                                                {domain && (
+                                                  <div className="text-[11px] text-zinc-500">
+                                                    {domain}
+                                                  </div>
+                                                )}
+                                                {source.snippet && (
+                                                  <p className="mt-1 text-[12px] text-zinc-300">
+                                                    {source.snippet}
+                                                  </p>
+                                                )}
+                                              </a>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : (
+                                        <p className="text-[12px] text-zinc-400">
+                                          {isStreamingAssistantMessage
+                                            ? "Gathering live sources…"
+                                            : "OpenAI web_search did not return shareable source data for this response."}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
                           </div>
                         ) : (
                           <div
@@ -2186,7 +2321,7 @@ type SendMessageOptions = {
                         <StatusBubble
                           label={thinkingStatus.label}
                           variant={
-                            thinkingStatus.phase === "extended"
+                            thinkingStatus.variant === "extended"
                               ? "extended"
                               : "default"
                           }
@@ -2240,112 +2375,18 @@ type SendMessageOptions = {
                   </div>
                 </div>
 
-                <div className="flex items-end gap-2">
-                  <div className="relative w-full">
-                    <div className="flex w-full items-center gap-2 rounded-[999px] border border-[#3f3f46] bg-[#303030] px-3 py-1 pr-14 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.45)]">
-                      <div className="relative">
-                        <button
-                          type="button"
-                          aria-label="Insert options"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setComposerMenuOpen((prev) => !prev);
-                          }}
-                          className="flex h-9 w-9 items-center justify-center rounded-full bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
-                        >
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-5 w-5"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth={2}
-                            strokeLinecap="round"
-                          >
-                            <path d="M12 5v14M5 12h14" />
-                          </svg>
-                        </button>
-
-                        {composerMenuOpen && (
-                          <div
-                            onClick={(event) => event.stopPropagation()}
-                            className="absolute bottom-12 left-0 z-30 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
-                          >
-                            <button
-                              onClick={() => {
-                                setForceWebSearch((prev) => !prev);
-                                setComposerMenuOpen(false);
-                              }}
-                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                            >
-                              <span>Web search</span>
-                              {forceWebSearch && (
-                                <span className="text-[#8ab4ff]">On</span>
-                              )}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex-1 px-1">
-                        <textarea
-                          ref={textareaRef}
-                          className="w-full resize-none border-none bg-transparent py-0.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
-                          style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                          value={input}
-                          onChange={(e) => setInput(e.target.value)}
-                          onKeyDown={handleKeyDown}
-                          placeholder="Message the assistant…"
-                          rows={1}
-                        />
-                      </div>
-
+                <div className="flex items-center gap-3">
+                  <div className="flex min-h-[3.5rem] flex-1 items-center gap-3 rounded-2xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
+                    <div className="relative">
                       <button
                         type="button"
-                        aria-label="Voice input (coming soon)"
-                        onClick={() => textareaRef.current?.focus()}
-                        className="flex h-9 w-9 items-center justify-center rounded-full text-white/70 transition hover:text-white"
+                        aria-label="Insert options"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setComposerMenuOpen((prev) => !prev);
+                        }}
+                        className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
                       >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-5 w-5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={1.8}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                          <path d="M19 11.5a7 7 0 0 1-14 0" />
-                          <path d="M12 18.5v2" />
-                        </svg>
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={
-                        isStreaming ? handleStopGeneration : () => sendMessage()
-                      }
-                      disabled={!isStreaming && !canSendMessage}
-                      className={`absolute right-2 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                        isStreaming
-                          ? "hover:bg-[#225fd0]"
-                          : "hover:bg-[#3c7cff] disabled:opacity-40"
-                      }`}
-                      aria-label={isStreaming ? "Stop response" : "Send message"}
-                    >
-                      {isStreaming ? (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-4 w-4"
-                          fill="currentColor"
-                        >
-                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                        </svg>
-                      ) : (
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
                           viewBox="0 0 24 24"
@@ -2354,14 +2395,106 @@ type SendMessageOptions = {
                           stroke="currentColor"
                           strokeWidth={2}
                           strokeLinecap="round"
-                          strokeLinejoin="round"
                         >
-                          <path d="M12 18V6" />
-                          <path d="M6 12l6-6 6 6" />
+                          <path d="M12 5v14M5 12h14" />
                         </svg>
+                      </button>
+
+                      {composerMenuOpen && (
+                        <div
+                          onClick={(event) => event.stopPropagation()}
+                          className="absolute left-0 top-full z-30 mt-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                        >
+                          <button
+                            onClick={() => {
+                              setForceWebSearch((prev) => !prev);
+                              setComposerMenuOpen(false);
+                            }}
+                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                          >
+                            <span>Web search</span>
+                            {forceWebSearch && (
+                              <span className="text-[#8ab4ff]">On</span>
+                            )}
+                          </button>
+                        </div>
                       )}
+                    </div>
+
+                    <div className="flex-1 px-1">
+                      <textarea
+                        ref={textareaRef}
+                        className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
+                        style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Message the assistant…"
+                        rows={1}
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      aria-label="Voice input (coming soon)"
+                      onClick={() => textareaRef.current?.focus()}
+                      className="flex h-10 w-10 items-center justify-center rounded-2xl text-white/70 transition hover:text-white"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-5 w-5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.8}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                        <path d="M19 11.5a7 7 0 0 1-14 0" />
+                        <path d="M12 18.5v2" />
+                      </svg>
                     </button>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={
+                      isStreaming ? handleStopGeneration : () => sendMessage()
+                    }
+                    disabled={!isStreaming && !canSendMessage}
+                    className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                      isStreaming
+                        ? "hover:bg-[#225fd0]"
+                        : "hover:bg-[#3c7cff]"
+                    } disabled:cursor-not-allowed disabled:opacity-40`}
+                    aria-label={isStreaming ? "Stop response" : "Send message"}
+                  >
+                    {isStreaming ? (
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-4 w-4"
+                        fill="currentColor"
+                      >
+                        <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                      </svg>
+                    ) : (
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        className="h-5 w-5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 18V6" />
+                        <path d="M6 12l6-6 6 6" />
+                      </svg>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>
