@@ -133,16 +133,25 @@ const OTHER_MODEL_GROUPS: Array<{
   family: Exclude<ModelFamily, "auto" | "gpt-5.1">;
   label: string;
   shortLabel: string;
+  supportsSpeedModes?: boolean;
 }> = [
   {
     family: "gpt-5-mini",
     label: "GPT 5 Mini",
     shortLabel: describeModelFamily("gpt-5-mini"),
+    supportsSpeedModes: true,
   },
   {
     family: "gpt-5-nano",
     label: "GPT 5 Nano",
     shortLabel: describeModelFamily("gpt-5-nano"),
+    supportsSpeedModes: true,
+  },
+  {
+    family: "gpt-5-pro-2025-10-06",
+    label: "GPT 5 Pro",
+    shortLabel: describeModelFamily("gpt-5-pro-2025-10-06"),
+    supportsSpeedModes: false,
   },
 ];
 
@@ -156,13 +165,19 @@ const MIN_INPUT_HEIGHT = 32;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
 const MAX_PROJECT_CHAT_PREVIEW = 5;
+const WAVEFORM_BAR_COUNT = 24;
+const createEmptyWaveform = () =>
+  Array.from({ length: WAVEFORM_BAR_COUNT }, () => 0);
 
 type ServerStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
-  | { type: "search-error"; query: string; message?: string };
+  | { type: "search-error"; query: string; message?: string }
+  | { type: "file-reading-start" }
+  | { type: "file-reading-complete" }
+  | { type: "file-reading-error"; message?: string };
 
-type StatusVariant = "default" | "extended" | "search" | "error";
+type StatusVariant = "default" | "extended" | "search" | "reading" | "error";
 
 type ThinkingStatus =
   | { variant: "thinking"; label: string }
@@ -179,6 +194,7 @@ function StatusBubble({
     default: "border-white/5 bg-[#1b1b20]/90 text-zinc-400",
     extended: "border-[#4b64ff]/30 bg-[#1a1c2b]/80 text-[#b7c6ff]",
     search: "border-[#4b64ff]/30 bg-[#152033]/80 text-[#9bb8ff]",
+    reading: "border-[#2f9e89]/40 bg-[#0f1f1a]/85 text-[#b8ffe8]",
     error: "border-red-500/40 bg-[#30161a]/85 text-red-200",
   };
 
@@ -186,6 +202,7 @@ function StatusBubble({
     default: "bg-zinc-500",
     extended: "bg-[#8ab4ff]",
     search: "bg-[#8ab4ff]",
+    reading: "bg-[#53f2c7]",
     error: "bg-red-400",
   };
 
@@ -351,6 +368,11 @@ export default function Home() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const waveformDataRef = useRef<Uint8Array | null>(null);
+  const waveformAnimationRef = useRef<number | null>(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [activeAssistantMessageId, setActiveAssistantMessageId] =
@@ -368,13 +390,23 @@ export default function Home() {
   const [searchIndicator, setSearchIndicator] = useState<
     { message: string; variant: "running" | "error" } | null
   >(null);
+  const [fileReadingIndicator, setFileReadingIndicator] = useState<
+    "running" | "error" | null
+  >(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [waveformLevels, setWaveformLevels] = useState<number[]>(() =>
+    createEmptyWaveform()
+  );
 
   useEffect(() => {
     if (!headerModelMenuOpen) {
       setOtherModelsMenuOpen(false);
     }
   }, [headerModelMenuOpen]);
+
+  useEffect(() => () => cleanupWaveformVisualizer(), [
+    cleanupWaveformVisualizer,
+  ]);
 
   useEffect(() => {
     if (isRecording || isTranscribing) {
@@ -710,6 +742,14 @@ export default function Home() {
     return () => clearTimeout(timeout);
   }, [searchIndicator]);
 
+  useEffect(() => {
+    if (fileReadingIndicator !== "error") {
+      return;
+    }
+    const timeout = setTimeout(() => setFileReadingIndicator(null), 5000);
+    return () => clearTimeout(timeout);
+  }, [fileReadingIndicator]);
+
   useEffect(() => () => clearLongThinkTimer(), [clearLongThinkTimer]);
 
   // ------------------------------------------------------------
@@ -780,9 +820,30 @@ export default function Home() {
     modelFamily === "auto"
       ? `Auto (${describeModelFamily("gpt-5-mini")})`
       : describeModelFamily(modelFamily);
+  const headerSpeedDisplay =
+    modelFamily === "gpt-5-pro-2025-10-06" || speedMode === "auto"
+      ? null
+      : SPEED_LABELS[speedMode];
   const imageAttachmentLimitReached =
     imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
   const isVoiceFlowActive = isRecording || isTranscribing;
+  const shouldShowSendButton =
+    isVoiceFlowActive || isStreaming || canSendMessage;
+  const sendButtonDisabled = isStreaming ? false : !canSendMessage;
+  const sendButtonAriaLabel = isStreaming
+    ? "Stop response"
+    : sendButtonDisabled
+      ? "Send message (unavailable)"
+      : "Send message";
+  const handlePrimaryAction = () => {
+    if (isStreaming) {
+      handleStopGeneration();
+      return;
+    }
+    if (!sendButtonDisabled) {
+      void sendMessage();
+    }
+  };
 
   // ------------------------------------------------------------
   // HELPERS
@@ -947,6 +1008,79 @@ export default function Home() {
     setComposerError(null);
   };
 
+  const cleanupWaveformVisualizer = useCallback(() => {
+    if (waveformAnimationRef.current) {
+      cancelAnimationFrame(waveformAnimationRef.current);
+      waveformAnimationRef.current = null;
+    }
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+    audioSourceRef.current?.disconnect();
+    audioSourceRef.current = null;
+    const ctx = audioContextRef.current;
+    if (ctx) {
+      ctx.close().catch(() => null);
+      audioContextRef.current = null;
+    }
+    waveformDataRef.current = null;
+    setWaveformLevels(createEmptyWaveform());
+  }, []);
+
+  const startWaveformVisualizer = useCallback(
+    (stream: MediaStream) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+      const AudioCtx =
+        window.AudioContext ||
+        (window as typeof window & {
+          webkitAudioContext?: typeof AudioContext;
+        }).webkitAudioContext;
+      if (!AudioCtx) {
+        return;
+      }
+      try {
+        cleanupWaveformVisualizer();
+        const audioContext = new AudioCtx();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 64;
+        source.connect(analyser);
+        const buffer = new Uint8Array(analyser.frequencyBinCount);
+        audioContextRef.current = audioContext;
+        audioSourceRef.current = source;
+        analyserRef.current = analyser;
+        waveformDataRef.current = buffer;
+
+        const tick = () => {
+          if (!analyserRef.current || !waveformDataRef.current) {
+            return;
+          }
+          analyserRef.current.getByteTimeDomainData(waveformDataRef.current);
+          const data = waveformDataRef.current;
+          let sum = 0;
+          for (let i = 0; i < data.length; i += 1) {
+            sum += Math.abs(data[i] - 128);
+          }
+          const normalized = Math.min(1, sum / data.length / 64);
+          setWaveformLevels((prev) => {
+            const next = prev.slice(1);
+            next.push(normalized);
+            return next;
+          });
+          waveformAnimationRef.current = requestAnimationFrame(tick);
+        };
+        waveformAnimationRef.current = requestAnimationFrame(tick);
+        if (typeof audioContext.resume === "function") {
+          void audioContext.resume().catch(() => null);
+        }
+      } catch (error) {
+        console.warn("Unable to initialize waveform visualization", error);
+      }
+    },
+    [cleanupWaveformVisualizer]
+  );
+
   const stopRecording = useCallback(
     (shouldReturnBlob: boolean) => {
       const recorder = mediaRecorderRef.current;
@@ -963,6 +1097,7 @@ export default function Home() {
           }
           const chunks = recordingChunksRef.current;
           recordingChunksRef.current = [];
+          cleanupWaveformVisualizer();
           if (!shouldReturnBlob || chunks.length === 0) {
             resolve(null);
             return;
@@ -977,7 +1112,7 @@ export default function Home() {
         }
       });
     },
-    []
+    [cleanupWaveformVisualizer]
   );
 
   const cancelRecordingFlow = useCallback(() => {
@@ -1020,13 +1155,14 @@ export default function Home() {
       };
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
+      startWaveformVisualizer(stream);
       recorder.start();
       setIsRecording(true);
     } catch (error) {
       console.error("startRecording error", error);
       setComposerError("Microphone permission was denied.");
     }
-  }, []);
+  }, [startWaveformVisualizer]);
 
   const transcribeAudio = useCallback(
     async (blob: Blob) => {
@@ -1240,6 +1376,7 @@ type RetryOptions = {
     setAutoScrollEnabled(true);
     setShowScrollButton(false);
     setSearchIndicator(null);
+    setFileReadingIndicator(null);
     responseTimingRef.current = {
       start: typeof performance !== "undefined" ? performance.now() : Date.now(),
       firstToken: null,
@@ -1551,6 +1688,9 @@ type RetryOptions = {
                     setSearchIndicator((prev) =>
                       prev?.variant === "running" ? null : prev
                     );
+                    setFileReadingIndicator((prev) =>
+                      prev === "running" ? null : prev
+                    );
                     const startTime = responseTimingRef.current.start;
                     const targetMessageId =
                       responseTimingRef.current.assistantMessageId;
@@ -1614,6 +1754,12 @@ type RetryOptions = {
                         status.message || "Web search failed. Using prior data.",
                       variant: "error",
                     });
+                  } else if (status.type === "file-reading-start") {
+                    setFileReadingIndicator("running");
+                  } else if (status.type === "file-reading-complete") {
+                    setFileReadingIndicator(null);
+                  } else if (status.type === "file-reading-error") {
+                    setFileReadingIndicator("error");
                   }
                 } else if (payload.type === "sources") {
                   const sourcesEvent = payload as {
@@ -1728,6 +1874,7 @@ type RetryOptions = {
       }
       resetThinkingIndicator();
       setSearchIndicator(null);
+      setFileReadingIndicator(null);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -1742,6 +1889,7 @@ type RetryOptions = {
       setActiveAssistantMessageId((current) =>
         assistantMessageId && current === assistantMessageId ? null : current
       );
+      setFileReadingIndicator(null);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -1801,6 +1949,7 @@ type RetryOptions = {
     setIsStreaming(false);
     resetThinkingIndicator();
     setSearchIndicator(null);
+    setFileReadingIndicator(null);
     responseTimingRef.current = {
       start: null,
       firstToken: null,
@@ -2335,44 +2484,37 @@ type RetryOptions = {
             >
               ☰
             </button>
-            <div className="flex items-end gap-3">
-              <span className="text-sm font-semibold text-white">
-                LLM Client
-              </span>
-              <div className="relative">
-                <button
-                  type="button"
-                  aria-expanded={headerModelMenuOpen}
-                  aria-label="Choose model and speed"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setHeaderModelMenuOpen((prev) => !prev);
-                  }}
-                  className={`flex items-start gap-2 rounded-xl px-3 py-1 text-left text-white/80 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/30 ${
-                    headerModelMenuOpen ? "bg-white/10 text-white" : ""
+            <div className="relative">
+              <button
+                type="button"
+                aria-expanded={headerModelMenuOpen}
+                aria-label="Choose model and speed"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setHeaderModelMenuOpen((prev) => !prev);
+                }}
+                className={`group inline-flex items-center gap-2 text-sm font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline ${
+                  headerModelMenuOpen ? "text-white" : ""
+                }`}
+              >
+                <span className="text-white">LLM Client</span>
+                <span className="text-white">{headerModelLabel}</span>
+                {headerSpeedDisplay && (
+                  <span className="text-white">{headerSpeedDisplay}</span>
+                )}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  className={`h-3 w-3 text-white/70 transition ${
+                    headerModelMenuOpen ? "-rotate-180 text-white" : ""
                   }`}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
                 >
-                  <div className="flex flex-col leading-tight">
-                    <span className="text-sm font-semibold text-white">
-                      {headerModelLabel}
-                    </span>
-                    <span className="text-[11px] text-white/50">
-                      {SPEED_LABELS[speedMode]}
-                    </span>
-                  </div>
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    className={`mt-1 h-3 w-3 transition ${
-                      headerModelMenuOpen ? "-rotate-180" : ""
-                    }`}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path d="M6 9l6 6 6-6" />
-                  </svg>
-                </button>
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
                 {headerModelMenuOpen && (
                   <div
                     onClick={(event) => event.stopPropagation()}
@@ -2458,31 +2600,50 @@ type RetryOptions = {
                                     {group.label}
                                   </div>
                                   <div className="flex flex-col gap-1">
-                                    {SPEED_OPTIONS.map((option) => {
-                                      const isComboActive =
-                                        modelFamily === group.family &&
-                                        speedMode === option.value;
-                                      return (
-                                        <button
-                                          key={`${group.family}-${option.value}`}
-                                          onClick={() => {
-                                            setModelFamily(group.family);
-                                            setSpeedMode(option.value);
-                                            setHeaderModelMenuOpen(false);
-                                          }}
-                                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                                            isComboActive
-                                              ? "bg-white/10 text-white font-semibold"
-                                              : "text-white/70 hover:bg-white/5"
-                                          }`}
-                                        >
-                                          <span>{`${group.shortLabel} ${option.label}`}</span>
-                                          {isComboActive && (
-                                            <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
-                                          )}
-                                        </button>
-                                      );
-                                    })}
+                                    {group.supportsSpeedModes === false ? (
+                                      <button
+                                        onClick={() => {
+                                          setModelFamily(group.family);
+                                          setHeaderModelMenuOpen(false);
+                                        }}
+                                        className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                          modelFamily === group.family
+                                            ? "bg-white/10 text-white font-semibold"
+                                            : "text-white/70 hover:bg-white/5"
+                                        }`}
+                                      >
+                                        <span>{group.label}</span>
+                                        {modelFamily === group.family && (
+                                          <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                                        )}
+                                      </button>
+                                    ) : (
+                                      SPEED_OPTIONS.map((option) => {
+                                        const isComboActive =
+                                          modelFamily === group.family &&
+                                          speedMode === option.value;
+                                        return (
+                                          <button
+                                            key={`${group.family}-${option.value}`}
+                                            onClick={() => {
+                                              setModelFamily(group.family);
+                                              setSpeedMode(option.value);
+                                              setHeaderModelMenuOpen(false);
+                                            }}
+                                            className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                              isComboActive
+                                                ? "bg-white/10 text-white font-semibold"
+                                                : "text-white/70 hover:bg-white/5"
+                                            }`}
+                                          >
+                                            <span>{`${group.shortLabel} ${option.label}`}</span>
+                                            {isComboActive && (
+                                              <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                                            )}
+                                          </button>
+                                        );
+                                      })
+                                    )}
                                   </div>
                                 </div>
                               ))}
@@ -2490,36 +2651,12 @@ type RetryOptions = {
                           </div>
                         )}
                       </div>
-                      <div className="border-t border-white/5 pt-3">
-                        <div className="text-sm font-semibold text-white">
-                          GPT 5 Pro
-                        </div>
-                        <p className="text-[11px] text-white/60">
-                          High-effort reasoning
-                        </p>
-                        <button
-                          onClick={() => {
-                            setModelFamily("gpt-5-pro-2025-10-06");
-                            setHeaderModelMenuOpen(false);
-                          }}
-                          className={`mt-2 flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                            modelFamily === "gpt-5-pro-2025-10-06"
-                              ? "bg-white/10 text-white font-semibold"
-                              : "text-white/70 hover:bg-white/5"
-                          }`}
-                        >
-                          <span>GPT 5 Pro</span>
-                          {modelFamily === "gpt-5-pro-2025-10-06" && (
-                            <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
-                          )}
-                        </button>
-                      </div>
+
                     </div>
                   </div>
                 )}
               </div>
             </div>
-          </div>
         </header>
 
         {/* PROJECT VIEW */}
@@ -2965,11 +3102,21 @@ type RetryOptions = {
                     );
                   })}
 
-                  {(searchIndicator || thinkingStatus) && (
+                  {(searchIndicator || thinkingStatus || fileReadingIndicator) && (
                     <div
                       className="mx-auto mt-2 flex flex-col items-center gap-2"
                       style={{ maxWidth: MAX_MESSAGE_WIDTH }}
                     >
+                      {fileReadingIndicator && (
+                        <StatusBubble
+                          label="Reading documents"
+                          variant={
+                            fileReadingIndicator === "error"
+                              ? "error"
+                              : "reading"
+                          }
+                        />
+                      )}
                       {searchIndicator && (
                         <StatusBubble
                           label={searchIndicator.message}
@@ -3039,302 +3186,157 @@ type RetryOptions = {
                 </div>
 
                 <div className="flex flex-col gap-2">
-                  <div className="flex items-start gap-3">
-                    <div className="flex flex-1 flex-col gap-2 rounded-2xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
-                      <div className="flex items-start gap-3">
-                        <div className="relative shrink-0">
-                          <button
-                            type="button"
-                            aria-label={
-                              isVoiceFlowActive
-                                ? "Cancel voice input"
-                                : "Composer options"
-                            }
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (isVoiceFlowActive) {
-                                cancelRecordingFlow();
-                                return;
-                              }
-                              setComposerMenuOpen((prev) => !prev);
-                            }}
-                            className={`flex h-10 w-10 items-center justify-center rounded-2xl text-white/80 transition ${
-                              isVoiceFlowActive
-                                ? "bg-red-500/20 text-red-200"
-                                : "bg-[#3a3a40] hover:bg-[#4b4b52]"
-                            }`}
-                          >
-                            {isVoiceFlowActive ? (
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-5 w-5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth={2}
-                                strokeLinecap="round"
-                              >
-                                <path d="M6 6l12 12M6 18 18 6" />
-                              </svg>
-                            ) : (
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-5 w-5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth={2}
-                                strokeLinecap="round"
-                              >
-                                <path d="M12 5v14M5 12h14" />
-                              </svg>
-                            )}
-                          </button>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {forceWebSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setForceWebSearch(false)}
+                          className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]"
+                        >
+                          <span className="text-base leading-none">🌐</span>
+                          <span>Web search</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
 
-                          {composerMenuOpen && (
+                  <div className="flex flex-col gap-2">
+                    {imageAttachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {imageAttachments.map((attachment) => {
+                          const sizeLabel = formatAttachmentSize(
+                            attachment.size
+                          );
+                          return (
                             <div
-                              onClick={(event) => event.stopPropagation()}
-                              className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                              key={`${attachment.id}-preview`}
+                              className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
                             >
-                              <div className="space-y-2">
-                                <button
-                                  onClick={() => {
-                                    handleTakePhotoClick();
-                                    setComposerMenuOpen(false);
-                                  }}
-                                  className="w-full rounded-xl bg-[#1f1f27] px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-[#2b2b36]"
-                                >
-                                  Take photo
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    handleAddFilesClick();
-                                    setComposerMenuOpen(false);
-                                  }}
-                                  className="w-full rounded-xl border border-white/10 px-3 py-2 text-[12px] text-zinc-200 transition hover:border-white/25 hover:text-white"
-                                >
-                                  Add photos &amp; files
-                                </button>
-                                <div className="mt-2 border-t border-white/5 pt-2">
-                                  <button
-                                    onClick={() => {
-                                      setForceWebSearch((prev) => !prev);
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                                  >
-                                    <span>Web search</span>
-                                    {forceWebSearch && (
-                                      <span className="text-[#8ab4ff]">On</span>
-                                    )}
-                                  </button>
+                              <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
+                                <Image
+                                  src={attachment.dataUrl}
+                                  alt={attachment.name || "Attachment"}
+                                  width={48}
+                                  height={48}
+                                  className="h-full w-full object-cover"
+                                  unoptimized
+                                />
+                              </div>
+                              <div className="min-w-0 flex-1 text-left">
+                                <div className="truncate text-[12px] font-medium text-white">
+                                  {attachment.name || "Image"}
                                 </div>
+                                {sizeLabel && (
+                                  <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                    {sizeLabel}
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex-1 space-y-2">
-                          {imageAttachments.length > 0 && (
-                            <div className="flex flex-wrap gap-2">
-                              {imageAttachments.map((attachment) => {
-                                const sizeLabel = formatAttachmentSize(
-                                  attachment.size
-                                );
-                                return (
-                                  <div
-                                    key={`${attachment.id}-preview`}
-                                    className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
-                                  >
-                                    <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
-                                      <Image
-                                        src={attachment.dataUrl}
-                                        alt={attachment.name || "Attachment"}
-                                        width={48}
-                                        height={48}
-                                        className="h-full w-full object-cover"
-                                        unoptimized
-                                      />
-                                    </div>
-                                    <div className="min-w-0 flex-1 text-left">
-                                      <div className="truncate text-[12px] font-medium text-white">
-                                        {attachment.name || "Image"}
-                                      </div>
-                                      {sizeLabel && (
-                                        <div className="text-[10px] uppercase tracking-wide text-white/50">
-                                          {sizeLabel}
-                                        </div>
-                                      )}
-                                    </div>
-                                    <button
-                                      type="button"
-                                      aria-label="Remove attachment"
-                                      onClick={() => handleRemoveImageAttachment(attachment.id)}
-                                      className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
-                                    >
-                                      ×
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                          {fileAttachments.length > 0 && (
-                            <div className="space-y-2">
-                              {fileAttachments.map((file) => {
-                                const sizeLabel = formatAttachmentSize(file.size);
-                                return (
-                                  <div
-                                    key={`${file.id}-file`}
-                                    className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
-                                  >
-                                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
-                                      <svg
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        viewBox="0 0 24 24"
-                                        className="h-4 w-4"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth={1.6}
-                                      >
-                                        <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
-                                        <path d="M14 3v6h6" />
-                                      </svg>
-                                    </div>
-                                    <div className="min-w-0 flex-1 text-left">
-                                      <div className="truncate text-[12px] font-medium text-white">
-                                        {file.name || "File"}
-                                      </div>
-                                      {sizeLabel && (
-                                        <div className="text-[10px] uppercase tracking-wide text-white/50">
-                                          {sizeLabel}
-                                        </div>
-                                      )}
-                                    </div>
-                                    <button
-                                      type="button"
-                                      aria-label="Remove file attachment"
-                                      onClick={() => handleRemoveFileAttachment(file.id)}
-                                      className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
-                                    >
-                                      ×
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                          {isVoiceFlowActive ? (
-                            <div className="flex items-center justify-between rounded-2xl bg-[#1b1b21]/70 px-3 py-3 text-white">
                               <button
                                 type="button"
-                                onClick={cancelRecordingFlow}
-                                className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white"
-                                aria-label="Cancel recording"
+                                aria-label="Remove attachment"
+                                onClick={() => handleRemoveImageAttachment(attachment.id)}
+                                className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
                               >
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-4 w-4"
-                                  fill="currentColor"
-                                >
-                                  <rect x="7" y="7" width="10" height="10" rx="2" />
-                                </svg>
+                                ×
                               </button>
-                              <div className="flex flex-1 justify-center gap-1 px-4">
-                                {Array.from({ length: 5 }).map((_, idx) => (
-                                  <span
-                                    key={`bar-${idx}`}
-                                    className="listening-bar h-6 w-1 rounded-full bg-white/70"
-                                    style={{ animationDelay: `${idx * 120}ms` }}
-                                  />
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={handleMicClick}
-                                className="flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white"
-                                aria-label="Send recording"
-                              >
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {fileAttachments.length > 0 && (
+                      <div className="space-y-2">
+                        {fileAttachments.map((file) => {
+                          const sizeLabel = formatAttachmentSize(file.size);
+                          return (
+                            <div
+                              key={`${file.id}-file`}
+                              className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+                            >
+                              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
                                 <svg
                                   xmlns="http://www.w3.org/2000/svg"
                                   viewBox="0 0 24 24"
                                   className="h-4 w-4"
                                   fill="none"
                                   stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
+                                  strokeWidth={1.6}
                                 >
-                                  <path d="M5 12h14" />
-                                  <path d="M12 5l7 7-7 7" />
+                                  <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                  <path d="M14 3v6h6" />
                                 </svg>
+                              </div>
+                              <div className="min-w-0 flex-1 text-left">
+                                <div className="truncate text-[12px] font-medium text-white">
+                                  {file.name || "File"}
+                                </div>
+                                {sizeLabel && (
+                                  <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                    {sizeLabel}
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                aria-label="Remove file attachment"
+                                onClick={() => handleRemoveFileAttachment(file.id)}
+                                className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                              >
+                                ×
                               </button>
                             </div>
-                          ) : (
-                            <>
-                              <div className="flex-1 px-1">
-                                <textarea
-                                  ref={textareaRef}
-                                  className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
-                                  style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                                  value={input}
-                                  onChange={(e) => setInput(e.target.value)}
-                                  onKeyDown={handleKeyDown}
-                                  placeholder="Message the assistant…"
-                                  rows={1}
-                                />
-                              </div>
-                              <input
-                                ref={photoInputRef}
-                                type="file"
-                                accept="image/*"
-                                capture="environment"
-                                className="sr-only"
-                                onChange={handlePhotoInputChange}
-                              />
-                              <input
-                                ref={filePickerInputRef}
-                                type="file"
-                                accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
-                                multiple
-                                className="sr-only"
-                                onChange={handleFilePickerChange}
-                              />
-                            </>
-                          )}
-                        </div>
+                          );
+                        })}
+                      </div>
+                    )}
 
-                        <div className="flex flex-col items-center gap-2">
-                          {!isVoiceFlowActive && (
+                    <div className="flex items-end gap-3">
+                      <div className="flex w-full flex-col gap-2">
+                        <div className="flex w-full items-center gap-2 rounded-[999px] border border-white/10 bg-[#2b2b31]/90 px-3 py-1.5 shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
+                          <div className="relative mr-1 shrink-0">
                             <button
                               type="button"
                               aria-label={
                                 isRecording
                                   ? "Stop recording"
-                                  : "Start voice input"
+                                  : isTranscribing
+                                    ? "Cancel transcription"
+                                    : "Composer options"
                               }
-                              onClick={handleMicClick}
-                              disabled={isTranscribing}
-                              className={`flex h-10 w-10 items-center justify-center rounded-2xl transition ${
-                                isRecording
+                              aria-expanded={
+                                !isVoiceFlowActive ? composerMenuOpen : undefined
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (isRecording) {
+                                  void handleMicClick();
+                                  return;
+                                }
+                                if (isTranscribing) {
+                                  cancelRecordingFlow();
+                                  return;
+                                }
+                                setComposerMenuOpen((prev) => !prev);
+                              }}
+                              className={`flex h-9 w-9 items-center justify-center rounded-full transition ${
+                                isVoiceFlowActive
                                   ? "bg-red-500/20 text-red-200"
-                                  : "bg-[#3a3a40] text-white/80 hover:bg-[#4b4b52]"
-                              } ${isTranscribing ? "cursor-wait opacity-60" : ""}`}
-                              aria-pressed={isRecording}
+                                  : "text-white/80 hover:bg-white/10"
+                              }`}
                             >
-                              {isTranscribing ? (
-                                <span className="inline-flex h-4 w-4 items-center justify-center">
-                                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
-                                </span>
-                              ) : isRecording ? (
+                              {isVoiceFlowActive ? (
                                 <svg
                                   xmlns="http://www.w3.org/2000/svg"
                                   viewBox="0 0 24 24"
-                                  className="h-4 w-4"
-                                  fill="currentColor"
+                                  className="h-5 w-5"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  strokeLinecap="round"
                                 >
-                                  <rect x="7" y="7" width="10" height="10" rx="2" />
+                                  <path d="M6 6l12 12M6 18 18 6" />
                                 </svg>
                               ) : (
                                 <svg
@@ -3343,64 +3345,207 @@ type RetryOptions = {
                                   className="h-5 w-5"
                                   fill="none"
                                   stroke="currentColor"
-                                  strokeWidth={1.8}
+                                  strokeWidth={2}
                                   strokeLinecap="round"
-                                  strokeLinejoin="round"
                                 >
-                                  <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                                  <path d="M19 11.5a7 7 0 0 1-14 0" />
-                                  <path d="M12 18.5v2" />
+                                  <path d="M12 5v14M5 12h14" />
                                 </svg>
                               )}
                             </button>
-                          )}
+                            {!isVoiceFlowActive && composerMenuOpen && (
+                              <div
+                                onClick={(event) => event.stopPropagation()}
+                                className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
+                              >
+                                <div className="flex flex-col text-[13px] text-white/80">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      handleTakePhotoClick();
+                                      setComposerMenuOpen(false);
+                                    }}
+                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    Take photo
+                                  </button>
+                                  <div className="my-1 h-px bg-white/10" />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      handleAddFilesClick();
+                                      setComposerMenuOpen(false);
+                                    }}
+                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    Add photos &amp; files
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setComposerMenuOpen(false)}
+                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    Create image
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setComposerMenuOpen(false)}
+                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    Deep research
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setForceWebSearch((prev) => !prev);
+                                      setComposerMenuOpen(false);
+                                    }}
+                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    <span>Web search</span>
+                                    {forceWebSearch && (
+                                      <span className="text-[#8ab4ff]">On</span>
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setComposerMenuOpen(false)}
+                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                  >
+                                    Agent mode
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex flex-1 items-center">
+                            <textarea
+                              ref={textareaRef}
+                              className={`w-full resize-none border-none bg-transparent py-1 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
+                                isVoiceFlowActive ? "hidden" : ""
+                              }`}
+                              style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                              value={input}
+                              onChange={(e) => setInput(e.target.value)}
+                              onKeyDown={handleKeyDown}
+                              placeholder="Message the assistant…"
+                              rows={1}
+                            />
+                            {isVoiceFlowActive ? (
+                              isRecording ? (
+                                <div className="flex h-10 w-full items-end gap-1" aria-live="polite">
+                                  {waveformLevels.map((level, index) => (
+                                    <span
+                                      key={`wave-${index}`}
+                                      className="flex-1 rounded-full bg-red-400/70"
+                                      style={{
+                                        height: `${Math.max(6, level * 40)}px`,
+                                        opacity: 0.4 + level * 0.6,
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="flex h-10 w-full items-center justify-center text-sm text-zinc-400">
+                                  Transcribing…
+                                </div>
+                              )
+                            ) : null}
+                            <input
+                              ref={photoInputRef}
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="sr-only"
+                              onChange={handlePhotoInputChange}
+                            />
+                            <input
+                              ref={filePickerInputRef}
+                              type="file"
+                              accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
+                              multiple
+                              className="sr-only"
+                              onChange={handleFilePickerChange}
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-2 pl-2">
+                            {!isVoiceFlowActive && (
+                              <button
+                                type="button"
+                                aria-label={
+                                  isRecording ? "Stop recording" : "Start voice input"
+                                }
+                                onClick={handleMicClick}
+                                disabled={isTranscribing}
+                                className={`flex h-9 w-9 items-center justify-center rounded-full text-white/80 transition hover:bg-white/10 ${
+                                  isTranscribing ? "cursor-wait opacity-60" : ""
+                                }`}
+                              >
+                                {isTranscribing ? (
+                                  <span className="inline-flex h-4 w-4 items-center justify-center">
+                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
+                                  </span>
+                                ) : (
+                                  <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    className="h-5 w-5"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth={1.8}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                                    <path d="M19 11.5a7 7 0 0 1-14 0" />
+                                    <path d="M12 18.5v2" />
+                                  </svg>
+                                )}
+                              </button>
+                            )}
+                            {shouldShowSendButton && (
+                              <button
+                                type="button"
+                                onClick={handlePrimaryAction}
+                                disabled={sendButtonDisabled}
+                                className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                                  isStreaming ? "hover:bg-[#225fd0]" : "hover:bg-[#3c7cff]"
+                                } ${sendButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
+                                aria-label={sendButtonAriaLabel}
+                              >
+                                {isStreaming ? (
+                                  <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    className="h-4 w-4"
+                                    fill="currentColor"
+                                  >
+                                    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                                  </svg>
+                                ) : (
+                                  <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    className="h-5 w-5"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth={2}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M12 18V6" />
+                                    <path d="M6 12l6-6 6 6" />
+                                  </svg>
+                                )}
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
-
-                    {!isVoiceFlowActive && (
-                      <button
-                        type="button"
-                        onClick={
-                          isStreaming ? handleStopGeneration : () => sendMessage()
-                        }
-                        disabled={
-                          !isStreaming && (!canSendMessage || isTranscribing)
-                        }
-                        className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                          isStreaming
-                            ? "hover:bg-[#225fd0]"
-                            : "hover:bg-[#3c7cff]"
-                        } disabled:cursor-not-allowed disabled:opacity-40`}
-                        aria-label={isStreaming ? "Stop response" : "Send message"}
-                      >
-                        {isStreaming ? (
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-4 w-4"
-                            fill="currentColor"
-                          >
-                            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                          </svg>
-                        ) : (
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            className="h-5 w-5"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth={2}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M12 18V6" />
-                            <path d="M6 12l6-6 6 6" />
-                          </svg>
-                        )}
-                      </button>
-                    )}
                   </div>
+
                   {composerError && (
                     <div className="text-xs text-red-400">{composerError}</div>
                   )}
@@ -3497,26 +3642,6 @@ type RetryOptions = {
           }
         }}
       />
-      <style jsx>{`
-        @keyframes listeningPulse {
-          0% {
-            transform: scaleY(0.4);
-            opacity: 0.4;
-          }
-          50% {
-            transform: scaleY(1);
-            opacity: 1;
-          }
-          100% {
-            transform: scaleY(0.4);
-            opacity: 0.4;
-          }
-        }
-
-        .listening-bar {
-          animation: listeningPulse 1.2s ease-in-out infinite;
-        }
-      `}</style>
     </div>
   );
 }

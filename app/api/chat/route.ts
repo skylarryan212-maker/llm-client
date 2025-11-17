@@ -20,6 +20,7 @@ import type {
 } from "@/lib/chatTypes";
 import {
   getModelAndReasoningConfig,
+  suggestSmallerModelForEffort,
   type ModelFamily,
   type ReasoningEffort,
   type SpeedMode,
@@ -103,7 +104,10 @@ function isWebSearchCall(value: unknown): value is WebSearchCall {
 type SearchStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
-  | { type: "search-error"; query: string; message?: string };
+  | { type: "search-error"; query: string; message?: string }
+  | { type: "file-reading-start" }
+  | { type: "file-reading-complete" }
+  | { type: "file-reading-error"; message?: string };
 
 type ResponseMetadata = {
   usedModel: string;
@@ -1064,15 +1068,41 @@ export async function POST(req: Request) {
       });
     }
 
-    const targetModelKey = routerResult.modelKey;
-    const targetModelFamily =
+    let targetModelKey = routerResult.modelKey;
+    let targetModelFamily: Exclude<ModelFamily, "auto"> =
       requestedModelFamily === "auto"
         ? MODEL_KEY_TO_FAMILY[targetModelKey]
         : requestedModelFamily;
+
+    if (requestedModelFamily !== "auto") {
+      targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
+    }
+
+    const promptForRouting = userTextForContext || userText;
+
+    if (requestedModelFamily === "auto") {
+      const previewConfig = getModelAndReasoningConfig(
+        targetModelFamily,
+        speedMode,
+        promptForRouting
+      );
+      const previewEffort = previewConfig.reasoning?.effort ?? null;
+      if (previewEffort === "medium" || previewEffort === "high") {
+        const suggestedFamily = suggestSmallerModelForEffort(
+          promptForRouting,
+          previewEffort
+        );
+        if (suggestedFamily && suggestedFamily !== targetModelFamily) {
+          targetModelFamily = suggestedFamily;
+          targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
+        }
+      }
+    }
+
     const modelConfig = getModelAndReasoningConfig(
       targetModelFamily,
       speedMode,
-      userTextForContext || userText
+      promptForRouting
     );
     const targetModel = modelConfig.model;
 
@@ -1182,6 +1212,18 @@ export async function POST(req: Request) {
               sendStatusUpdate({
                 type: "search-complete",
                 query: "web search",
+              });
+            } else if (
+              event.type === "response.file_search_call.in_progress" ||
+              event.type === "response.file_search_call.searching"
+            ) {
+              sendStatusUpdate({ type: "file-reading-start" });
+            } else if (event.type === "response.file_search_call.completed") {
+              sendStatusUpdate({ type: "file-reading-complete" });
+            } else if (event.type === "response.file_search_call.failed") {
+              sendStatusUpdate({
+                type: "file-reading-error",
+                message: "Unable to read documents.",
               });
             }
           }
