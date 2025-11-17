@@ -1,8 +1,9 @@
 export type Source = {
-  title: string;
   url: string;
-  snippet?: string;
-  domain?: string;
+  title?: string | null;
+  domain?: string | null;
+  startIndex?: number | null;
+  endIndex?: number | null;
 };
 
 export type SourceChip = {
@@ -13,6 +14,14 @@ export type SourceChip = {
 };
 
 export type ImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  size?: number;
+};
+
+export type FileAttachment = {
   id: string;
   name: string;
   mimeType: string;

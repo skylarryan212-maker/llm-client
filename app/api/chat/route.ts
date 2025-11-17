@@ -6,13 +6,18 @@ import OpenAI from "openai";
 import type {
   Response as OpenAIResponse,
   ResponseInput,
-  ResponseInputContent,
   ResponseInputMessageContentList,
+  ResponseOutputMessage,
   EasyInputMessage,
   Tool,
   ToolChoiceAllowed,
 } from "openai/resources/responses/responses";
-import type { ImageAttachment, Source, SourceChip } from "@/lib/chatTypes";
+import type {
+  FileAttachment,
+  ImageAttachment,
+  Source,
+  SourceChip,
+} from "@/lib/chatTypes";
 import {
   getModelAndReasoningConfig,
   type ModelFamily,
@@ -33,6 +38,7 @@ type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
   attachments?: ImageAttachment[];
+  files?: FileAttachment[];
 };
 type PersistedHistoryRow = {
   id: string;
@@ -109,7 +115,8 @@ type ResponseMetadata = {
   usedWebSearch: boolean;
   searchRecords: SearchRecord[];
   sources: SourceChip[];
-  sourceList: Source[];
+  citations: Source[];
+  vectorStoreIds?: string[];
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
@@ -406,32 +413,6 @@ function buildSourceChips(records: SearchRecord[], maxSources = 4): SourceChip[]
   return chips;
 }
 
-function buildSourceList(records: SearchRecord[], maxSources = 8): Source[] {
-  if (!records.length) {
-    return [];
-  }
-  const sources: Source[] = [];
-  const seen = new Set<string>();
-
-  records.forEach((record) => {
-    record.rankedSources.forEach((result) => {
-      const normalizedUrl = normalizeSourceUrl(result.url);
-      if (!normalizedUrl || seen.has(normalizedUrl)) {
-        return;
-      }
-      seen.add(normalizedUrl);
-      sources.push({
-        title: result.title || result.domain || normalizedUrl,
-        url: normalizedUrl,
-        snippet: result.snippet || record.summary,
-        domain: result.domain,
-      });
-    });
-  });
-
-  return sources.slice(0, maxSources);
-}
-
 function normalizeSourceUrl(input: string) {
   if (!input) {
     return "";
@@ -472,11 +453,8 @@ function extractDomainFromUrl(input: string) {
 }
 
 const IMAGE_ATTACHMENT_LIMIT = 4;
-
-type ContentBlock = Extract<
-  ResponseInputContent,
-  { type: "input_text" } | { type: "input_image" }
->;
+const FILE_ATTACHMENT_LIMIT = 8;
+const MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024;
 
 function sanitizeImageAttachment(input: unknown): ImageAttachment | null {
   if (!input || typeof input !== "object") {
@@ -532,12 +510,150 @@ function sanitizeAttachmentList(value: unknown): ImageAttachment[] {
   return attachments;
 }
 
+function sanitizeFileAttachment(input: unknown): FileAttachment | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const candidate = input as Partial<FileAttachment> & { dataUrl?: string };
+  const rawDataUrl =
+    typeof candidate.dataUrl === "string" ? candidate.dataUrl.trim() : "";
+  if (!rawDataUrl || !rawDataUrl.startsWith("data:")) {
+    return null;
+  }
+  if (rawDataUrl.length > MAX_FILE_SIZE_BYTES * 1.45) {
+    // Rough guardrail against extremely large base64 payloads.
+    return null;
+  }
+  const id =
+    typeof candidate.id === "string" && candidate.id.trim().length > 0
+      ? candidate.id
+      : randomUUID();
+  const name =
+    typeof candidate.name === "string" && candidate.name.trim().length > 0
+      ? candidate.name
+      : "file";
+  const mimeType =
+    typeof candidate.mimeType === "string" && candidate.mimeType.trim().length > 0
+      ? candidate.mimeType
+      : "application/octet-stream";
+  const size =
+    typeof candidate.size === "number" && Number.isFinite(candidate.size)
+      ? candidate.size
+      : undefined;
+  return {
+    id,
+    name,
+    mimeType,
+    dataUrl: rawDataUrl,
+    size,
+  };
+}
+
+function sanitizeFileAttachmentList(value: unknown): FileAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const attachments: FileAttachment[] = [];
+  for (const raw of value) {
+    const normalized = sanitizeFileAttachment(raw);
+    if (normalized) {
+      attachments.push(normalized);
+    }
+    if (attachments.length >= FILE_ATTACHMENT_LIMIT) {
+      break;
+    }
+  }
+  return attachments;
+}
+
+function dataUrlToBuffer(dataUrl: string) {
+  const match = dataUrl.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
+  if (!match || !match.groups) {
+    throw new Error("Invalid data URL");
+  }
+  const base64 = match.groups.data;
+  return Buffer.from(base64, "base64");
+}
+
 function extractAttachmentsFromMetadata(metadata: unknown): ImageAttachment[] {
   if (!metadata || typeof metadata !== "object") {
     return [];
   }
   const raw = (metadata as { attachments?: unknown }).attachments;
   return sanitizeAttachmentList(raw);
+}
+
+function extractFilesFromMetadata(metadata: unknown): FileAttachment[] {
+  if (!metadata || typeof metadata !== "object") {
+    return [];
+  }
+  const raw = (metadata as { files?: unknown }).files;
+  return sanitizeFileAttachmentList(raw);
+}
+
+function extractVectorStoreIds(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== "object") {
+    return [];
+  }
+  const raw = (metadata as { vectorStoreIds?: unknown }).vectorStoreIds;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+}
+
+function gatherVectorStoreIds(rows: PersistedHistoryRow[]): string[] {
+  const ids = new Set<string>();
+  rows.forEach((row) => {
+    extractVectorStoreIds(row.metadata).forEach((id) => ids.add(id));
+  });
+  return Array.from(ids);
+}
+
+async function ensureVectorStoreId({
+  openai,
+  conversationId,
+  existingIds,
+}: {
+  openai: OpenAI;
+  conversationId: string;
+  existingIds: Set<string>;
+}) {
+  const first = existingIds.values().next().value as string | undefined;
+  if (first) {
+    return first;
+  }
+  const vectorStore = await openai.vectorStores.create({
+    name: `chat-${conversationId}`,
+    metadata: { conversation_id: conversationId },
+  });
+  existingIds.add(vectorStore.id);
+  return vectorStore.id;
+}
+
+async function uploadFilesToVectorStore({
+  openai,
+  vectorStoreId,
+  files,
+}: {
+  openai: OpenAI;
+  vectorStoreId: string;
+  files: FileAttachment[];
+}) {
+  for (const file of files) {
+    try {
+      const buffer = dataUrlToBuffer(file.dataUrl);
+      const uploadable = new File([buffer], file.name || "file", {
+        type: file.mimeType || "application/octet-stream",
+      });
+      await openai.vectorStores.files.uploadAndPoll(vectorStoreId, uploadable);
+    } catch (error) {
+      console.error("Failed to upload file to vector store", error);
+      throw error;
+    }
+  }
 }
 
 function buildContentPayload(
@@ -564,13 +680,23 @@ function buildContentPayload(
   return blocks;
 }
 
-function attachmentPlaceholder(count: number) {
-  if (count <= 0) {
-    return "";
+function attachmentPlaceholder(imageCount: number, fileCount: number) {
+  const parts: string[] = [];
+  if (imageCount > 0) {
+    parts.push(
+      imageCount === 1
+        ? "[image attachment]"
+        : `[${imageCount} image attachments]`
+    );
   }
-  return count === 1
-    ? "[image attachment]"
-    : `[${count} image attachments]`;
+  if (fileCount > 0) {
+    parts.push(
+      fileCount === 1
+        ? "[file attachment]"
+        : `[${fileCount} file attachments]`
+    );
+  }
+  return parts.join(" ");
 }
 
 export async function POST(req: Request) {
@@ -587,6 +713,8 @@ export async function POST(req: Request) {
     const forceWebSearch = Boolean(body.forceWebSearch);
     const rawImages = Array.isArray(body.images) ? body.images : [];
     const sanitizedImageAttachments = sanitizeAttachmentList(rawImages);
+    const rawFiles = Array.isArray(body.files) ? body.files : [];
+    const sanitizedFileUploads = sanitizeFileAttachmentList(rawFiles);
     const retryAssistantMessageId =
       typeof body.retryAssistantMessageId === "string" &&
       body.retryAssistantMessageId.trim().length > 0
@@ -668,6 +796,7 @@ export async function POST(req: Request) {
 
     let historyRowsForModel = validHistoryRows;
     let retryUserAttachments: ImageAttachment[] = [];
+    let retryUserFiles: FileAttachment[] = [];
 
     if (isRetryRequest && retryAssistantMessageId) {
       const assistantIndex = validHistoryRows.findIndex(
@@ -712,15 +841,21 @@ export async function POST(req: Request) {
       retryUserAttachments = extractAttachmentsFromMetadata(
         retryUserRow.metadata
       );
+      retryUserFiles = extractFilesFromMetadata(retryUserRow.metadata);
 
       historyRowsForModel = validHistoryRows.slice(0, userIndex + 1);
     }
 
     const imageAttachments = isRetryRequest ? [] : sanitizedImageAttachments;
+    const fileUploads = isRetryRequest ? [] : sanitizedFileUploads;
     const attachmentCountForContext = isRetryRequest
       ? retryUserAttachments.length
       : imageAttachments.length;
-    const requestHasAttachments = attachmentCountForContext > 0;
+    const fileCountForContext = isRetryRequest
+      ? retryUserFiles.length
+      : fileUploads.length;
+    const requestHasAttachments =
+      attachmentCountForContext > 0 || fileCountForContext > 0;
 
     if (!userText && !requestHasAttachments) {
       return NextResponse.json(
@@ -730,15 +865,18 @@ export async function POST(req: Request) {
     }
 
     const userTextForContext =
-      userText || attachmentPlaceholder(attachmentCountForContext);
+      userText ||
+      attachmentPlaceholder(attachmentCountForContext, fileCountForContext);
 
     const historyForModel: HistoryMessage[] = historyRowsForModel.map(
       (message) => ({
         role: message.role,
         content: message.content,
         attachments: extractAttachmentsFromMetadata(message.metadata),
+        files: extractFilesFromMetadata(message.metadata),
       })
     );
+    const vectorStoreIdSet = new Set(gatherVectorStoreIds(validHistoryRows));
 
     const { data: conversationRow } = await supabase
       .from("conversations")
@@ -769,15 +907,26 @@ export async function POST(req: Request) {
         console.warn("Failed to clear assistant message before retry", error);
       }
     } else {
+      const userMetadata: Record<string, unknown> = {};
+      if (imageAttachments.length) {
+        userMetadata.attachments = imageAttachments;
+      }
+      if (fileUploads.length) {
+        userMetadata.files = fileUploads;
+      }
+      if (vectorStoreIds.length) {
+        userMetadata.vectorStoreIds = vectorStoreIds;
+      }
+      const metadataPayload =
+        Object.keys(userMetadata).length > 0 ? userMetadata : null;
+
       const { data: userRow, error: userInsertError } = await supabase
         .from("messages")
         .insert({
           conversation_id: conversationId,
           role: "user",
           content: userText,
-          metadata: imageAttachments.length
-            ? { attachments: imageAttachments }
-            : null,
+          metadata: metadataPayload,
         })
         .select("id")
         .single();
@@ -835,6 +984,28 @@ export async function POST(req: Request) {
       })
     );
 
+    if (!isRetryRequest && fileUploads.length > 0) {
+      try {
+        const vectorStoreId = await ensureVectorStoreId({
+          openai,
+          conversationId,
+          existingIds: vectorStoreIdSet,
+        });
+        await uploadFilesToVectorStore({
+          openai,
+          vectorStoreId,
+          files: fileUploads,
+        });
+      } catch (error) {
+        console.error("File upload failed", error);
+        return NextResponse.json(
+          { error: "Unable to register files for search" },
+          { status: 400 }
+        );
+      }
+    }
+    const vectorStoreIds = Array.from(vectorStoreIdSet);
+
     const allowWebSearch = shouldAllowWebSearch({
       userText: userTextForContext,
       forceWebSearch,
@@ -842,9 +1013,18 @@ export async function POST(req: Request) {
     const webSearchTool = { type: "web_search" } satisfies Tool & {
       [key: string]: unknown;
     };
-    const webSearchTools: Tool[] | undefined = allowWebSearch
-      ? [webSearchTool]
-      : undefined;
+    const toolsForRequest: Tool[] = [];
+    if (allowWebSearch) {
+      toolsForRequest.push(webSearchTool);
+    }
+    if (vectorStoreIds.length > 0) {
+      toolsForRequest.push(
+        {
+          type: "file_search",
+          vector_store_ids: vectorStoreIds,
+        } satisfies Tool
+      );
+    }
     const toolChoice: ToolChoiceAllowed | undefined = allowWebSearch
       ? ({
           type: "allowed_tools",
@@ -904,6 +1084,7 @@ export async function POST(req: Request) {
             role: "user" as const,
             content: userText,
             attachments: imageAttachments,
+            files: fileUploads,
           },
         ];
     const firstUserMessage = historyForTitle.find(
@@ -970,7 +1151,7 @@ export async function POST(req: Request) {
             model: targetModel,
             input: requestMessages,
             stream: true,
-            tools: webSearchTools,
+            tools: toolsForRequest.length ? toolsForRequest : undefined,
             tool_choice: toolChoice,
             include: allowWebSearch
               ? [
@@ -1011,10 +1192,10 @@ export async function POST(req: Request) {
           const searchMetadata = extractSearchMetadata(finalResponse);
           const usedWebSearch = searchMetadata.records.length > 0;
           const sources = buildSourceChips(searchMetadata.records);
-          const sourceList = buildSourceList(searchMetadata.records);
-          if (sources.length > 0 || sourceList.length > 0) {
+          const citations = extractUrlCitations(finalResponse);
+          if (sources.length > 0 || citations.length > 0) {
             console.log(
-              `[sourcesDebug] aggregated sources chips=${sources.length} list=${sourceList.length} conversationId=${conversationId}`
+              `[sourcesDebug] aggregated sources chips=${sources.length} citations=${citations.length} conversationId=${conversationId}`
             );
           } else {
             console.log(
@@ -1038,7 +1219,8 @@ export async function POST(req: Request) {
             usedWebSearch,
             searchRecords: searchMetadata.records,
             sources,
-            sourceList,
+            citations,
+            vectorStoreIds,
           };
 
           if (!assistantRowId) {
@@ -1085,10 +1267,10 @@ export async function POST(req: Request) {
             type: "sources",
             conversationId,
             messageId: assistantRowId,
-            sources: sourceList,
+            sources: citations,
           });
           console.log(
-            `[sourcesDebug] emitted sources payload conversationId=${conversationId} messageId=${assistantRowId} chips=${responseMetadata.sources.length} list=${sourceList.length}`
+            `[sourcesDebug] emitted sources payload conversationId=${conversationId} messageId=${assistantRowId} chips=${responseMetadata.sources.length} citations=${citations.length}`
           );
         } catch (err) {
           console.error("Stream error:", err);
@@ -1193,7 +1375,8 @@ function buildRouterPrompt(
   const recent = history.slice(-6).map((message) => {
     const speaker = message.role === "user" ? "User" : "Assistant";
     const attachmentNote = attachmentPlaceholder(
-      message.attachments?.length ?? 0
+      message.attachments?.length ?? 0,
+      message.files?.length ?? 0
     );
     const text = message.content?.trim().length
       ? message.content
@@ -1282,6 +1465,46 @@ function extractSearchMetadata(response: OpenAIResponse) {
     });
   }
   return { records, failed };
+}
+
+function extractUrlCitations(response: OpenAIResponse): Source[] {
+  const citations: Source[] = [];
+  const outputs = Array.isArray(response.output) ? response.output : [];
+  outputs.forEach((item) => {
+    if ((item as { type?: string }).type !== "message") {
+      return;
+    }
+    const content = Array.isArray((item as { content?: unknown }).content)
+      ? ((item as { content: ResponseOutputMessage["content"] }).content || [])
+      : [];
+    content.forEach((block) => {
+      if ((block as { type?: string }).type !== "output_text") {
+        return;
+      }
+      const annotations = Array.isArray(
+        (block as { annotations?: unknown }).annotations
+      )
+        ? ((block as { annotations: unknown[] }).annotations || [])
+        : [];
+      annotations.forEach((annotation) => {
+        if ((annotation as { type?: string }).type !== "url_citation") {
+          return;
+        }
+        const url = (annotation as { url?: unknown }).url;
+        if (typeof url !== "string" || !url.trim()) {
+          return;
+        }
+        const titleRaw = (annotation as { title?: unknown }).title;
+        citations.push({
+          url,
+          title: typeof titleRaw === "string" ? titleRaw : null,
+          startIndex: (annotation as { start_index?: number }).start_index ?? null,
+          endIndex: (annotation as { end_index?: number }).end_index ?? null,
+        });
+      });
+    });
+  });
+  return citations;
 }
 
 function logWebSearchCall(call: WebSearchCall) {
