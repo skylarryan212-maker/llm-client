@@ -877,6 +877,7 @@ export async function POST(req: Request) {
       })
     );
     const vectorStoreIdSet = new Set(gatherVectorStoreIds(validHistoryRows));
+    let vectorStoreIds = Array.from(vectorStoreIdSet);
 
     const { data: conversationRow } = await supabase
       .from("conversations")
@@ -1004,7 +1005,7 @@ export async function POST(req: Request) {
         );
       }
     }
-    const vectorStoreIds = Array.from(vectorStoreIdSet);
+    vectorStoreIds = Array.from(vectorStoreIdSet);
 
     const allowWebSearch = shouldAllowWebSearch({
       userText: userTextForContext,
