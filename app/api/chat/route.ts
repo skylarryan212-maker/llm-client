@@ -6,6 +6,10 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import type {
   Response as OpenAIResponse,
+  ResponseInput,
+  ResponseInputContent,
+  ResponseInputMessageContentList,
+  EasyInputMessage,
   Tool,
   ToolChoiceAllowed,
 } from "openai/resources/responses/responses";
@@ -484,9 +488,10 @@ function extractDomainFromUrl(input: string) {
 
 const IMAGE_ATTACHMENT_LIMIT = 4;
 
-type ContentBlock =
-  | { type: "input_text"; text: string }
-  | { type: "input_image"; image_url: { url: string } };
+type ContentBlock = Extract<
+  ResponseInputContent,
+  { type: "input_text" } | { type: "input_image" }
+>;
 
 function sanitizeImageAttachment(input: unknown): ImageAttachment | null {
   if (!input || typeof input !== "object") {
@@ -553,18 +558,19 @@ function extractAttachmentsFromMetadata(metadata: unknown): ImageAttachment[] {
 function buildContentPayload(
   text: string,
   attachments: ImageAttachment[]
-): string | ContentBlock[] {
+): string | ResponseInputMessageContentList {
   if (!attachments.length) {
     return text;
   }
-  const blocks: ContentBlock[] = [];
+  const blocks: ResponseInputMessageContentList = [];
   if (text && text.trim()) {
     blocks.push({ type: "input_text", text });
   }
   attachments.forEach((attachment) => {
     blocks.push({
       type: "input_image",
-      image_url: { url: attachment.dataUrl },
+      image_url: attachment.dataUrl,
+      detail: "auto",
     });
   });
   if (!blocks.length) {
@@ -637,7 +643,7 @@ export async function POST(req: Request) {
           id: string;
           role: "user" | "assistant";
           content: string;
-          metadata?: Record<string, unknown> | null;
+          metadata: Record<string, unknown> | null | undefined;
         } =>
           !!m &&
           typeof m.id === "string" &&
@@ -661,6 +667,7 @@ export async function POST(req: Request) {
     }
 
     let historyRowsForModel = validHistoryRows;
+    let retryUserAttachments: ImageAttachment[] = [];
 
     if (isRetryRequest && retryAssistantMessageId) {
       const assistantIndex = validHistoryRows.findIndex(
@@ -750,8 +757,6 @@ export async function POST(req: Request) {
     let assistantRowId: string | null = isRetryRequest
       ? retryAssistantMessageId ?? null
       : null;
-    let retryUserAttachments: ImageAttachment[] = [];
-
     if (isRetryRequest && retryAssistantMessageId) {
       userRowId = retryUserMessageId ?? null;
       try {
@@ -819,13 +824,16 @@ export async function POST(req: Request) {
       );
     }
 
-    const historyMessages = historyForModel.map((message) => ({
-      role: message.role,
-      content: buildContentPayload(
-        message.content,
-        message.attachments ?? []
-      ),
-    }));
+    const historyMessages: EasyInputMessage[] = historyForModel.map(
+      (message) => ({
+        role: message.role,
+        content: buildContentPayload(
+          message.content,
+          message.attachments ?? []
+        ),
+        type: "message",
+      })
+    );
 
     const allowWebSearch = shouldAllowWebSearch({
       userText: userTextForContext,
@@ -845,25 +853,35 @@ export async function POST(req: Request) {
         } satisfies ToolChoiceAllowed)
       : undefined;
 
-    const systemMessages = [
-      { role: "system" as const, content: BASE_SYSTEM_PROMPT },
-      ...(forceWebSearch ? ([
-        { role: "system" as const, content: FORCE_WEB_SEARCH_PROMPT },
-      ] as const) : []),
+    const systemMessages: EasyInputMessage[] = [
+      {
+        role: "system",
+        content: BASE_SYSTEM_PROMPT,
+        type: "message",
+      },
+      ...(forceWebSearch
+        ? ([
+            {
+              role: "system",
+              content: FORCE_WEB_SEARCH_PROMPT,
+              type: "message",
+            },
+          ] satisfies EasyInputMessage[])
+        : []),
     ];
 
-    const requestMessages = [
+    const requestMessages: ResponseInput = [
       ...systemMessages,
       ...historyMessages,
-      ...(isRetryRequest
-        ? []
-        : ([
-            {
-              role: "user" as const,
-              content: buildContentPayload(userText, imageAttachments),
-            },
-          ] as const)),
     ];
+
+    if (!isRetryRequest) {
+      requestMessages.push({
+        role: "user",
+        content: buildContentPayload(userText, imageAttachments),
+        type: "message",
+      });
+    }
 
     const targetModelKey = routerResult.modelKey;
     const targetModelFamily =
