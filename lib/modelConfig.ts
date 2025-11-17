@@ -1,5 +1,10 @@
 export type SpeedMode = "auto" | "instant" | "thinking";
-export type ModelFamily = "auto" | "gpt-5.1" | "gpt-5-mini" | "gpt-5-nano";
+export type ModelFamily =
+  | "auto"
+  | "gpt-5.1"
+  | "gpt-5-mini"
+  | "gpt-5-nano"
+  | "gpt-5-pro-2025-10-06";
 export type ReasoningEffort = "none" | "low" | "medium" | "high";
 
 export interface ModelConfig {
@@ -13,6 +18,7 @@ const MODEL_ID_MAP: Record<Exclude<ModelFamily, "auto">, string> = {
   "gpt-5.1": "gpt-5.1-2025-11-13",
   "gpt-5-mini": "gpt-5-mini-2025-08-07",
   "gpt-5-nano": "gpt-5-nano-2025-08-07",
+  "gpt-5-pro-2025-10-06": "gpt-5-pro-2025-10-06",
 };
 
 const LIGHT_REASONING_KEYWORDS = [
@@ -125,7 +131,8 @@ export function getModelAndReasoningConfig(
   const trimmedPrompt = promptText.trim();
 
   let chosenEffort: ReasoningEffort | null = null;
-  const isFullFamily = resolvedFamily === "gpt-5.1";
+  const isFullFamily =
+    resolvedFamily === "gpt-5.1" || resolvedFamily === "gpt-5-pro-2025-10-06";
 
   if (speedMode === "instant") {
     chosenEffort = isFullFamily ? "none" : "low";
@@ -162,11 +169,13 @@ export function getModelAndReasoningConfig(
 export function describeModelFamily(family: ModelFamily) {
   switch (family) {
     case "gpt-5.1":
-      return "5.1";
+      return "GPT 5.1";
     case "gpt-5-mini":
-      return "5 Mini";
+      return "GPT 5 Mini";
     case "gpt-5-nano":
-      return "5 Nano";
+      return "GPT 5 Nano";
+    case "gpt-5-pro-2025-10-06":
+      return "GPT 5 Pro (2025-10-06)";
     default:
       return "Auto";
   }

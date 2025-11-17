@@ -1,5 +1,6 @@
 export const runtime = "nodejs";
 
+import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
@@ -8,7 +9,7 @@ import type {
   Tool,
   ToolChoiceAllowed,
 } from "openai/resources/responses/responses";
-import type { Source, SourceChip } from "@/lib/chatTypes";
+import type { ImageAttachment, Source, SourceChip } from "@/lib/chatTypes";
 import {
   getModelAndReasoningConfig,
   type ModelFamily,
@@ -42,11 +43,13 @@ function getSupabaseClient() {
 type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
+  attachments?: ImageAttachment[];
 };
 type PersistedHistoryRow = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
@@ -130,6 +133,7 @@ const MODEL_FAMILY_TO_MODE: Record<Exclude<ModelFamily, "auto">, ModelKey> = {
   "gpt-5-nano": "nano",
   "gpt-5-mini": "mini",
   "gpt-5.1": "full",
+  "gpt-5-pro-2025-10-06": "full",
 };
 
 const MODEL_KEY_TO_FAMILY: Record<ModelKey, Exclude<ModelFamily, "auto">> = {
@@ -182,6 +186,60 @@ const LIVE_DATA_HINTS = [
   "launch",
   "trend",
 ];
+
+const EMERGING_ENTITY_KEYWORDS = [
+  "buy",
+  "purchase",
+  "preorder",
+  "pre-order",
+  "release",
+  "released",
+  "launch",
+  "launched",
+  "announce",
+  "announced",
+  "available",
+  "availability",
+  "in stock",
+  "stock",
+  "price",
+  "prices",
+  "cost",
+  "ticket",
+  "tickets",
+  "order",
+  "exists",
+  "exist",
+  "new",
+  "latest",
+  "upcoming",
+];
+
+const KNOWN_ENTITY_PATTERNS = [
+  /rtx\s?\d{3,4}/i,
+  /geforce/i,
+  /radeon/i,
+  /iphone/i,
+  /galaxy/i,
+  /pixel/i,
+  /tesla/i,
+  /model\s?[sx3y]/i,
+  /macbook/i,
+  /ipad/i,
+  /playstation/i,
+  /xbox/i,
+  /gpu/i,
+  /cpu/i,
+  /summit/i,
+  /conference/i,
+  /expo/i,
+  /festival/i,
+  /tournament/i,
+  /world cup/i,
+  /olympics/i,
+];
+
+const PRODUCT_STYLE_PATTERN = /\b(?:[A-Z]{2,}[A-Za-z0-9+\-]*\d{2,5}|[A-Za-z]+\s?\d{4})\b/;
 
 const DIRECT_WEB_REQUEST_PATTERNS = [
   /\bsearch (?:the )?(?:web|internet)\b/i,
@@ -255,6 +313,7 @@ function parseModelFamily(value: unknown): ModelFamily {
     "gpt-5.1",
     "gpt-5-mini",
     "gpt-5-nano",
+    "gpt-5-pro-2025-10-06",
   ];
   if (typeof value === "string") {
     const normalized = value.toLowerCase() as ModelFamily;
@@ -295,7 +354,27 @@ function shouldAllowWebSearch({
   if (/\bsources?\b/i.test(trimmed) || /\breference\b/i.test(trimmed)) {
     return true;
   }
+  if (referencesEmergingEntity(trimmed)) {
+    return true;
+  }
   return false;
+}
+
+function referencesEmergingEntity(text: string) {
+  if (!text.trim()) {
+    return false;
+  }
+  if (KNOWN_ENTITY_PATTERNS.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+  const lower = text.toLowerCase();
+  const hasKeyword = EMERGING_ENTITY_KEYWORDS.some((keyword) =>
+    lower.includes(keyword)
+  );
+  if (!hasKeyword) {
+    return false;
+  }
+  return PRODUCT_STYLE_PATTERN.test(text);
 }
 
 function buildSourceChips(records: SearchRecord[], maxSources = 4): SourceChip[] {
@@ -403,6 +482,106 @@ function extractDomainFromUrl(input: string) {
   }
 }
 
+const IMAGE_ATTACHMENT_LIMIT = 4;
+
+type ContentBlock =
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url: { url: string } };
+
+function sanitizeImageAttachment(input: unknown): ImageAttachment | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const candidate = input as Partial<ImageAttachment> & {
+    dataUrl?: string;
+  };
+  const rawDataUrl =
+    typeof candidate.dataUrl === "string" ? candidate.dataUrl.trim() : "";
+  if (!rawDataUrl || !rawDataUrl.startsWith("data:image/")) {
+    return null;
+  }
+  const id =
+    typeof candidate.id === "string" && candidate.id.trim().length > 0
+      ? candidate.id
+      : randomUUID();
+  const name =
+    typeof candidate.name === "string" && candidate.name.trim().length > 0
+      ? candidate.name
+      : "image";
+  const mimeType =
+    typeof candidate.mimeType === "string" && candidate.mimeType.trim().length > 0
+      ? candidate.mimeType
+      : "image/*";
+  const size =
+    typeof candidate.size === "number" && Number.isFinite(candidate.size)
+      ? candidate.size
+      : undefined;
+  return {
+    id,
+    name,
+    mimeType,
+    dataUrl: rawDataUrl,
+    size,
+  };
+}
+
+function sanitizeAttachmentList(value: unknown): ImageAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const attachments: ImageAttachment[] = [];
+  for (const raw of value) {
+    const normalized = sanitizeImageAttachment(raw);
+    if (normalized) {
+      attachments.push(normalized);
+    }
+    if (attachments.length >= IMAGE_ATTACHMENT_LIMIT) {
+      break;
+    }
+  }
+  return attachments;
+}
+
+function extractAttachmentsFromMetadata(metadata: unknown): ImageAttachment[] {
+  if (!metadata || typeof metadata !== "object") {
+    return [];
+  }
+  const raw = (metadata as { attachments?: unknown }).attachments;
+  return sanitizeAttachmentList(raw);
+}
+
+function buildContentPayload(
+  text: string,
+  attachments: ImageAttachment[]
+): string | ContentBlock[] {
+  if (!attachments.length) {
+    return text;
+  }
+  const blocks: ContentBlock[] = [];
+  if (text && text.trim()) {
+    blocks.push({ type: "input_text", text });
+  }
+  attachments.forEach((attachment) => {
+    blocks.push({
+      type: "input_image",
+      image_url: { url: attachment.dataUrl },
+    });
+  });
+  if (!blocks.length) {
+    blocks.push({ type: "input_text", text: "(image-only message)" });
+  }
+  return blocks;
+}
+
+function attachmentPlaceholder(count: number) {
+  if (count <= 0) {
+    return "";
+  }
+  return count === 1
+    ? "[image attachment]"
+    : `[${count} image attachments]`;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -415,6 +594,8 @@ export async function POST(req: Request) {
         ? "auto"
         : MODEL_FAMILY_TO_MODE[requestedModelFamily];
     const forceWebSearch = Boolean(body.forceWebSearch);
+    const rawImages = Array.isArray(body.images) ? body.images : [];
+    const sanitizedImageAttachments = sanitizeAttachmentList(rawImages);
     const retryAssistantMessageId =
       typeof body.retryAssistantMessageId === "string" &&
       body.retryAssistantMessageId.trim().length > 0
@@ -425,13 +606,6 @@ export async function POST(req: Request) {
       body.retryUserMessageId.trim().length > 0
         ? body.retryUserMessageId.trim()
         : null;
-
-    if (!userText) {
-      return NextResponse.json(
-        { error: "Empty message" },
-        { status: 400 }
-      );
-    }
 
     if (!conversationId) {
       return NextResponse.json(
@@ -444,7 +618,7 @@ export async function POST(req: Request) {
 
     const { data: historyRows, error: historyError } = await supabase
       .from("messages")
-      .select("id, role, content")
+      .select("id, role, content, metadata")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true })
       .limit(40);
@@ -463,13 +637,19 @@ export async function POST(req: Request) {
           id: string;
           role: "user" | "assistant";
           content: string;
+          metadata?: Record<string, unknown> | null;
         } =>
           !!m &&
           typeof m.id === "string" &&
           typeof m.content === "string" &&
           (m.role === "user" || m.role === "assistant")
       )
-      .map((m) => ({ id: m.id, role: m.role, content: m.content }));
+      .map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        metadata: m.metadata ?? null,
+      }));
 
     const isRetryRequest = Boolean(retryAssistantMessageId);
 
@@ -521,13 +701,35 @@ export async function POST(req: Request) {
         );
       }
 
+      const retryUserRow = validHistoryRows[userIndex];
+      retryUserAttachments = extractAttachmentsFromMetadata(
+        retryUserRow.metadata
+      );
+
       historyRowsForModel = validHistoryRows.slice(0, userIndex + 1);
     }
+
+    const imageAttachments = isRetryRequest ? [] : sanitizedImageAttachments;
+    const attachmentCountForContext = isRetryRequest
+      ? retryUserAttachments.length
+      : imageAttachments.length;
+    const requestHasAttachments = attachmentCountForContext > 0;
+
+    if (!userText && !requestHasAttachments) {
+      return NextResponse.json(
+        { error: "Empty message" },
+        { status: 400 }
+      );
+    }
+
+    const userTextForContext =
+      userText || attachmentPlaceholder(attachmentCountForContext);
 
     const historyForModel: HistoryMessage[] = historyRowsForModel.map(
       (message) => ({
         role: message.role,
         content: message.content,
+        attachments: extractAttachmentsFromMetadata(message.metadata),
       })
     );
 
@@ -548,6 +750,7 @@ export async function POST(req: Request) {
     let assistantRowId: string | null = isRetryRequest
       ? retryAssistantMessageId ?? null
       : null;
+    let retryUserAttachments: ImageAttachment[] = [];
 
     if (isRetryRequest && retryAssistantMessageId) {
       userRowId = retryUserMessageId ?? null;
@@ -567,6 +770,9 @@ export async function POST(req: Request) {
           conversation_id: conversationId,
           role: "user",
           content: userText,
+          metadata: imageAttachments.length
+            ? { attachments: imageAttachments }
+            : null,
         })
         .select("id")
         .single();
@@ -583,7 +789,7 @@ export async function POST(req: Request) {
     const routerResult = await routeModel({
       openai,
       history: historyForModel,
-      userText,
+      userText: userTextForContext || userText,
       requestedMode,
       requestTitle: needsTitle && requestedMode === "auto",
     });
@@ -601,7 +807,7 @@ export async function POST(req: Request) {
     if (needsTitle && !routerResult.titleSuggestion && requestedMode !== "auto") {
       manualTitlePromise = requestNanoTitle({
         openai,
-        userMessage: userText,
+        userMessage: userTextForContext || userText,
       }).then((maybeTitle) =>
         maybeTitle
           ? applyTitleSuggestion({
@@ -615,11 +821,14 @@ export async function POST(req: Request) {
 
     const historyMessages = historyForModel.map((message) => ({
       role: message.role,
-      content: message.content,
+      content: buildContentPayload(
+        message.content,
+        message.attachments ?? []
+      ),
     }));
 
     const allowWebSearch = shouldAllowWebSearch({
-      userText,
+      userText: userTextForContext,
       forceWebSearch,
     });
     const webSearchTool = { type: "web_search" } satisfies Tool & {
@@ -646,25 +855,46 @@ export async function POST(req: Request) {
     const requestMessages = [
       ...systemMessages,
       ...historyMessages,
-      ...(isRetryRequest ? [] : ([{ role: "user" as const, content: userText }] as const)),
+      ...(isRetryRequest
+        ? []
+        : ([
+            {
+              role: "user" as const,
+              content: buildContentPayload(userText, imageAttachments),
+            },
+          ] as const)),
     ];
 
     const targetModelKey = routerResult.modelKey;
-    const targetModelFamily = MODEL_KEY_TO_FAMILY[targetModelKey];
+    const targetModelFamily =
+      requestedModelFamily === "auto"
+        ? MODEL_KEY_TO_FAMILY[targetModelKey]
+        : requestedModelFamily;
     const modelConfig = getModelAndReasoningConfig(
       targetModelFamily,
       speedMode,
-      userText
+      userTextForContext || userText
     );
     const targetModel = modelConfig.model;
 
     const encoder = new TextEncoder();
     const historyForTitle = isRetryRequest
       ? historyForModel
-      : [...historyForModel, { role: "user" as const, content: userText }];
+      : [
+          ...historyForModel,
+          {
+            role: "user" as const,
+            content: userText,
+            attachments: imageAttachments,
+          },
+        ];
     const firstUserMessage = historyForTitle.find(
       (msg) => msg.role === "user"
     )?.content;
+    const userMessageForTitle =
+      firstUserMessage && firstUserMessage.trim().length > 0
+        ? firstUserMessage
+        : userTextForContext || userText;
     const isFirstAssistantResponse = !historyForModel.some(
       (msg) => msg.role === "assistant"
     );
@@ -674,7 +904,7 @@ export async function POST(req: Request) {
         openai,
         supabase,
         conversationId,
-        userMessage: firstUserMessage ?? userText,
+        userMessage: userMessageForTitle,
         assistantMessage: null,
         allowUserOnly: true,
       });
@@ -853,7 +1083,7 @@ export async function POST(req: Request) {
               openai,
               supabase,
               conversationId,
-              userMessage: firstUserMessage ?? userText,
+              userMessage: userMessageForTitle,
               assistantMessage: fullAssistantMessage,
             });
           }
@@ -944,7 +1174,15 @@ function buildRouterPrompt(
 ) {
   const recent = history.slice(-6).map((message) => {
     const speaker = message.role === "user" ? "User" : "Assistant";
-    return `${speaker}: ${message.content}`;
+    const attachmentNote = attachmentPlaceholder(
+      message.attachments?.length ?? 0
+    );
+    const text = message.content?.trim().length
+      ? message.content
+      : attachmentNote || "(no text)";
+    return attachmentNote
+      ? `${speaker}: ${text} ${attachmentNote}`.trim()
+      : `${speaker}: ${text}`;
   });
 
   const recentBlock = recent.length > 0 ? recent.join("\n") : "(no prior messages)";
