@@ -2690,6 +2690,26 @@ type RetryOptions = {
     });
   }
 
+  const handleStopGeneration = useCallback(() => {
+    const activeId = activeAssistantMessageId;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsStreaming(false);
+    setStreamingConversationId(null);
+    resetThinkingIndicator();
+    setSearchIndicator(null);
+    setFileReadingIndicator(null);
+    responseTimingRef.current = {
+      start: null,
+      firstToken: null,
+      assistantMessageId: null,
+    };
+    if (activeId) {
+      pendingMetadataPersistRef.current.delete(activeId);
+    }
+    setActiveAssistantMessageId(null);
+  }, [activeAssistantMessageId, resetThinkingIndicator]);
+
   useEffect(() => {
     const previousConversationId = previousConversationIdRef.current;
     if (previousConversationId !== selectedConversationId) {
@@ -2746,26 +2766,6 @@ type RetryOptions = {
       retry: retryPayload,
     });
   }
-
-  const handleStopGeneration = useCallback(() => {
-    const activeId = activeAssistantMessageId;
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    setIsStreaming(false);
-    setStreamingConversationId(null);
-    resetThinkingIndicator();
-    setSearchIndicator(null);
-    setFileReadingIndicator(null);
-    responseTimingRef.current = {
-      start: null,
-      firstToken: null,
-      assistantMessageId: null,
-    };
-    if (activeId) {
-      pendingMetadataPersistRef.current.delete(activeId);
-    }
-    setActiveAssistantMessageId(null);
-  }, [activeAssistantMessageId, resetThinkingIndicator]);
 
   async function handleCopyMessage(message: ChatMessage, fallbackId?: string) {
     if (!message.content) return;
