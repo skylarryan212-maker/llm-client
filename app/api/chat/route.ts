@@ -3,7 +3,6 @@ export const runtime = "nodejs";
 import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
 import type {
   Response as OpenAIResponse,
   ResponseInput,
@@ -20,6 +19,7 @@ import {
   type ReasoningEffort,
   type SpeedMode,
 } from "@/lib/modelConfig";
+import { getServerSupabaseClient } from "@/lib/serverSupabase";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -27,21 +27,6 @@ function getOpenAIClient() {
     throw new Error("Missing OPENAI_API_KEY environment variable");
   }
   return new OpenAI({ apiKey });
-}
-
-function getSupabaseClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseServiceKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseServiceKey) {
-    throw new Error("Missing Supabase configuration");
-  }
-
-  return createClient(supabaseUrl, supabaseServiceKey, {
-    auth: { persistSession: false },
-  });
 }
 
 type HistoryMessage = {
@@ -620,21 +605,23 @@ export async function POST(req: Request) {
       );
     }
 
-    const supabase = getSupabaseClient();
+    const supabase = getServerSupabaseClient();
 
-    const { data: historyRows, error: historyError } = await supabase
-      .from("messages")
-      .select("id, role, content, metadata")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
-      .limit(40);
+    let historyRows: unknown[] = [];
+    try {
+      const { data, error: historyError } = await supabase
+        .from("messages")
+        .select("id, role, content, metadata")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true })
+        .limit(40);
 
-    if (historyError) {
+      if (historyError) {
+        throw historyError;
+      }
+      historyRows = data || [];
+    } catch (historyError) {
       console.error("Failed to load history", historyError);
-      return NextResponse.json(
-        { error: "Unable to load conversation history" },
-        { status: 500 }
-      );
     }
 
     const validHistoryRows: PersistedHistoryRow[] = (historyRows || [])
@@ -1478,7 +1465,7 @@ async function ensureChatTitle({
   allowUserOnly = false,
 }: {
   openai: OpenAI;
-  supabase: ReturnType<typeof getSupabaseClient>;
+  supabase: ReturnType<typeof getServerSupabaseClient>;
   conversationId: string;
   userMessage: string;
   assistantMessage: string | null;
@@ -1606,7 +1593,7 @@ async function applyTitleSuggestion({
   conversationId,
   suggestedTitle,
 }: {
-  supabase: ReturnType<typeof getSupabaseClient>;
+  supabase: ReturnType<typeof getServerSupabaseClient>;
   conversationId: string;
   suggestedTitle?: string | null;
 }): Promise<string | null> {

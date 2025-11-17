@@ -527,11 +527,36 @@ export default function Home() {
       if (!conversationId) return;
       if (!opts.silent) setIsLoadingMessages(true);
 
-      const { data, error } = await supabase
-        .from("messages")
-        .select("id, role, content, created_at, metadata")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
+      type ApiMessageRow = {
+        id?: string;
+        role: "user" | "assistant";
+        content: string;
+        metadata?: MessageMetadata | null;
+      };
+
+      let rows: ApiMessageRow[] = [];
+      try {
+        const response = await fetch(
+          `/api/messages?conversationId=${encodeURIComponent(conversationId)}`,
+          { cache: "no-store" }
+        );
+        if (!response.ok) {
+          throw new Error(
+            `Failed to load messages (${response.status} ${response.statusText})`
+          );
+        }
+        const payload = (await response.json()) as {
+          messages?: ApiMessageRow[];
+        };
+        rows = Array.isArray(payload.messages) ? payload.messages : [];
+      } catch (error) {
+        console.error("Load messages error", error);
+        if (!(conversationHistoryRef.current.get(conversationId)?.length ?? 0)) {
+          setMessages([]);
+        }
+        if (!opts.silent) setIsLoadingMessages(false);
+        return;
+      }
 
       if (!opts.force && selectedConversationId !== conversationId) {
         if (!opts.silent) setIsLoadingMessages(false);
@@ -544,59 +569,51 @@ export default function Home() {
         return;
       }
 
-      if (error) {
-        console.error("Load messages error", error);
-        if (!(conversationHistoryRef.current.get(conversationId)?.length ?? 0)) {
-          setMessages([]);
-        }
-      } else {
-        console.log(
-          `[historyDebug] loaded ${data?.length ?? 0} messages for conversationId=${conversationId}`
-        );
-        const nextMessages = (data || []).map((m) => {
-          const metadata =
-            ((m as { metadata?: MessageMetadata }).metadata || {}) as MessageMetadata;
-          const attachments = Array.isArray(metadata.attachments)
-            ? metadata.attachments
-            : [];
-          const thoughtSeconds = metadata.thoughtDurationSeconds;
-          const thoughtLabel =
-            metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
-              ? metadata.thoughtDurationLabel
-              : typeof thoughtSeconds === "number"
-                ? formatThoughtDurationLabel(thoughtSeconds)
-                : undefined;
-          return {
-            id: (m as { id?: string }).id,
-            persistedId: (m as { id?: string }).id,
-            role: m.role,
-            content: m.content,
-            attachments,
-            usedModel: metadata.usedModel,
-            usedModelMode: metadata.usedModelMode,
-            usedModelFamily: metadata.usedModelFamily,
-            requestedModelFamily: metadata.requestedModelFamily,
-            speedMode: metadata.speedMode,
-            reasoningEffort: metadata.reasoningEffort,
-            usedWebSearch: metadata.usedWebSearch,
-            searchRecords: metadata.searchRecords || [],
-            metadata,
-            thoughtDurationSeconds: thoughtSeconds,
-            thoughtDurationLabel: thoughtLabel,
-          } as ChatMessage;
-        });
+      console.log(
+        `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId}`
+      );
+      const nextMessages = rows.map((m) => {
+        const metadata = (m.metadata || {}) as MessageMetadata;
+        const attachments = Array.isArray(metadata.attachments)
+          ? metadata.attachments
+          : [];
+        const thoughtSeconds = metadata.thoughtDurationSeconds;
+        const thoughtLabel =
+          metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
+            ? metadata.thoughtDurationLabel
+            : typeof thoughtSeconds === "number"
+              ? formatThoughtDurationLabel(thoughtSeconds)
+              : undefined;
+        return {
+          id: m.id,
+          persistedId: m.id,
+          role: m.role,
+          content: m.content,
+          attachments,
+          usedModel: metadata.usedModel,
+          usedModelMode: metadata.usedModelMode,
+          usedModelFamily: metadata.usedModelFamily,
+          requestedModelFamily: metadata.requestedModelFamily,
+          speedMode: metadata.speedMode,
+          reasoningEffort: metadata.reasoningEffort,
+          usedWebSearch: metadata.usedWebSearch,
+          searchRecords: metadata.searchRecords || [],
+          metadata,
+          thoughtDurationSeconds: thoughtSeconds,
+          thoughtDurationLabel: thoughtLabel,
+        } as ChatMessage;
+      });
 
-        if (
-          nextMessages.length === 0 &&
-          (conversationHistoryRef.current.get(conversationId)?.length ?? 0) > 0
-        ) {
-          console.warn(
-            "Skipping empty history update because cached messages exist",
-            conversationId
-          );
-        } else {
-          setMessages(nextMessages);
-        }
+      if (
+        nextMessages.length === 0 &&
+        (conversationHistoryRef.current.get(conversationId)?.length ?? 0) > 0
+      ) {
+        console.warn(
+          "Skipping empty history update because cached messages exist",
+          conversationId
+        );
+      } else {
+        setMessages(nextMessages);
       }
 
       if (!opts.silent) setIsLoadingMessages(false);
