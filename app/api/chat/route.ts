@@ -631,11 +631,24 @@ export async function POST(req: Request) {
           role: "user" | "assistant";
           content: string;
           metadata: Record<string, unknown> | null | undefined;
-        } =>
-          !!m &&
-          typeof m.id === "string" &&
-          typeof m.content === "string" &&
-          (m.role === "user" || m.role === "assistant")
+        } => {
+          if (!m || typeof m !== "object") {
+            return false;
+          }
+
+          const candidate = m as {
+            id?: unknown;
+            role?: unknown;
+            content?: unknown;
+            metadata?: Record<string, unknown> | null | undefined;
+          };
+
+          return (
+            typeof candidate.id === "string" &&
+            typeof candidate.content === "string" &&
+            (candidate.role === "user" || candidate.role === "assistant")
+          );
+        }
       )
       .map((m) => ({
         id: m.id,
