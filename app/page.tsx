@@ -371,7 +371,7 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const waveformDataRef = useRef<Uint8Array | null>(null);
+  const waveformDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const waveformAnimationRef = useRef<number | null>(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -397,6 +397,24 @@ export default function Home() {
   const [waveformLevels, setWaveformLevels] = useState<number[]>(() =>
     createEmptyWaveform()
   );
+
+  const cleanupWaveformVisualizer = useCallback(() => {
+    if (waveformAnimationRef.current) {
+      cancelAnimationFrame(waveformAnimationRef.current);
+      waveformAnimationRef.current = null;
+    }
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+    audioSourceRef.current?.disconnect();
+    audioSourceRef.current = null;
+    const ctx = audioContextRef.current;
+    if (ctx) {
+      ctx.close().catch(() => null);
+      audioContextRef.current = null;
+    }
+    waveformDataRef.current = null;
+    setWaveformLevels(createEmptyWaveform());
+  }, []);
 
   useEffect(() => {
     if (!headerModelMenuOpen) {
@@ -1008,24 +1026,6 @@ export default function Home() {
     setComposerError(null);
   };
 
-  const cleanupWaveformVisualizer = useCallback(() => {
-    if (waveformAnimationRef.current) {
-      cancelAnimationFrame(waveformAnimationRef.current);
-      waveformAnimationRef.current = null;
-    }
-    analyserRef.current?.disconnect();
-    analyserRef.current = null;
-    audioSourceRef.current?.disconnect();
-    audioSourceRef.current = null;
-    const ctx = audioContextRef.current;
-    if (ctx) {
-      ctx.close().catch(() => null);
-      audioContextRef.current = null;
-    }
-    waveformDataRef.current = null;
-    setWaveformLevels(createEmptyWaveform());
-  }, []);
-
   const startWaveformVisualizer = useCallback(
     (stream: MediaStream) => {
       if (typeof window === "undefined") {
@@ -1046,7 +1046,9 @@ export default function Home() {
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 64;
         source.connect(analyser);
-        const buffer = new Uint8Array(analyser.frequencyBinCount);
+        const buffer: Uint8Array<ArrayBuffer> = new Uint8Array(
+          new ArrayBuffer(analyser.frequencyBinCount)
+        );
         audioContextRef.current = audioContext;
         audioSourceRef.current = source;
         analyserRef.current = analyser;

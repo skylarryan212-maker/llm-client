@@ -101,6 +101,21 @@ function isWebSearchCall(value: unknown): value is WebSearchCall {
   return (value as { type?: string }).type === "web_search_call";
 }
 
+type FileSearchCallFailedEvent = {
+  type: "response.file_search_call.failed";
+};
+
+function isFileSearchCallFailedEvent(
+  event: unknown
+): event is FileSearchCallFailedEvent {
+  return (
+    typeof event === "object" &&
+    event !== null &&
+    "type" in event &&
+    (event as { type?: string }).type === "response.file_search_call.failed"
+  );
+}
+
 type SearchStatusEvent =
   | { type: "search-start"; query: string }
   | { type: "search-complete"; query: string; results?: number }
@@ -1220,7 +1235,7 @@ export async function POST(req: Request) {
               sendStatusUpdate({ type: "file-reading-start" });
             } else if (event.type === "response.file_search_call.completed") {
               sendStatusUpdate({ type: "file-reading-complete" });
-            } else if (event.type === "response.file_search_call.failed") {
+            } else if (isFileSearchCallFailedEvent(event)) {
               sendStatusUpdate({
                 type: "file-reading-error",
                 message: "Unable to read documents.",
