@@ -291,6 +291,25 @@ function VoiceWaveIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function MicrophoneIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z" />
+      <path d="M19 11a7 7 0 0 1-14 0" />
+      <path d="M12 19v3" />
+    </svg>
+  );
+}
+
 function createLocalId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -381,6 +400,50 @@ function formatSearchSiteLabel(hostname?: string | null) {
   return SEARCH_DOMAIN_LABELS[normalized] ?? normalized;
 }
 
+function formatSearchedDomainsLine(domains?: string[] | null) {
+  if (!Array.isArray(domains)) {
+    return "";
+  }
+  const seen = new Set<string>();
+  const ordered = domains
+    .map((label) => (typeof label === "string" ? label.trim() : ""))
+    .filter((label) => {
+      if (!label) return false;
+      const normalized = label.toLowerCase();
+      if (seen.has(normalized)) {
+        return false;
+      }
+      seen.add(normalized);
+      return true;
+    });
+  if (!ordered.length) {
+    return "";
+  }
+  const preview = ordered.slice(0, 3).join(", ");
+  const remainder = ordered.length - Math.min(3, ordered.length);
+  const suffix = remainder > 0 ? ` + ${remainder} other${remainder === 1 ? "" : "s"}` : "";
+  return `Searched ${preview}${suffix}`;
+}
+
+function buildWaveformPath(levels: number[], width = 100, height = 32) {
+  if (!levels.length) {
+    return `M0 ${height / 2} L${width} ${height / 2}`;
+  }
+  const centerY = height / 2;
+  const step = levels.length > 1 ? width / (levels.length - 1) : width;
+  let path = `M0 ${centerY}`;
+  levels.forEach((level, index) => {
+    const intensity = Math.max(0, Math.min(1, level));
+    const amplitude = 2 + intensity * (centerY - 4);
+    const direction = index % 2 === 0 ? 1 : -1;
+    const x = Number((index * step).toFixed(2));
+    const y = Number((centerY - direction * amplitude).toFixed(2));
+    path += ` L${x} ${y}`;
+  });
+  path += ` L${width} ${centerY}`;
+  return path;
+}
+
 function deriveSearchDomain(
   searchRecords?: SearchRecord[] | null,
   citations?: Source[] | null
@@ -469,6 +532,39 @@ function collectDomainsFromCitations(citations?: Source[] | null) {
   return additions;
 }
 
+function extractDomainsFromMetadataChunk(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object") {
+    return [] as string[];
+  }
+  const webSearchEntries = Array.isArray(
+    (metadata as { web_search?: unknown }).web_search
+  )
+    ? ((metadata as { web_search: unknown[] }).web_search || [])
+    : [];
+  const domains: string[] = [];
+  webSearchEntries.forEach((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const results = Array.isArray((entry as { results?: unknown }).results)
+      ? ((entry as { results: unknown[] }).results || [])
+      : [];
+    results.forEach((result) => {
+      if (!result || typeof result !== "object") {
+        return;
+      }
+      const url = (result as { url?: unknown }).url;
+      if (typeof url === "string" && url.trim().length > 0) {
+        const domainLabel = formatSearchSiteLabel(extractDomainFromUrl(url));
+        if (domainLabel) {
+          domains.push(domainLabel);
+        }
+      }
+    });
+  });
+  return domains;
+}
+
 function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
   if (!metadata) {
     return null;
@@ -506,6 +602,8 @@ export default function Home() {
   const [composerError, setComposerError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] =
+    useState<string | null>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
@@ -542,6 +640,7 @@ export default function Home() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const waveformDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const waveformAnimationRef = useRef<number | null>(null);
+  const previousConversationIdRef = useRef<string | null>(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [activeAssistantMessageId, setActiveAssistantMessageId] =
@@ -557,8 +656,7 @@ export default function Home() {
     null
   );
   const [searchIndicator, setSearchIndicator] = useState<
-    { message: string; variant: "running" | "error"; siteLabel?: string }
-      | null
+    { message: string; variant: "running" | "error"; domains: string[] } | null
   >(null);
   const [fileReadingIndicator, setFileReadingIndicator] = useState<
     "running" | "error" | null
@@ -568,6 +666,27 @@ export default function Home() {
     createEmptyWaveform()
   );
   const [isMultilineInput, setIsMultilineInput] = useState(false);
+  const applyLiveSearchDomains = useCallback(
+    (domains: string[]) => {
+      if (!domains.length) {
+        return;
+      }
+      setSearchIndicator((prev) => {
+        if (!prev || prev.variant !== "running") {
+          return prev;
+        }
+        const merged = mergeSearchedDomains(prev.domains, domains);
+        const unchanged =
+          merged.length === prev.domains.length &&
+          merged.every((label, index) => label === prev.domains[index]);
+        if (unchanged) {
+          return prev;
+        }
+        return { ...prev, domains: merged };
+      });
+    },
+    []
+  );
 
   const cleanupWaveformVisualizer = useCallback(() => {
     if (waveformAnimationRef.current) {
@@ -1029,6 +1148,10 @@ export default function Home() {
   const canSendMessage = createImageArmed
     ? trimmedInput.length > 0 && !hasComposerAttachments
     : trimmedInput.length > 0 || hasComposerAttachments;
+  const searchStatusSubtext =
+    searchIndicator && searchIndicator.variant === "running"
+      ? formatSearchedDomainsLine(searchIndicator.domains)
+      : "";
   const headerModelLabel =
     modelFamily === "auto"
       ? `Auto (${describeModelFamily("gpt-5-mini")})`
@@ -1039,14 +1162,15 @@ export default function Home() {
       : SPEED_LABELS[speedMode];
   const imageAttachmentLimitReached =
     imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
-  const isVoiceFlowActive = isRecording || isTranscribing;
+  const isComposerStreaming =
+    isStreaming && streamingConversationId === selectedConversationId;
   type PrimaryActionMode =
     | "stop"
     | "confirm-recording"
     | "transcribing"
     | "send"
-    | "voice";
-  const primaryActionMode: PrimaryActionMode = isStreaming
+    | "idle";
+  const primaryActionMode: PrimaryActionMode = isComposerStreaming
     ? "stop"
     : isRecording
       ? "confirm-recording"
@@ -1054,7 +1178,7 @@ export default function Home() {
         ? "transcribing"
         : canSendMessage
           ? "send"
-          : "voice";
+          : "idle";
   const primaryButtonDisabled = primaryActionMode === "transcribing";
   const primaryButtonAriaLabel = (() => {
     switch (primaryActionMode) {
@@ -1066,14 +1190,71 @@ export default function Home() {
         return "Transcribing voice input";
       case "send":
         return createImageArmed ? "Send image prompt" : "Send message";
-      case "voice":
+      case "idle":
       default:
-        return "Start voice input";
+        return "Voice chat (coming soon)";
     }
   })();
   const composerShapeClass = isMultilineInput
-    ? "rounded-[26px] py-2.5"
+    ? "rounded-[24px] py-2.5"
     : "rounded-full py-1.5";
+  const composerPlaceholder = isTranscribing
+    ? "Transcribing voice input…"
+    : "Message the assistant…";
+  const composerContainerClass = isRecording
+    ? "flex w-full items-center gap-3 border border-red-500/40 bg-[#1b0a0d]/90 px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition rounded-full py-1.5"
+    : `flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`;
+  const recordingWaveformPath = useMemo(
+    () => buildWaveformPath(waveformLevels),
+    [waveformLevels]
+  );
+  const micDisabled = isRecording || isTranscribing || isComposerStreaming;
+  const renderPrimaryButton = () => (
+    <button
+      type="button"
+      onClick={handlePrimaryAction}
+      disabled={primaryButtonDisabled}
+      className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+        primaryActionMode === "stop"
+          ? "hover:bg-[#225fd0]"
+          : "hover:bg-[#3c7cff]"
+      } ${primaryButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
+      aria-label={primaryButtonAriaLabel}
+    >
+      {primaryActionMode === "stop" ? (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          className="h-4 w-4"
+          fill="currentColor"
+        >
+          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+        </svg>
+      ) : primaryActionMode === "confirm-recording" ? (
+        <CheckmarkIcon className="h-5 w-5" />
+      ) : primaryActionMode === "transcribing" ? (
+        <span className="inline-flex h-5 w-5 items-center justify-center">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
+        </span>
+      ) : primaryActionMode === "send" ? (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          className="h-5 w-5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 18V6" />
+          <path d="M6 12l6-6 6 6" />
+        </svg>
+      ) : (
+        <VoiceWaveIcon className="h-5 w-5" />
+      )}
+    </button>
+  );
   const handlePrimaryAction = () => {
     if (primaryActionMode === "stop") {
       handleStopGeneration();
@@ -1094,7 +1275,9 @@ export default function Home() {
       }
       return;
     }
-    void startRecording();
+    if (primaryActionMode === "idle") {
+      return;
+    }
   };
 
   // ------------------------------------------------------------
@@ -1371,10 +1554,10 @@ export default function Home() {
   );
 
   useEffect(() => {
-    if (isVoiceFlowActive) {
+    if (isRecording) {
       setComposerMenuOpen(false);
     }
-  }, [isVoiceFlowActive]);
+  }, [isRecording]);
 
   const startRecording = useCallback(async () => {
     if (typeof window === "undefined" || typeof MediaRecorder === "undefined") {
@@ -1614,6 +1797,7 @@ type RetryOptions = {
     }
     setComposerError(null);
     setIsStreaming(true);
+    setStreamingConversationId(selectedConversationId);
     setComposerMenuOpen(false);
     setRowMenu(null);
     setMoveMenuConversationId(null);
@@ -1641,6 +1825,8 @@ type RetryOptions = {
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
       }
+
+      setStreamingConversationId(conversationId);
 
       if (!assistantMessageId) {
         assistantMessageId = createLocalId();
@@ -1796,6 +1982,10 @@ type RetryOptions = {
           firstToken: null,
           assistantMessageId: null,
         };
+        setStreamingConversationId((current) =>
+          conversationId && current === conversationId ? null : current
+        );
+        setIsStreaming(false);
       };
 
       while (!finished) {
@@ -1849,6 +2039,10 @@ type RetryOptions = {
                         meta.reasoningEffort ??
                         msg.metadata?.reasoningEffort ??
                         requestedReasoningEffort;
+                      const incomingThinkingMs =
+                        typeof meta.thinkingDurationMs === "number"
+                          ? meta.thinkingDurationMs
+                          : msg.metadata?.thinkingDurationMs;
                       const mergedMetadata: MessageMetadata = {
                         ...(msg.metadata || {}),
                         usedModel: meta.usedModel ?? msg.metadata?.usedModel,
@@ -1883,8 +2077,16 @@ type RetryOptions = {
                         vectorStoreIds:
                           meta.vectorStoreIds ??
                           msg.metadata?.vectorStoreIds,
-                        thoughtDurationSeconds: msg.thoughtDurationSeconds,
-                        thoughtDurationLabel: msg.thoughtDurationLabel,
+                        thinkingDurationMs: incomingThinkingMs,
+                        thoughtDurationSeconds:
+                          typeof incomingThinkingMs === "number"
+                            ? incomingThinkingMs / 1000
+                            : msg.thoughtDurationSeconds,
+                        thoughtDurationLabel:
+                          msg.thoughtDurationLabel &&
+                          msg.thoughtDurationLabel.trim().length > 0
+                            ? msg.thoughtDurationLabel
+                            : undefined,
                       };
                       const domainAdditions = [
                         ...collectDomainsFromSearchRecords(
@@ -1899,17 +2101,14 @@ type RetryOptions = {
                           mergedMetadata.searchedDomains,
                           domainAdditions
                         );
+                        applyLiveSearchDomains(domainAdditions);
                       }
                       const discoveredSiteLabel =
                         getLatestSearchedDomainLabel(mergedMetadata);
                       if (discoveredSiteLabel) {
                         mergedMetadata.searchedSiteLabel =
                           discoveredSiteLabel;
-                        setSearchIndicator((prev) =>
-                          prev?.variant === "running"
-                            ? { ...prev, siteLabel: discoveredSiteLabel }
-                            : prev
-                        );
+                        applyLiveSearchDomains([discoveredSiteLabel]);
                       }
                       if (!mergedMetadata.generationType) {
                         mergedMetadata.generationType = "text";
@@ -1950,6 +2149,11 @@ type RetryOptions = {
                       persistMessageMetadata(assistantRowId, pending);
                     }
                   }
+                } else if (payload.metadata) {
+                  const domainUpdates = extractDomainsFromMetadataChunk(
+                    payload.metadata
+                  );
+                  applyLiveSearchDomains(domainUpdates);
                 } else if (typeof payload.token === "string") {
                   const token = payload.token as string;
                   if (!responseTimingRef.current.firstToken) {
@@ -2021,7 +2225,7 @@ type RetryOptions = {
                     setSearchIndicator({
                       message: "Searching the web…",
                       variant: "running",
-                      siteLabel: undefined,
+                      domains: [],
                     });
                   } else if (status.type === "search-complete") {
                     // keep indicator visible until first token arrives
@@ -2030,7 +2234,7 @@ type RetryOptions = {
                       message:
                         status.message || "Web search failed. Using prior data.",
                       variant: "error",
-                      siteLabel: undefined,
+                      domains: [],
                     });
                   } else if (status.type === "file-reading-start") {
                     setFileReadingIndicator("running");
@@ -2081,16 +2285,12 @@ type RetryOptions = {
                           nextMetadata.searchedDomains,
                           citationDomains
                         );
+                        applyLiveSearchDomains(citationDomains);
                         const latestDomain = getLatestSearchedDomainLabel(
                           nextMetadata
                         );
                         if (latestDomain) {
                           nextMetadata.searchedSiteLabel = latestDomain;
-                          setSearchIndicator((prev) =>
-                            prev?.variant === "running"
-                              ? { ...prev, siteLabel: latestDomain }
-                              : prev
-                          );
                         }
                       }
                       metadataForPersist = nextMetadata;
@@ -2178,6 +2378,9 @@ type RetryOptions = {
         firstToken: null,
         assistantMessageId: null,
       };
+      setStreamingConversationId((current) =>
+        conversationId && current === conversationId ? null : current
+      );
       if (assistantMessageId) {
         pendingMetadataPersistRef.current.delete(assistantMessageId);
       }
@@ -2193,6 +2396,9 @@ type RetryOptions = {
         firstToken: null,
         assistantMessageId: null,
       };
+      setStreamingConversationId((current) =>
+        conversationId && current === conversationId ? null : current
+      );
       if (assistantMessageId) {
         pendingMetadataPersistRef.current.delete(assistantMessageId);
       }
@@ -2426,6 +2632,9 @@ type RetryOptions = {
         firstToken: null,
         assistantMessageId: null,
       };
+      setStreamingConversationId((current) =>
+        conversationId && current === conversationId ? null : current
+      );
       setCreateImageArmed(false);
       if (assistantMessageId) {
         pendingMetadataPersistRef.current.delete(assistantMessageId);
@@ -2481,6 +2690,34 @@ type RetryOptions = {
     });
   }
 
+  useEffect(() => {
+    const previousConversationId = previousConversationIdRef.current;
+    if (previousConversationId !== selectedConversationId) {
+      if (
+        previousConversationId &&
+        streamingConversationId === previousConversationId &&
+        isStreaming
+      ) {
+        handleStopGeneration();
+      }
+      setThinkingStatus(null);
+      setSearchIndicator(null);
+      setFileReadingIndicator(null);
+      if (
+        streamingConversationId &&
+        streamingConversationId !== selectedConversationId
+      ) {
+        setStreamingConversationId(null);
+      }
+    }
+    previousConversationIdRef.current = selectedConversationId;
+  }, [
+    selectedConversationId,
+    streamingConversationId,
+    isStreaming,
+    handleStopGeneration,
+  ]);
+
   async function handleRetryWithImageModel(
     targetModel: ImageModelKey,
     targetMessage: ChatMessage
@@ -2510,11 +2747,12 @@ type RetryOptions = {
     });
   }
 
-  function handleStopGeneration() {
+  const handleStopGeneration = useCallback(() => {
     const activeId = activeAssistantMessageId;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsStreaming(false);
+    setStreamingConversationId(null);
     resetThinkingIndicator();
     setSearchIndicator(null);
     setFileReadingIndicator(null);
@@ -2527,7 +2765,7 @@ type RetryOptions = {
       pendingMetadataPersistRef.current.delete(activeId);
     }
     setActiveAssistantMessageId(null);
-  }
+  }, [activeAssistantMessageId, resetThinkingIndicator]);
 
   async function handleCopyMessage(message: ChatMessage, fallbackId?: string) {
     if (!message.content) return;
@@ -3388,14 +3626,13 @@ type RetryOptions = {
                               m.thoughtDurationSeconds
                             )
                           : null;
-                    const lastSearchedDomain = getLatestSearchedDomainLabel(
-                      m.metadata
+                    const finalSearchLine = formatSearchedDomainsLine(
+                      m.metadata?.searchedDomains
                     );
                     const showSearchChip =
                       isAssistant &&
-                      (Boolean(lastSearchedDomain) ||
-                        Boolean(m.metadata?.searchedDomains?.length) ||
-                        usedWebSearchFlag);
+                      !isStreamingAssistantMessage &&
+                      Boolean(finalSearchLine);
                     const assistantWrapperClass =
                       "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
                     const userWrapperClass =
@@ -3428,20 +3665,13 @@ type RetryOptions = {
                                   </div>
                                 );
                               }
-                              if (showSearchChip) {
+                              if (showSearchChip && finalSearchLine) {
                                 statusChips.push(
                                   <div
                                     key={`${messageId}-search-chip`}
                                     className="flex flex-col rounded-2xl border border-[#2f3750] bg-[#141826]/80 px-3 py-1.5 text-xs text-[#9bb8ff]"
                                   >
-                                    <span className="font-medium leading-tight">
-                                      Searching the web
-                                    </span>
-                                    {lastSearchedDomain ? (
-                                      <span className="text-[11px] text-[#9bb8ff]/80">
-                                        Searched {lastSearchedDomain}
-                                      </span>
-                                    ) : null}
+                                    <span>{finalSearchLine}</span>
                                   </div>
                                 );
                               }
@@ -3808,8 +4038,9 @@ type RetryOptions = {
                               : "search"
                           }
                           subtext={
-                            searchIndicator.siteLabel
-                              ? `Searched ${searchIndicator.siteLabel}`
+                            searchIndicator.variant === "running" &&
+                            searchStatusSubtext
+                              ? searchStatusSubtext
                               : undefined
                           }
                         />
@@ -3977,197 +4208,16 @@ type RetryOptions = {
 
                     <div className="flex items-center gap-3">
                       <div className="flex w-full flex-col gap-2">
-                        <div
-                          className={`flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`}
-                        >
-                          <div className="relative mr-1 shrink-0">
-                            <button
-                              type="button"
-                              aria-label="Composer options"
-                              aria-expanded={
-                                !isVoiceFlowActive ? composerMenuOpen : undefined
-                              }
-                              disabled={isVoiceFlowActive}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                if (isVoiceFlowActive) {
-                                  return;
-                                }
-                                setComposerMenuOpen((prev) => !prev);
-                              }}
-                              className={`flex h-9 w-9 items-center justify-center rounded-full transition ${
-                                isVoiceFlowActive
-                                  ? "cursor-not-allowed text-white/30"
-                                  : "text-white/80 hover:bg-white/10"
-                              }`}
-                            >
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-5 w-5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth={2}
-                                strokeLinecap="round"
-                              >
-                                <path d="M12 5v14M5 12h14" />
-                              </svg>
-                            </button>
-                            {!isVoiceFlowActive && composerMenuOpen && (
-                              <div
-                                onClick={(event) => event.stopPropagation()}
-                                className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
-                              >
-                                <div className="flex flex-col text-[13px] text-white/80">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      handleTakePhotoClick();
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Take photo
-                                  </button>
-                                  <div className="my-1 h-px bg-white/10" />
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      handleAddFilesClick();
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Add photos &amp; files
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (hasComposerAttachments) {
-                                        setComposerError(
-                                          "Image generation does not support attachments yet."
-                                        );
-                                      } else {
-                                        setComposerError(null);
-                                      }
-                                      setCreateImageArmed(true);
-                                      setForceWebSearch(false);
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    <span>Create image</span>
-                                    {createImageArmed && (
-                                      <span className="text-[#8ab4ff]">Armed</span>
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setComposerMenuOpen(false)}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Deep research
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setForceWebSearch((prev) => {
-                                        const next = !prev;
-                                        if (next) {
-                                          setCreateImageArmed(false);
-                                        }
-                                        return next;
-                                      });
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    <span>Web search</span>
-                                    {forceWebSearch && (
-                                      <span className="text-[#8ab4ff]">On</span>
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setComposerMenuOpen(false)}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Agent mode
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="flex flex-1 items-center">
-                            <textarea
-                              ref={textareaRef}
-                              className={`block h-full w-full resize-none border-none bg-transparent text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
-                                isVoiceFlowActive ? "hidden" : ""
-                              }`}
-                              style={{
-                                maxHeight: MAX_INPUT_HEIGHT,
-                                minHeight: MIN_INPUT_HEIGHT,
-                              }}
-                              value={input}
-                              onChange={(e) => setInput(e.target.value)}
-                              onKeyDown={handleKeyDown}
-                              placeholder="Message the assistant…"
-                              rows={1}
-                            />
-                            {isVoiceFlowActive ? (
-                              isRecording ? (
-                                <div className="flex h-12 w-full items-center" aria-live="polite">
-                                  <div className="flex w-full items-center gap-1 rounded-xl bg-[#2a1216]/80 px-3 py-2">
-                                    {waveformLevels.map((level, index) => {
-                                      const height = 6 + Math.round(level * 24);
-                                      return (
-                                        <span
-                                          key={`wave-${index}`}
-                                          className="flex-1 rounded-full bg-red-400/80"
-                                          style={{
-                                            height: `${height}px`,
-                                            transition: "height 120ms ease",
-                                          }}
-                                        />
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div
-                                  className="flex h-10 w-full items-center justify-center text-sm text-zinc-400"
-                                  aria-live="polite"
-                                >
-                                  Transcribing…
-                                </div>
-                              )
-                            ) : null}
-                            <input
-                              ref={photoInputRef}
-                              type="file"
-                              accept="image/*"
-                              capture="environment"
-                              className="sr-only"
-                              onChange={handlePhotoInputChange}
-                            />
-                            <input
-                              ref={filePickerInputRef}
-                              type="file"
-                              accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
-                              multiple
-                              className="sr-only"
-                              onChange={handleFilePickerChange}
-                            />
-                          </div>
-
-                          <div className="flex items-center gap-2 pl-2">
-                            {isVoiceFlowActive && (
+                        <div className={composerContainerClass}>
+                          {isRecording ? (
+                            <>
                               <button
                                 type="button"
-                                aria-label="Cancel voice input"
-                                onClick={() => cancelRecordingFlow({ clearInput: true })}
-                                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-[#2a2a2a] text-white/80 transition hover:text-white"
+                                aria-label="Cancel voice recording"
+                                onClick={() =>
+                                  cancelRecordingFlow({ clearInput: true })
+                                }
+                                className="flex h-9 w-9 items-center justify-center rounded-full border border-red-500/60 bg-red-500/10 text-red-300 transition hover:bg-red-500/20"
                               >
                                 <svg
                                   xmlns="http://www.w3.org/2000/svg"
@@ -4181,53 +4231,210 @@ type RetryOptions = {
                                   <path d="M6 6l12 12M6 18 18 6" />
                                 </svg>
                               </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={handlePrimaryAction}
-                              disabled={primaryButtonDisabled}
-                              className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                                primaryActionMode === "stop"
-                                  ? "hover:bg-[#225fd0]"
-                                  : "hover:bg-[#3c7cff]"
-                              } ${primaryButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
-                              aria-label={primaryButtonAriaLabel}
-                            >
-                              {primaryActionMode === "stop" ? (
+                              <div
+                                className="flex flex-1 items-center py-1.5"
+                                aria-live="polite"
+                              >
                                 <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-4 w-4"
-                                  fill="currentColor"
+                                  viewBox="0 0 100 32"
+                                  className="h-8 w-full"
+                                  aria-hidden
                                 >
-                                  <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                                  <path
+                                    d={recordingWaveformPath}
+                                    fill="none"
+                                    stroke="#f87171"
+                                    strokeWidth={2}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  />
                                 </svg>
-                              ) : primaryActionMode === "confirm-recording" ? (
-                                <CheckmarkIcon className="h-5 w-5" />
-                              ) : primaryActionMode === "transcribing" ? (
-                                <span className="inline-flex h-5 w-5 items-center justify-center">
-                                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
-                                </span>
-                              ) : primaryActionMode === "send" ? (
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-5 w-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
+                              </div>
+                              {renderPrimaryButton()}
+                            </>
+                          ) : (
+                            <>
+                              <div className="relative mr-1 shrink-0">
+                                <button
+                                  type="button"
+                                  aria-label="Composer options"
+                                  aria-expanded={
+                                    !isRecording ? composerMenuOpen : undefined
+                                  }
+                                  disabled={isRecording}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (isRecording) {
+                                      return;
+                                    }
+                                    setComposerMenuOpen((prev) => !prev);
+                                  }}
+                                  className={`flex h-9 w-9 items-center justify-center rounded-full text-white/80 transition hover:bg-white/10 ${
+                                    isRecording ? "cursor-not-allowed text-white/30" : ""
+                                  }`}
                                 >
-                                  <path d="M12 18V6" />
-                                  <path d="M6 12l6-6 6 6" />
-                                </svg>
-                              ) : (
-                                <VoiceWaveIcon className="h-5 w-5" />
-                              )}
-                            </button>
-                          </div>
+                                  <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    className="h-5 w-5"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth={2}
+                                    strokeLinecap="round"
+                                  >
+                                    <path d="M12 5v14M5 12h14" />
+                                  </svg>
+                                </button>
+                                {!isRecording && composerMenuOpen && (
+                                  <div
+                                    onClick={(event) => event.stopPropagation()}
+                                    className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
+                                  >
+                                    <div className="flex flex-col text-[13px] text-white/80">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleTakePhotoClick();
+                                          setComposerMenuOpen(false);
+                                        }}
+                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        Take photo
+                                      </button>
+                                      <div className="my-1 h-px bg-white/10" />
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleAddFilesClick();
+                                          setComposerMenuOpen(false);
+                                        }}
+                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        Add photos &amp; files
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (hasComposerAttachments) {
+                                            setComposerError(
+                                              "Image generation does not support attachments yet."
+                                            );
+                                          } else {
+                                            setComposerError(null);
+                                          }
+                                          setCreateImageArmed(true);
+                                          setForceWebSearch(false);
+                                          setComposerMenuOpen(false);
+                                        }}
+                                        className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        <span>Create image</span>
+                                        {createImageArmed && (
+                                          <span className="text-[#8ab4ff]">Armed</span>
+                                        )}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setComposerMenuOpen(false)}
+                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        Deep research
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setForceWebSearch((prev) => {
+                                            const next = !prev;
+                                            if (next) {
+                                              setCreateImageArmed(false);
+                                            }
+                                            return next;
+                                          });
+                                          setComposerMenuOpen(false);
+                                        }}
+                                        className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        <span>Web search</span>
+                                        {forceWebSearch && (
+                                          <span className="text-[#8ab4ff]">On</span>
+                                        )}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setComposerMenuOpen(false)}
+                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                      >
+                                        Agent mode
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="flex flex-1 items-stretch">
+                                <textarea
+                                  ref={textareaRef}
+                                  className="block h-full w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                                  style={{
+                                    maxHeight: MAX_INPUT_HEIGHT,
+                                    minHeight: MIN_INPUT_HEIGHT,
+                                  }}
+                                  value={input}
+                                  onChange={(e) => setInput(e.target.value)}
+                                  onKeyDown={handleKeyDown}
+                                  placeholder={composerPlaceholder}
+                                  rows={1}
+                                />
+                                <input
+                                  ref={photoInputRef}
+                                  type="file"
+                                  accept="image/*"
+                                  capture="environment"
+                                  className="sr-only"
+                                  onChange={handlePhotoInputChange}
+                                />
+                                <input
+                                  ref={filePickerInputRef}
+                                  type="file"
+                                  accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
+                                  multiple
+                                  className="sr-only"
+                                  onChange={handleFilePickerChange}
+                                />
+                              </div>
+
+                              <div className="flex items-center gap-2 pl-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!micDisabled) {
+                                      void startRecording();
+                                    }
+                                  }}
+                                  disabled={micDisabled}
+                                  aria-label="Start dictation"
+                                  className={`flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-white/5 text-white/80 transition ${
+                                    micDisabled
+                                      ? "cursor-not-allowed opacity-40"
+                                      : "hover:bg-white/10"
+                                  }`}
+                                >
+                                  <MicrophoneIcon className="h-4 w-4" />
+                                </button>
+                                {renderPrimaryButton()}
+                              </div>
+                            </>
+                          )}
                         </div>
+                        {isTranscribing && !isRecording && (
+                          <div className="flex items-center gap-2 text-xs text-zinc-400">
+                            <span
+                              className="h-2 w-2 animate-pulse rounded-full bg-white/60"
+                              aria-hidden
+                            />
+                            <span>Transcribing…</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

@@ -184,6 +184,9 @@ const BASE_SYSTEM_PROMPT =
 const FORCE_WEB_SEARCH_PROMPT =
   "The user explicitly requested live web search. Ensure you call the `web_search` tool for this turn unless it would clearly be redundant.";
 
+const EXPLICIT_WEB_SEARCH_PROMPT =
+  "The user asked for live sources or links. You must call the `web_search` tool, base your answer on those results, and cite them directly.";
+
 const LIVE_DATA_HINTS = [
   "current",
   "today",
@@ -344,17 +347,32 @@ const KNOWN_ENTITY_PATTERNS = [
 
 const PRODUCT_STYLE_PATTERN = /\b(?:[A-Z]{2,}[A-Za-z0-9+\-]*\d{2,5}|[A-Za-z]+\s?\d{4})\b/;
 
-const DIRECT_WEB_REQUEST_PATTERNS = [
+const MUST_WEB_SEARCH_PATTERNS = [
   /\bsearch (?:the )?(?:web|internet)\b/i,
   /\bsearch online\b/i,
   /\bweb search\b/i,
-  /\blook up\b/i,
-  /\bfind (?:online|on the web)\b/i,
+  /\blook (?:this|that|it)? up\b/i,
+  /\bfind (?:links?|online|on the web)\b/i,
   /\bcheck (?:the )?(?:internet|web)\b/i,
   /\bbrowse the web\b/i,
   /\bgoogle (?:it|this)?\b/i,
-  /\bnews sources?\b/i,
-  /\bcitations?\b/i,
+  /\bcheck (?:current )?pricing\b/i,
+  /\bcurrent price\b/i,
+  /\bwhere to buy\b/i,
+  /\bfind where to buy\b/i,
+  /\bfind retailers?\b/i,
+  /\bneed sources\b/i,
+  /\bgive me (?:sources|citations)\b/i,
+  /\bprovide (?:links?|sources|citations)\b/i,
+  /\bshow (?:me )?(?:links?|sources)\b/i,
+];
+
+const SOURCE_REQUEST_PATTERNS = [
+  /\binclude (?:the )?sources\b/i,
+  /\bshare sources\b/i,
+  /\bcite (?:your )?sources\b/i,
+  /\bgive me references\b/i,
+  /\bneed citations?\b/i,
 ];
 
 const META_QUESTION_PATTERNS = [
@@ -427,40 +445,56 @@ function parseModelFamily(value: unknown): ModelFamily {
   return "auto";
 }
 
-function shouldAllowWebSearch({
+type WebSearchPreference = {
+  allow: boolean;
+  require: boolean;
+};
+
+function resolveWebSearchPreference({
   userText,
   forceWebSearch,
 }: {
   userText: string;
   forceWebSearch: boolean;
-}) {
+}): WebSearchPreference {
   if (forceWebSearch) {
-    return true;
+    return { allow: true, require: true };
   }
   const trimmed = userText.trim();
   if (!trimmed) {
-    return false;
+    return { allow: false, require: false };
   }
   if (META_QUESTION_PATTERNS.some((pattern) => pattern.test(trimmed))) {
-    return false;
+    return { allow: false, require: false };
+  }
+  if (MUST_WEB_SEARCH_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return { allow: true, require: true };
+  }
+  if (SOURCE_REQUEST_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return { allow: true, require: true };
   }
   const lower = trimmed.toLowerCase();
-  if (DIRECT_WEB_REQUEST_PATTERNS.some((pattern) => pattern.test(trimmed))) {
-    return true;
-  }
+  let allow = false;
   if (LIVE_DATA_HINTS.some((hint) => lower.includes(hint))) {
-    return true;
+    allow = true;
   }
   if (/https?:\/\//i.test(trimmed) || /\bwww\./i.test(trimmed)) {
-    return true;
+    allow = true;
+  }
+  if (
+    /\b(?:price|pricing|cost|buy|purchase|availability|in stock|market|stocks?|earnings|forecast|release date|launch|ticket|schedule|ranking|news|headline)\b/i.test(
+      trimmed
+    )
+  ) {
+    allow = true;
   }
   if (/\bsources?\b/i.test(trimmed) || /\breference\b/i.test(trimmed)) {
-    return true;
+    allow = true;
   }
   if (referencesEmergingEntity(trimmed)) {
-    return true;
+    allow = true;
   }
-  return false;
+  return { allow, require: false };
 }
 
 function referencesEmergingEntity(text: string) {
@@ -1125,10 +1159,12 @@ export async function POST(req: Request) {
     }
     vectorStoreIds = Array.from(vectorStoreIdSet);
 
-    const allowWebSearch = shouldAllowWebSearch({
+    const searchPreference = resolveWebSearchPreference({
       userText: userTextForContext,
       forceWebSearch,
     });
+    const allowWebSearch = searchPreference.allow;
+    const requireWebSearch = searchPreference.require;
     const webSearchTool = { type: "web_search" } satisfies Tool & {
       [key: string]: unknown;
     };
@@ -1147,7 +1183,7 @@ export async function POST(req: Request) {
     const toolChoice: ToolChoiceAllowed | undefined = allowWebSearch
       ? ({
           type: "allowed_tools",
-          mode: forceWebSearch ? "required" : "auto",
+          mode: requireWebSearch ? "required" : "auto",
           tools: [webSearchTool],
         } satisfies ToolChoiceAllowed)
       : undefined;
@@ -1174,6 +1210,15 @@ export async function POST(req: Request) {
             {
               role: "system",
               content: FORCE_WEB_SEARCH_PROMPT,
+              type: "message",
+            },
+          ] satisfies EasyInputMessage[])
+        : []),
+      ...(requireWebSearch && !forceWebSearch
+        ? ([
+            {
+              role: "system",
+              content: EXPLICIT_WEB_SEARCH_PROMPT,
               type: "message",
             },
           ] satisfies EasyInputMessage[])
@@ -1215,7 +1260,8 @@ export async function POST(req: Request) {
       requestedModelFamily === "gpt-5.1" &&
       speedMode === "auto" &&
       previewConfig.resolvedFamily &&
-      previewConfig.resolvedFamily !== targetModelFamily
+      previewConfig.resolvedFamily !== targetModelFamily &&
+      !isRetryRequest
     ) {
       targetModelFamily = previewConfig.resolvedFamily;
       targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
@@ -1348,6 +1394,11 @@ export async function POST(req: Request) {
                 type: "search-complete",
                 query: "web search",
               });
+            } else if (event.type === "response.metadata.delta") {
+              const delta = (event as { delta?: Record<string, unknown> }).delta;
+              if (delta && Object.keys(delta).length > 0) {
+                enqueueJson({ metadata: delta });
+              }
             } else if (
               event.type === "response.file_search_call.in_progress" ||
               event.type === "response.file_search_call.searching"
