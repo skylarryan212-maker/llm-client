@@ -1980,7 +1980,7 @@ async function buildCrossChatSummary({
 
     const recentUserMessages = otherMessages
       .filter(
-        (row): row is { content: string } =>
+        (row): row is { conversation_id: unknown; role: "user"; content: string } =>
           row?.role === "user" && typeof row?.content === "string"
       )
       .map((row) => row.content)
