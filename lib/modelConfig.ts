@@ -54,6 +54,16 @@ const HIGH_COMPLEXITY_KEYWORDS = [
   "financial model",
 ];
 
+const EXTREME_COMPLEXITY_PHRASES = [
+  "step-by-step proof",
+  "academic thesis",
+  "full proposal",
+  "enterprise rollout",
+  "investment memorandum",
+  "system architecture",
+  "risk assessment",
+];
+
 const LONG_PROMPT_THRESHOLD = 360;
 const MEDIUM_PROMPT_THRESHOLD = 640;
 const HIGH_PROMPT_THRESHOLD = 900;
@@ -118,6 +128,50 @@ function ensureMiniNanoEffort(
     return "low";
   }
   return effort === "high" || effort === "medium" ? effort : "low";
+}
+
+export function suggestSmallerModelForEffort(
+  promptText: string,
+  effort: ReasoningEffort | null
+): "gpt-5-mini" | "gpt-5-nano" | null {
+  if (!effort || effort === "low" || effort === "none") {
+    return null;
+  }
+  const normalized = promptText.trim().toLowerCase();
+  if (!normalized) {
+    return "gpt-5-mini";
+  }
+  const characterCount = normalized.length;
+  const sentenceCount = normalized
+    .split(/[.!?]+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean).length;
+
+  const hasExtremeComplexity =
+    EXTREME_COMPLEXITY_PHRASES.some((phrase) => normalized.includes(phrase)) ||
+    HIGH_COMPLEXITY_KEYWORDS.some((keyword) => normalized.includes(keyword));
+
+  if (hasExtremeComplexity) {
+    return null;
+  }
+
+  if (effort === "medium") {
+    if (characterCount < 600 && sentenceCount <= 6) {
+      return "gpt-5-nano";
+    }
+    if (characterCount < 1700) {
+      return "gpt-5-mini";
+    }
+    return null;
+  }
+
+  if (characterCount < 900 && sentenceCount <= 8) {
+    return "gpt-5-nano";
+  }
+  if (characterCount < 2300) {
+    return "gpt-5-mini";
+  }
+  return null;
 }
 
 export function getModelAndReasoningConfig(
