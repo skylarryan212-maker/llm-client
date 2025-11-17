@@ -84,6 +84,7 @@ type WebSearchOutputEntry = {
 };
 
 type WebSearchCall = {
+  id?: string;
   type?: string;
   status?: string;
   query?: string;
@@ -1344,6 +1345,33 @@ export async function POST(req: Request) {
         };
         let fullAssistantMessage = "";
         let responseMetadata: ResponseMetadata | null = null;
+        const streamedWebSearchCallIds = new Set<string>();
+        const streamWebSearchMetadata = (item: unknown) => {
+          if (!allowWebSearch || !isWebSearchCall(item)) {
+            return;
+          }
+          const results = extractWebSearchResults(item);
+          if (!results.length) {
+            return;
+          }
+          const callId = typeof item.id === "string" ? item.id : null;
+          if (callId && streamedWebSearchCallIds.has(callId)) {
+            return;
+          }
+          if (callId) {
+            streamedWebSearchCallIds.add(callId);
+          }
+          enqueueJson({
+            metadata: {
+              web_search: [
+                {
+                  id: callId ?? undefined,
+                  results,
+                },
+              ],
+            },
+          });
+        };
 
         announceTitle(routerTitlePromise);
         announceTitle(manualTitlePromise);
@@ -1394,11 +1422,10 @@ export async function POST(req: Request) {
                 type: "search-complete",
                 query: "web search",
               });
-            } else if (event.type === "response.metadata.delta") {
-              const delta = (event as { delta?: Record<string, unknown> }).delta;
-              if (delta && Object.keys(delta).length > 0) {
-                enqueueJson({ metadata: delta });
-              }
+            } else if (event.type === "response.output_item.added") {
+              streamWebSearchMetadata(event.item);
+            } else if (event.type === "response.output_item.done") {
+              streamWebSearchMetadata(event.item);
             } else if (
               event.type === "response.file_search_call.in_progress" ||
               event.type === "response.file_search_call.searching"
