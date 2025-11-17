@@ -133,6 +133,7 @@ type ResponseMetadata = {
   reasoningEffort?: ReasoningEffort;
   usedWebSearch: boolean;
   searchRecords: SearchRecord[];
+  searchedDomains?: string[];
   sources: SourceChip[];
   citations: Source[];
   vectorStoreIds?: string[];
@@ -147,6 +148,7 @@ type ResponseMetadata = {
     prompt?: string;
   }>;
   searchedSiteLabel?: string;
+  thinkingDurationMs?: number;
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
@@ -212,6 +214,18 @@ const LIVE_DATA_HINTS = [
   "launch",
   "trend",
 ];
+
+const SEARCH_DOMAIN_LABELS: Record<string, string> = {
+  "en.wikipedia.org": "Wikipedia",
+};
+
+function formatSearchDomainLabel(domain?: string | null) {
+  if (!domain) {
+    return null;
+  }
+  const normalized = domain.toLowerCase();
+  return SEARCH_DOMAIN_LABELS[normalized] ?? normalized;
+}
 
 const CROSS_CHAT_STOP_WORDS = new Set([
   "this",
@@ -1190,14 +1204,24 @@ export async function POST(req: Request) {
     }
 
     const promptForRouting = userTextForContext || userText;
+    const previewConfig = getModelAndReasoningConfig(
+      targetModelFamily,
+      speedMode,
+      promptForRouting
+    );
+    const previewEffort = previewConfig.reasoning?.effort ?? null;
+
+    if (
+      requestedModelFamily === "gpt-5.1" &&
+      speedMode === "auto" &&
+      previewConfig.resolvedFamily &&
+      previewConfig.resolvedFamily !== targetModelFamily
+    ) {
+      targetModelFamily = previewConfig.resolvedFamily;
+      targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
+    }
 
     if (requestedModelFamily === "auto") {
-      const previewConfig = getModelAndReasoningConfig(
-        targetModelFamily,
-        speedMode,
-        promptForRouting
-      );
-      const previewEffort = previewConfig.reasoning?.effort ?? null;
       if (previewEffort === "medium" || previewEffort === "high") {
         const suggestedFamily = suggestSmallerModelForEffort(
           promptForRouting,
@@ -1343,10 +1367,13 @@ export async function POST(req: Request) {
           if (finalResponse.output_text) {
             fullAssistantMessage = finalResponse.output_text;
           }
-          const searchMetadata = extractSearchMetadata(finalResponse);
+          const citations = extractUrlCitations(finalResponse);
+          const searchMetadata = extractSearchMetadata(
+            finalResponse,
+            citations
+          );
           const usedWebSearch = searchMetadata.records.length > 0;
           const sources = buildSourceChips(searchMetadata.records);
-          const citations = extractUrlCitations(finalResponse);
           if (sources.length > 0 || citations.length > 0) {
             console.log(
               `[sourcesDebug] aggregated sources chips=${sources.length} citations=${citations.length} conversationId=${conversationId}`
@@ -1363,6 +1390,9 @@ export async function POST(req: Request) {
               message: "Web search failed; using prior knowledge.",
             });
           }
+          const latestSearchDomain =
+            searchMetadata.domains[searchMetadata.domains.length - 1];
+
           responseMetadata = {
             usedModel: targetModel,
             usedModelMode: targetModelKey,
@@ -1372,10 +1402,12 @@ export async function POST(req: Request) {
             reasoningEffort: modelConfig.reasoning?.effort,
             usedWebSearch,
             searchRecords: searchMetadata.records,
+            searchedDomains: searchMetadata.domains,
             sources,
             citations,
             vectorStoreIds,
             generationType: "text",
+            searchedSiteLabel: latestSearchDomain,
           };
 
           if (!assistantRowId) {
@@ -1575,9 +1607,26 @@ function parseRouterResponse(content: string) {
   return null;
 }
 
-function extractSearchMetadata(response: OpenAIResponse) {
+function extractSearchMetadata(
+  response: OpenAIResponse,
+  citationsForDomains?: Source[]
+) {
   const records: SearchRecord[] = [];
   let failed = false;
+  const domains: string[] = [];
+  const seenDomains = new Set<string>();
+  const pushDomain = (domain?: string | null) => {
+    const label = formatSearchDomainLabel(domain);
+    if (!label) {
+      return;
+    }
+    const normalized = label.toLowerCase();
+    if (seenDomains.has(normalized)) {
+      return;
+    }
+    seenDomains.add(normalized);
+    domains.push(label);
+  };
   const outputs = Array.isArray(response.output) ? response.output : [];
   for (const item of outputs) {
     if (!isWebSearchCall(item)) {
@@ -1600,6 +1649,8 @@ function extractSearchMetadata(response: OpenAIResponse) {
     const rankedSources: RankedSource[] = rawResults.length
       ? rawResults
       : buildSourcesFromAction(searchAction);
+    rankedSources.forEach((source) => pushDomain(source.domain));
+    rawResults.forEach((source) => pushDomain(source.domain));
     const summaryParts: string[] = [];
     summaryParts.push(`Query: ${query}`);
     if (rankedSources.length > 0) {
@@ -1619,7 +1670,12 @@ function extractSearchMetadata(response: OpenAIResponse) {
       fromCache: false,
     });
   }
-  return { records, failed };
+  if (Array.isArray(citationsForDomains)) {
+    citationsForDomains.forEach((citation) =>
+      pushDomain(citation.domain || extractDomainFromUrl(citation.url))
+    );
+  }
+  return { records, failed, domains };
 }
 
 function extractUrlCitations(response: OpenAIResponse): Source[] {

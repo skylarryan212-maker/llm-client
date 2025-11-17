@@ -9,6 +9,7 @@ export type ReasoningEffort = "none" | "low" | "medium" | "high";
 
 export interface ModelConfig {
   model: string;
+  resolvedFamily: Exclude<ModelFamily, "auto">;
   reasoning?: {
     effort: ReasoningEffort;
   };
@@ -174,14 +175,54 @@ export function suggestSmallerModelForEffort(
   return null;
 }
 
+function selectGpt51AutoFamily(
+  promptText: string,
+  effort: ReasoningEffort | null
+): Exclude<ModelFamily, "auto"> {
+  const normalized = promptText.trim().toLowerCase();
+  const length = normalized.length;
+  const mentionsComplexity =
+    HIGH_COMPLEXITY_KEYWORDS.some((keyword) => normalized.includes(keyword)) ||
+    EXTREME_COMPLEXITY_PHRASES.some((phrase) => normalized.includes(phrase)) ||
+    /\b(debug|optimize|architecture|roadmap|financial|legal|proof|algorithm|analysis)\b/.test(
+      normalized
+    );
+
+  if (!effort || effort === "none") {
+    return length < 320 ? "gpt-5-nano" : "gpt-5-mini";
+  }
+
+  if (effort === "low") {
+    if (length < 600 && !mentionsComplexity) {
+      return "gpt-5-nano";
+    }
+    return "gpt-5-mini";
+  }
+
+  if (effort === "medium") {
+    if (length < 400 && !mentionsComplexity) {
+      return "gpt-5-nano";
+    }
+    if (length < 1600 || !mentionsComplexity) {
+      return "gpt-5-mini";
+    }
+    return "gpt-5.1";
+  }
+
+  // effort === "high"
+  if (length < 900 && !mentionsComplexity) {
+    return "gpt-5-mini";
+  }
+  return "gpt-5.1";
+}
+
 export function getModelAndReasoningConfig(
   modelFamily: ModelFamily,
   speedMode: SpeedMode,
   promptText: string
 ): ModelConfig {
-  const resolvedFamily: Exclude<ModelFamily, "auto"> =
+  let resolvedFamily: Exclude<ModelFamily, "auto"> =
     modelFamily === "auto" ? "gpt-5-mini" : modelFamily;
-  const model = MODEL_ID_MAP[resolvedFamily];
   const trimmedPrompt = promptText.trim();
 
   let chosenEffort: ReasoningEffort | null = null;
@@ -206,7 +247,13 @@ export function getModelAndReasoningConfig(
     }
   }
 
-  const config: ModelConfig = { model };
+  if (modelFamily === "gpt-5.1" && speedMode === "auto") {
+    resolvedFamily = selectGpt51AutoFamily(trimmedPrompt, chosenEffort);
+  }
+
+  const model = MODEL_ID_MAP[resolvedFamily];
+
+  const config: ModelConfig = { model, resolvedFamily };
 
   if (chosenEffort) {
     config.reasoning = { effort: chosenEffort };

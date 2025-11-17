@@ -58,8 +58,10 @@ type MessageMetadata = {
   reasoningEffort?: ReasoningEffort;
   usedWebSearch?: boolean;
   searchRecords?: SearchRecord[];
+  searchedDomains?: string[];
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
+  thinkingDurationMs?: number;
   sources?: SourceChip[];
   citations?: Source[];
   files?: FileAttachment[];
@@ -270,6 +272,25 @@ function CheckmarkIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function VoiceWaveIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      className={className}
+    >
+      <path d="M6 16V8" />
+      <path d="M10 19V5" />
+      <path d="M14 19V5" />
+      <path d="M18 16V8" />
+    </svg>
+  );
+}
+
 function createLocalId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -383,28 +404,87 @@ function deriveSearchDomain(
   return null;
 }
 
-function buildWaveformPath(levels: number[]) {
-  if (!levels.length) {
-    return "M0 12 L100 12";
+function mergeSearchedDomains(
+  existing: string[] | undefined,
+  additions: string[]
+) {
+  const sanitizedExisting = Array.isArray(existing)
+    ? existing
+        .map((label) => (typeof label === "string" ? label.trim() : ""))
+        .filter((label) => label.length > 0)
+    : [];
+  if (!additions.length) {
+    return sanitizedExisting;
   }
-  const height = 24;
-  const centerY = height / 2;
-  const amplitude = centerY - 1;
-  const width = Math.max(1, levels.length - 1);
-  const step = 100 / width;
-  const topPath: string[] = [];
-  const bottomPath: string[] = [];
-  levels.forEach((level, index) => {
-    const clamped = Math.max(0.08, Math.min(1, level));
-    const x = Number((index * step).toFixed(2));
-    const offset = clamped * amplitude;
-    const topY = Number((centerY - offset).toFixed(2));
-    const bottomY = Number((centerY + offset).toFixed(2));
-    const command = index === 0 ? "M" : "L";
-    topPath.push(`${command}${x} ${topY}`);
-    bottomPath.unshift(`L${x} ${bottomY}`);
+  const seen = new Set(sanitizedExisting.map((label) => label.toLowerCase()));
+  const merged = [...sanitizedExisting];
+  additions.forEach((label) => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    const normalized = trimmed.toLowerCase();
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    merged.push(trimmed);
   });
-  return `${topPath.join(" ")} ${bottomPath.join(" ")} Z`;
+  return merged;
+}
+
+function collectDomainsFromSearchRecords(records?: SearchRecord[] | null) {
+  const additions: string[] = [];
+  if (!Array.isArray(records)) {
+    return additions;
+  }
+  records.forEach((record) => {
+    const ranked = Array.isArray(record.rankedSources)
+      ? record.rankedSources
+      : [];
+    const raw = Array.isArray(record.rawResults) ? record.rawResults : [];
+    [...ranked, ...raw].forEach((source) => {
+      const domainLabel = formatSearchSiteLabel(
+        source.domain || extractDomainFromUrl(source.url)
+      );
+      if (domainLabel) {
+        additions.push(domainLabel);
+      }
+    });
+  });
+  return additions;
+}
+
+function collectDomainsFromCitations(citations?: Source[] | null) {
+  const additions: string[] = [];
+  if (!Array.isArray(citations)) {
+    return additions;
+  }
+  citations.forEach((source) => {
+    const domainLabel = formatSearchSiteLabel(
+      source.domain || extractDomainFromUrl(source.url)
+    );
+    if (domainLabel) {
+      additions.push(domainLabel);
+    }
+  });
+  return additions;
+}
+
+function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
+  if (!metadata) {
+    return null;
+  }
+  const domainList = Array.isArray(metadata.searchedDomains)
+    ? metadata.searchedDomains
+        .map((label) => (typeof label === "string" ? label.trim() : ""))
+        .filter((label) => label.length > 0)
+    : [];
+  if (domainList.length > 0) {
+    return domainList[domainList.length - 1];
+  }
+  if (metadata.searchedSiteLabel && metadata.searchedSiteLabel.trim()) {
+    return metadata.searchedSiteLabel.trim();
+  }
+  return deriveSearchDomain(metadata.searchRecords, metadata.citations);
 }
 
 export default function Home() {
@@ -721,15 +801,36 @@ export default function Home() {
         `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId}`
       );
       const nextMessages = rows.map((m) => {
-        const metadata = (m.metadata || {}) as MessageMetadata;
-        const attachments = Array.isArray(metadata.attachments)
-          ? metadata.attachments
+        const rawMetadata = (m.metadata || {}) as MessageMetadata;
+        const sanitizedMetadata: MessageMetadata = {
+          ...rawMetadata,
+        };
+        const sanitizedDomains = Array.isArray(rawMetadata.searchedDomains)
+          ? rawMetadata.searchedDomains
+              .map((label) => (typeof label === "string" ? label.trim() : ""))
+              .filter((label) => label.length > 0)
           : [];
-        const files = Array.isArray(metadata.files) ? metadata.files : [];
-        const thoughtSeconds = metadata.thoughtDurationSeconds;
+        if (sanitizedDomains.length > 0) {
+          sanitizedMetadata.searchedDomains = sanitizedDomains;
+        }
+        const attachments = Array.isArray(sanitizedMetadata.attachments)
+          ? sanitizedMetadata.attachments
+          : [];
+        const files = Array.isArray(sanitizedMetadata.files)
+          ? sanitizedMetadata.files
+          : [];
+        const timingMs =
+          typeof sanitizedMetadata.thinkingDurationMs === "number"
+            ? sanitizedMetadata.thinkingDurationMs
+            : null;
+        const thoughtSeconds =
+          typeof timingMs === "number"
+            ? timingMs / 1000
+            : sanitizedMetadata.thoughtDurationSeconds;
         const thoughtLabel =
-          metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
-            ? metadata.thoughtDurationLabel
+          sanitizedMetadata.thoughtDurationLabel &&
+          sanitizedMetadata.thoughtDurationLabel.trim().length > 0
+            ? sanitizedMetadata.thoughtDurationLabel
             : typeof thoughtSeconds === "number"
               ? formatThoughtDurationLabel(thoughtSeconds)
               : undefined;
@@ -740,15 +841,15 @@ export default function Home() {
           content: m.content,
           attachments,
           files,
-          usedModel: metadata.usedModel,
-          usedModelMode: metadata.usedModelMode,
-          usedModelFamily: metadata.usedModelFamily,
-          requestedModelFamily: metadata.requestedModelFamily,
-          speedMode: metadata.speedMode,
-          reasoningEffort: metadata.reasoningEffort,
-          usedWebSearch: metadata.usedWebSearch,
-          searchRecords: metadata.searchRecords || [],
-          metadata,
+          usedModel: sanitizedMetadata.usedModel,
+          usedModelMode: sanitizedMetadata.usedModelMode,
+          usedModelFamily: sanitizedMetadata.usedModelFamily,
+          requestedModelFamily: sanitizedMetadata.requestedModelFamily,
+          speedMode: sanitizedMetadata.speedMode,
+          reasoningEffort: sanitizedMetadata.reasoningEffort,
+          usedWebSearch: sanitizedMetadata.usedWebSearch,
+          searchRecords: sanitizedMetadata.searchRecords || [],
+          metadata: sanitizedMetadata,
           thoughtDurationSeconds: thoughtSeconds,
           thoughtDurationLabel: thoughtLabel,
         } as ChatMessage;
@@ -939,31 +1040,61 @@ export default function Home() {
   const imageAttachmentLimitReached =
     imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
   const isVoiceFlowActive = isRecording || isTranscribing;
-  const shouldShowSendButton =
-    isVoiceFlowActive || isStreaming || canSendMessage;
-  const sendButtonDisabled = isStreaming ? false : !canSendMessage;
-  const sendButtonAriaLabel = isStreaming
-    ? "Stop response"
-    : sendButtonDisabled
-      ? "Send message (unavailable)"
-      : createImageArmed
-        ? "Send image prompt"
-        : "Send message";
+  type PrimaryActionMode =
+    | "stop"
+    | "confirm-recording"
+    | "transcribing"
+    | "send"
+    | "voice";
+  const primaryActionMode: PrimaryActionMode = isStreaming
+    ? "stop"
+    : isRecording
+      ? "confirm-recording"
+      : isTranscribing
+        ? "transcribing"
+        : canSendMessage
+          ? "send"
+          : "voice";
+  const primaryButtonDisabled = primaryActionMode === "transcribing";
+  const primaryButtonAriaLabel = (() => {
+    switch (primaryActionMode) {
+      case "stop":
+        return "Stop response";
+      case "confirm-recording":
+        return "Finish voice recording";
+      case "transcribing":
+        return "Transcribing voice input";
+      case "send":
+        return createImageArmed ? "Send image prompt" : "Send message";
+      case "voice":
+      default:
+        return "Start voice input";
+    }
+  })();
   const composerShapeClass = isMultilineInput
     ? "rounded-[26px] py-2.5"
     : "rounded-full py-1.5";
   const handlePrimaryAction = () => {
-    if (isStreaming) {
+    if (primaryActionMode === "stop") {
       handleStopGeneration();
       return;
     }
-    if (!sendButtonDisabled) {
+    if (primaryActionMode === "confirm-recording") {
+      void finishRecordingAndTranscribe();
+      return;
+    }
+    if (primaryActionMode === "transcribing") {
+      return;
+    }
+    if (primaryActionMode === "send") {
       if (createImageArmed) {
         void sendImageMessage();
       } else {
         void sendTextMessage();
       }
+      return;
     }
+    void startRecording();
   };
 
   // ------------------------------------------------------------
@@ -1220,18 +1351,24 @@ export default function Home() {
     [cleanupWaveformVisualizer]
   );
 
-  const cancelRecordingFlow = useCallback(() => {
-    if (isRecording) {
-      void stopRecording(false);
-      setIsRecording(false);
-    }
-    if (isTranscribing) {
-      transcriptionAbortRef.current?.abort();
-      transcriptionAbortRef.current = null;
-      setIsTranscribing(false);
-    }
-    setComposerError(null);
-  }, [isRecording, isTranscribing, stopRecording]);
+  const cancelRecordingFlow = useCallback(
+    (options?: { clearInput?: boolean }) => {
+      if (isRecording) {
+        void stopRecording(false);
+        setIsRecording(false);
+      }
+      if (isTranscribing) {
+        transcriptionAbortRef.current?.abort();
+        transcriptionAbortRef.current = null;
+        setIsTranscribing(false);
+      }
+      if (options?.clearInput) {
+        setInput("");
+      }
+      setComposerError(null);
+    },
+    [isRecording, isTranscribing, stopRecording, setInput]
+  );
 
   useEffect(() => {
     if (isVoiceFlowActive) {
@@ -1309,31 +1446,27 @@ export default function Home() {
     []
   );
 
-  const handleMicClick = useCallback(async () => {
-    if (isTranscribing) {
+  const finishRecordingAndTranscribe = useCallback(async () => {
+    if (!isRecording) {
       return;
     }
-    if (isRecording) {
-      setIsRecording(false);
-      setIsTranscribing(true);
-      try {
-        const blob = await stopRecording(true);
-        if (blob) {
-          await transcribeAudio(blob);
-        } else {
-          setComposerError("Recording was too short.");
-        }
-      } catch (error) {
-        if ((error as DOMException)?.name !== "AbortError") {
-          setComposerError("Unable to capture audio.");
-        }
-      } finally {
-        setIsTranscribing(false);
+    setIsRecording(false);
+    setIsTranscribing(true);
+    try {
+      const blob = await stopRecording(true);
+      if (blob) {
+        await transcribeAudio(blob);
+      } else {
+        setComposerError("Recording was too short.");
       }
-      return;
+    } catch (error) {
+      if ((error as DOMException)?.name !== "AbortError") {
+        setComposerError("Unable to capture audio.");
+      }
+    } finally {
+      setIsTranscribing(false);
     }
-    await startRecording();
-  }, [isRecording, isTranscribing, startRecording, stopRecording, transcribeAudio]);
+  }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
     const convo = conversations.find((c) => c.id === id);
@@ -1753,10 +1886,22 @@ type RetryOptions = {
                         thoughtDurationSeconds: msg.thoughtDurationSeconds,
                         thoughtDurationLabel: msg.thoughtDurationLabel,
                       };
-                      const discoveredSiteLabel = deriveSearchDomain(
-                        mergedMetadata.searchRecords,
-                        mergedMetadata.citations
-                      );
+                      const domainAdditions = [
+                        ...collectDomainsFromSearchRecords(
+                          mergedMetadata.searchRecords
+                        ),
+                        ...collectDomainsFromCitations(
+                          mergedMetadata.citations
+                        ),
+                      ];
+                      if (domainAdditions.length > 0) {
+                        mergedMetadata.searchedDomains = mergeSearchedDomains(
+                          mergedMetadata.searchedDomains,
+                          domainAdditions
+                        );
+                      }
+                      const discoveredSiteLabel =
+                        getLatestSearchedDomainLabel(mergedMetadata);
                       if (discoveredSiteLabel) {
                         mergedMetadata.searchedSiteLabel =
                           discoveredSiteLabel;
@@ -1824,7 +1969,8 @@ type RetryOptions = {
                     const targetMessageId =
                       responseTimingRef.current.assistantMessageId;
                     if (startTime && targetMessageId) {
-                      const seconds = Math.max(0, (now - startTime) / 1000);
+                      const elapsedMs = Math.max(0, now - startTime);
+                      const seconds = elapsedMs / 1000;
                       const formatted = formatThoughtDurationLabel(seconds);
                       let persistedIdForTiming: string | undefined;
                       let updatedMetadata: MessageMetadata | null = null;
@@ -1834,6 +1980,7 @@ type RetryOptions = {
                           persistedIdForTiming = msg.persistedId;
                           const nextMetadata: MessageMetadata = {
                             ...(msg.metadata || {}),
+                            thinkingDurationMs: elapsedMs,
                             thoughtDurationSeconds: seconds,
                             thoughtDurationLabel: formatted,
                           };
@@ -1926,6 +2073,26 @@ type RetryOptions = {
                         ...(msg.metadata || {}),
                         citations: sourcesEvent.sources ?? [],
                       };
+                      const citationDomains = collectDomainsFromCitations(
+                        sourcesEvent.sources
+                      );
+                      if (citationDomains.length > 0) {
+                        nextMetadata.searchedDomains = mergeSearchedDomains(
+                          nextMetadata.searchedDomains,
+                          citationDomains
+                        );
+                        const latestDomain = getLatestSearchedDomainLabel(
+                          nextMetadata
+                        );
+                        if (latestDomain) {
+                          nextMetadata.searchedSiteLabel = latestDomain;
+                          setSearchIndicator((prev) =>
+                            prev?.variant === "running"
+                              ? { ...prev, siteLabel: latestDomain }
+                              : prev
+                          );
+                        }
+                      }
                       metadataForPersist = nextMetadata;
                       localMessageId = msg.id ?? null;
                       resolvedPersistedId = msg.persistedId ?? null;
@@ -3221,6 +3388,14 @@ type RetryOptions = {
                               m.thoughtDurationSeconds
                             )
                           : null;
+                    const lastSearchedDomain = getLatestSearchedDomainLabel(
+                      m.metadata
+                    );
+                    const showSearchChip =
+                      isAssistant &&
+                      (Boolean(lastSearchedDomain) ||
+                        Boolean(m.metadata?.searchedDomains?.length) ||
+                        usedWebSearchFlag);
                     const assistantWrapperClass =
                       "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
                     const userWrapperClass =
@@ -3237,17 +3412,48 @@ type RetryOptions = {
                           <div
                             className={`${assistantWrapperClass} px-1 py-1 text-left text-[15px] leading-relaxed text-zinc-100 md:px-2`}
                           >
-                            {thoughtLabel && (
-                              <div className="mb-2">
-                                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300">
-                                  <span
-                                    className="h-2 w-2 rounded-full bg-zinc-500"
-                                    aria-hidden
-                                  />
-                                  <span>{thoughtLabel}</span>
+                            {(() => {
+                              const statusChips: ReactNode[] = [];
+                              if (thoughtLabel) {
+                                statusChips.push(
+                                  <div
+                                    key={`${messageId}-thought-chip`}
+                                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300"
+                                  >
+                                    <span
+                                      className="h-2 w-2 rounded-full bg-zinc-500"
+                                      aria-hidden
+                                    />
+                                    <span>{thoughtLabel}</span>
+                                  </div>
+                                );
+                              }
+                              if (showSearchChip) {
+                                statusChips.push(
+                                  <div
+                                    key={`${messageId}-search-chip`}
+                                    className="flex flex-col rounded-2xl border border-[#2f3750] bg-[#141826]/80 px-3 py-1.5 text-xs text-[#9bb8ff]"
+                                  >
+                                    <span className="font-medium leading-tight">
+                                      Searching the web
+                                    </span>
+                                    {lastSearchedDomain ? (
+                                      <span className="text-[11px] text-[#9bb8ff]/80">
+                                        Searched {lastSearchedDomain}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                );
+                              }
+                              if (!statusChips.length) {
+                                return null;
+                              }
+                              return (
+                                <div className="mb-2 flex flex-wrap items-center gap-2">
+                                  {statusChips.map((chip) => chip)}
                                 </div>
-                              </div>
-                            )}
+                              );
+                            })()}
                             <div className="space-y-3 text-[15px] leading-relaxed">
                               <div className="prose prose-invert max-w-none text-sm">
                                 <ReactMarkdown
@@ -3769,7 +3975,7 @@ type RetryOptions = {
                       </div>
                     )}
 
-                    <div className="flex items-end gap-3">
+                    <div className="flex items-center gap-3">
                       <div className="flex w-full flex-col gap-2">
                         <div
                           className={`flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`}
@@ -3777,59 +3983,35 @@ type RetryOptions = {
                           <div className="relative mr-1 shrink-0">
                             <button
                               type="button"
-                              aria-label={
-                                isRecording
-                                  ? "Stop recording"
-                                  : isTranscribing
-                                    ? "Cancel transcription"
-                                    : "Composer options"
-                              }
+                              aria-label="Composer options"
                               aria-expanded={
                                 !isVoiceFlowActive ? composerMenuOpen : undefined
                               }
+                              disabled={isVoiceFlowActive}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                if (isRecording) {
-                                  void handleMicClick();
-                                  return;
-                                }
-                                if (isTranscribing) {
-                                  cancelRecordingFlow();
+                                if (isVoiceFlowActive) {
                                   return;
                                 }
                                 setComposerMenuOpen((prev) => !prev);
                               }}
                               className={`flex h-9 w-9 items-center justify-center rounded-full transition ${
                                 isVoiceFlowActive
-                                  ? "bg-red-500/20 text-red-200"
+                                  ? "cursor-not-allowed text-white/30"
                                   : "text-white/80 hover:bg-white/10"
                               }`}
                             >
-                              {isVoiceFlowActive ? (
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-5 w-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                >
-                                  <path d="M6 6l12 12M6 18 18 6" />
-                                </svg>
-                              ) : (
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-5 w-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                >
-                                  <path d="M12 5v14M5 12h14" />
-                                </svg>
-                              )}
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-5 w-5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={2}
+                                strokeLinecap="round"
+                              >
+                                <path d="M12 5v14M5 12h14" />
+                              </svg>
                             </button>
                             {!isVoiceFlowActive && composerMenuOpen && (
                               <div
@@ -3920,10 +4102,13 @@ type RetryOptions = {
                           <div className="flex flex-1 items-center">
                             <textarea
                               ref={textareaRef}
-                              className={`w-full resize-none border-none bg-transparent py-0 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
+                              className={`block h-full w-full resize-none border-none bg-transparent text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
                                 isVoiceFlowActive ? "hidden" : ""
                               }`}
-                              style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                              style={{
+                                maxHeight: MAX_INPUT_HEIGHT,
+                                minHeight: MIN_INPUT_HEIGHT,
+                              }}
                               value={input}
                               onChange={(e) => setInput(e.target.value)}
                               onKeyDown={handleKeyDown}
@@ -3932,46 +4117,28 @@ type RetryOptions = {
                             />
                             {isVoiceFlowActive ? (
                               isRecording ? (
-                                <div className="flex h-10 w-full items-center" aria-live="polite">
-                                  <svg
-                                    viewBox="0 0 100 24"
-                                    className="h-8 w-full text-red-400/80"
-                                    preserveAspectRatio="none"
-                                  >
-                                    <defs>
-                                      <linearGradient
-                                        id="composerWaveformGradient"
-                                        x1="0%"
-                                        y1="0%"
-                                        x2="100%"
-                                        y2="0%"
-                                      >
-                                        <stop
-                                          offset="0%"
-                                          stopColor="rgba(248,113,113,0.45)"
+                                <div className="flex h-12 w-full items-center" aria-live="polite">
+                                  <div className="flex w-full items-center gap-1 rounded-xl bg-[#2a1216]/80 px-3 py-2">
+                                    {waveformLevels.map((level, index) => {
+                                      const height = 6 + Math.round(level * 24);
+                                      return (
+                                        <span
+                                          key={`wave-${index}`}
+                                          className="flex-1 rounded-full bg-red-400/80"
+                                          style={{
+                                            height: `${height}px`,
+                                            transition: "height 120ms ease",
+                                          }}
                                         />
-                                        <stop
-                                          offset="100%"
-                                          stopColor="rgba(248,113,113,0.9)"
-                                        />
-                                      </linearGradient>
-                                    </defs>
-                                    <path
-                                      d={buildWaveformPath(waveformLevels)}
-                                      fill="url(#composerWaveformGradient)"
-                                    />
-                                    <line
-                                      x1="0"
-                                      y1="12"
-                                      x2="100"
-                                      y2="12"
-                                      stroke="rgba(255,255,255,0.08)"
-                                      strokeWidth="0.5"
-                                    />
-                                  </svg>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               ) : (
-                                <div className="flex h-10 w-full items-center justify-center text-sm text-zinc-400">
+                                <div
+                                  className="flex h-10 w-full items-center justify-center text-sm text-zinc-400"
+                                  aria-live="polite"
+                                >
                                   Transcribing…
                                 </div>
                               )
@@ -3995,76 +4162,70 @@ type RetryOptions = {
                           </div>
 
                           <div className="flex items-center gap-2 pl-2">
-                            {!isVoiceFlowActive && (
+                            {isVoiceFlowActive && (
                               <button
                                 type="button"
-                                aria-label={
-                                  isRecording ? "Stop recording" : "Start voice input"
-                                }
-                                onClick={handleMicClick}
-                                disabled={isTranscribing}
-                                className={`flex h-9 w-9 items-center justify-center rounded-full text-white/80 transition hover:bg-white/10 ${
-                                  isTranscribing ? "cursor-wait opacity-60" : ""
-                                }`}
+                                aria-label="Cancel voice input"
+                                onClick={() => cancelRecordingFlow({ clearInput: true })}
+                                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-[#2a2a2a] text-white/80 transition hover:text-white"
                               >
-                                {isTranscribing ? (
-                                  <span className="inline-flex h-4 w-4 items-center justify-center">
-                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
-                                  </span>
-                                ) : (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-5 w-5"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth={1.8}
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  >
-                                    <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                                    <path d="M19 11.5a7 7 0 0 1-14 0" />
-                                    <path d="M12 18.5v2" />
-                                  </svg>
-                                )}
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  strokeLinecap="round"
+                                >
+                                  <path d="M6 6l12 12M6 18 18 6" />
+                                </svg>
                               </button>
                             )}
-                            {shouldShowSendButton && (
-                              <button
-                                type="button"
-                                onClick={handlePrimaryAction}
-                                disabled={sendButtonDisabled}
-                                className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                                  isStreaming ? "hover:bg-[#225fd0]" : "hover:bg-[#3c7cff]"
-                                } ${sendButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
-                                aria-label={sendButtonAriaLabel}
-                              >
-                                {isStreaming ? (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-4 w-4"
-                                    fill="currentColor"
-                                  >
-                                    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-5 w-5"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth={2}
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  >
-                                    <path d="M12 18V6" />
-                                    <path d="M6 12l6-6 6 6" />
-                                  </svg>
-                                )}
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={handlePrimaryAction}
+                              disabled={primaryButtonDisabled}
+                              className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                                primaryActionMode === "stop"
+                                  ? "hover:bg-[#225fd0]"
+                                  : "hover:bg-[#3c7cff]"
+                              } ${primaryButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
+                              aria-label={primaryButtonAriaLabel}
+                            >
+                              {primaryActionMode === "stop" ? (
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="currentColor"
+                                >
+                                  <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                                </svg>
+                              ) : primaryActionMode === "confirm-recording" ? (
+                                <CheckmarkIcon className="h-5 w-5" />
+                              ) : primaryActionMode === "transcribing" ? (
+                                <span className="inline-flex h-5 w-5 items-center justify-center">
+                                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
+                                </span>
+                              ) : primaryActionMode === "send" ? (
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-5 w-5"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M12 18V6" />
+                                  <path d="M6 12l6-6 6 6" />
+                                </svg>
+                              ) : (
+                                <VoiceWaveIcon className="h-5 w-5" />
+                              )}
+                            </button>
                           </div>
                         </div>
                       </div>
