@@ -65,6 +65,11 @@ type MessageMetadata = {
   files?: FileAttachment[];
   vectorStoreIds?: string[];
   attachments?: ImageAttachment[];
+  generationType?: "text" | "image";
+  generatedImages?: GeneratedImageResult[];
+  imagePrompt?: string;
+  imageModelLabel?: string;
+  searchedSiteLabel?: string;
 };
 
 type ChatMessage = {
@@ -85,6 +90,15 @@ type ChatMessage = {
   metadata?: MessageMetadata;
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
+};
+
+type ImageModelKey = "gpt-image-1" | "gpt-image-1-mini";
+
+type GeneratedImageResult = {
+  id: string;
+  dataUrl: string;
+  model: ImageModelKey;
+  prompt?: string;
 };
 
 type Project = {
@@ -128,6 +142,16 @@ const MODEL_RETRY_OPTIONS: {
   { value: "gpt-5.1", label: "GPT 5.1" },
   { value: "gpt-5-pro-2025-10-06", label: "GPT 5 Pro" },
 ];
+
+const IMAGE_MODEL_OPTIONS: { value: ImageModelKey; label: string }[] = [
+  { value: "gpt-image-1", label: "GPT Image" },
+  { value: "gpt-image-1-mini", label: "GPT Image Mini" },
+];
+
+const IMAGE_MODEL_LABELS: Record<ImageModelKey, string> = {
+  "gpt-image-1": "GPT Image",
+  "gpt-image-1-mini": "GPT Image Mini",
+};
 
 const OTHER_MODEL_GROUPS: Array<{
   family: Exclude<ModelFamily, "auto" | "gpt-5.1">;
@@ -186,9 +210,11 @@ type ThinkingStatus =
 function StatusBubble({
   label,
   variant = "default",
+  subtext,
 }: {
   label: string;
   variant?: StatusVariant;
+  subtext?: string;
 }) {
   const baseClassMap: Record<StatusVariant, string> = {
     default: "border-white/5 bg-[#1b1b20]/90 text-zinc-400",
@@ -210,14 +236,19 @@ function StatusBubble({
 
   return (
     <div
-      className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${baseClassMap[variant]}`}
+      className={`flex flex-col items-center gap-1 rounded-full border px-3 py-1 text-xs ${baseClassMap[variant]} sm:flex-row sm:items-center sm:gap-2`}
       aria-live="polite"
     >
-      <span
-        className={`h-2 w-2 rounded-full ${dotMap[variant]} ${pulseClass}`}
-        aria-hidden
-      />
-      <span>{label}</span>
+      <div className="flex items-center gap-2">
+        <span
+          className={`h-2 w-2 rounded-full ${dotMap[variant]} ${pulseClass}`}
+          aria-hidden
+        />
+        <span>{label}</span>
+      </div>
+      {subtext ? (
+        <span className="text-[11px] opacity-80">{subtext}</span>
+      ) : null}
     </div>
   );
 }
@@ -319,6 +350,63 @@ function extractDomainFromUrl(url?: string | null) {
   }
 }
 
+const SEARCH_DOMAIN_LABELS: Record<string, string> = {
+  "en.wikipedia.org": "Wikipedia",
+};
+
+function formatSearchSiteLabel(hostname?: string | null) {
+  if (!hostname) return null;
+  const normalized = hostname.toLowerCase();
+  return SEARCH_DOMAIN_LABELS[normalized] ?? normalized;
+}
+
+function deriveSearchDomain(
+  searchRecords?: SearchRecord[] | null,
+  citations?: Source[] | null
+) {
+  const recordDomain = searchRecords
+    ?.flatMap((record) => [
+      ...(record.rankedSources ?? []),
+      ...(record.rawResults ?? []),
+    ])
+    .map((source) => source.domain || extractDomainFromUrl(source.url))
+    .find((domain) => !!domain);
+  if (recordDomain) {
+    return formatSearchSiteLabel(recordDomain);
+  }
+  const citationDomain = citations
+    ?.map((source) => source.domain || extractDomainFromUrl(source.url))
+    .find((domain) => !!domain);
+  if (citationDomain) {
+    return formatSearchSiteLabel(citationDomain);
+  }
+  return null;
+}
+
+function buildWaveformPath(levels: number[]) {
+  if (!levels.length) {
+    return "M0 12 L100 12";
+  }
+  const height = 24;
+  const centerY = height / 2;
+  const amplitude = centerY - 1;
+  const width = Math.max(1, levels.length - 1);
+  const step = 100 / width;
+  const topPath: string[] = [];
+  const bottomPath: string[] = [];
+  levels.forEach((level, index) => {
+    const clamped = Math.max(0.08, Math.min(1, level));
+    const x = Number((index * step).toFixed(2));
+    const offset = clamped * amplitude;
+    const topY = Number((centerY - offset).toFixed(2));
+    const bottomY = Number((centerY + offset).toFixed(2));
+    const command = index === 0 ? "M" : "L";
+    topPath.push(`${command}${x} ${topY}`);
+    bottomPath.unshift(`L${x} ${bottomY}`);
+  });
+  return `${topPath.join(" ")} ${bottomPath.join(" ")} Z`;
+}
+
 export default function Home() {
   // ------------------------------------------------------------
   // STATE
@@ -330,6 +418,7 @@ export default function Home() {
   const [modelFamily, setModelFamily] = useState<ModelFamily>("gpt-5.1");
   const [speedMode, setSpeedMode] = useState<SpeedMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
+  const [createImageArmed, setCreateImageArmed] = useState(false);
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>(
     []
   );
@@ -388,7 +477,8 @@ export default function Home() {
     null
   );
   const [searchIndicator, setSearchIndicator] = useState<
-    { message: string; variant: "running" | "error" } | null
+    { message: string; variant: "running" | "error"; siteLabel?: string }
+      | null
   >(null);
   const [fileReadingIndicator, setFileReadingIndicator] = useState<
     "running" | "error" | null
@@ -397,6 +487,7 @@ export default function Home() {
   const [waveformLevels, setWaveformLevels] = useState<number[]>(() =>
     createEmptyWaveform()
   );
+  const [isMultilineInput, setIsMultilineInput] = useState(false);
 
   const cleanupWaveformVisualizer = useCallback(() => {
     if (waveformAnimationRef.current) {
@@ -737,6 +828,8 @@ export default function Home() {
     el.style.height = `${nextHeight}px`;
     el.style.overflowY =
       el.scrollHeight > MAX_INPUT_HEIGHT ? "auto" : "hidden";
+    const isMulti = el.scrollHeight > MIN_INPUT_HEIGHT + 2;
+    setIsMultilineInput((prev) => (prev === isMulti ? prev : isMulti));
   }, [input]);
 
   useEffect(() => {
@@ -830,10 +923,11 @@ export default function Home() {
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const trimmedInput = input.trim();
-  const canSendMessage =
-    trimmedInput.length > 0 ||
-    imageAttachments.length > 0 ||
-    fileAttachments.length > 0;
+  const hasComposerAttachments =
+    imageAttachments.length > 0 || fileAttachments.length > 0;
+  const canSendMessage = createImageArmed
+    ? trimmedInput.length > 0 && !hasComposerAttachments
+    : trimmedInput.length > 0 || hasComposerAttachments;
   const headerModelLabel =
     modelFamily === "auto"
       ? `Auto (${describeModelFamily("gpt-5-mini")})`
@@ -852,14 +946,23 @@ export default function Home() {
     ? "Stop response"
     : sendButtonDisabled
       ? "Send message (unavailable)"
-      : "Send message";
+      : createImageArmed
+        ? "Send image prompt"
+        : "Send message";
+  const composerShapeClass = isMultilineInput
+    ? "rounded-[26px] py-2.5"
+    : "rounded-full py-1.5";
   const handlePrimaryAction = () => {
     if (isStreaming) {
       handleStopGeneration();
       return;
     }
     if (!sendButtonDisabled) {
-      void sendMessage();
+      if (createImageArmed) {
+        void sendImageMessage();
+      } else {
+        void sendTextMessage();
+      }
     }
   };
 
@@ -1317,7 +1420,7 @@ type RetryOptions = {
   userMessagePersistedId?: string | null;
 };
 
-  type SendMessageOptions = {
+  type SendTextMessageOptions = {
     messageOverride?: string;
     attachmentsOverride?: ImageAttachment[];
     fileAttachmentsOverride?: FileAttachment[];
@@ -1326,10 +1429,16 @@ type RetryOptions = {
     retry?: RetryOptions;
   };
 
+  type SendImageMessageOptions = {
+    messageOverride?: string;
+    modelOverride?: ImageModelKey;
+    retry?: RetryOptions;
+  };
+
   // ------------------------------------------------------------
   // SEND MESSAGE — STREAMING
   // ------------------------------------------------------------
-  async function sendMessage(options?: SendMessageOptions) {
+  async function sendTextMessage(options?: SendTextMessageOptions) {
     if (isStreaming) return;
     const sourceText = options?.messageOverride ?? input;
     const activeAttachments =
@@ -1443,6 +1552,7 @@ type RetryOptions = {
           role: "assistant",
           content: "",
           metadata: {
+            generationType: "text",
             requestedModelMode: requestedLegacyMode,
             requestedModelFamily: chosenFamily,
             speedMode: chosenSpeed,
@@ -1471,6 +1581,7 @@ type RetryOptions = {
             thoughtDurationSeconds: undefined,
             thoughtDurationLabel: undefined,
             metadata: {
+              generationType: "text",
               requestedModelMode: requestedLegacyMode,
               requestedModelFamily: chosenFamily,
               speedMode: chosenSpeed,
@@ -1642,6 +1753,22 @@ type RetryOptions = {
                         thoughtDurationSeconds: msg.thoughtDurationSeconds,
                         thoughtDurationLabel: msg.thoughtDurationLabel,
                       };
+                      const discoveredSiteLabel = deriveSearchDomain(
+                        mergedMetadata.searchRecords,
+                        mergedMetadata.citations
+                      );
+                      if (discoveredSiteLabel) {
+                        mergedMetadata.searchedSiteLabel =
+                          discoveredSiteLabel;
+                        setSearchIndicator((prev) =>
+                          prev?.variant === "running"
+                            ? { ...prev, siteLabel: discoveredSiteLabel }
+                            : prev
+                        );
+                      }
+                      if (!mergedMetadata.generationType) {
+                        mergedMetadata.generationType = "text";
+                      }
                       return {
                         ...msg,
                         usedModel: meta.usedModel ?? msg.usedModel,
@@ -1747,6 +1874,7 @@ type RetryOptions = {
                     setSearchIndicator({
                       message: "Searching the web…",
                       variant: "running",
+                      siteLabel: undefined,
                     });
                   } else if (status.type === "search-complete") {
                     // keep indicator visible until first token arrives
@@ -1755,6 +1883,7 @@ type RetryOptions = {
                       message:
                         status.message || "Web search failed. Using prior data.",
                       variant: "error",
+                      siteLabel: undefined,
                     });
                   } else if (status.type === "file-reading-start") {
                     setFileReadingIndicator("running");
@@ -1902,10 +2031,248 @@ type RetryOptions = {
       }
     }
   }
+
+  async function sendImageMessage(options?: SendImageMessageOptions) {
+    if (isStreaming) return;
+    const sourceText = options?.messageOverride ?? input;
+    const prompt = sourceText.trim();
+    if (!prompt) {
+      setComposerError("Enter a prompt to create an image.");
+      return;
+    }
+    if (imageAttachments.length > 0 || fileAttachments.length > 0) {
+      setComposerError("Remove attachments before creating an image.");
+      return;
+    }
+
+    let conversationId = selectedConversationId;
+    let assistantMessageId: string | null =
+      options?.retry?.assistantMessageId ?? null;
+    let userMessageId: string | null = null;
+    const isRetry = Boolean(options?.retry);
+
+    if (!options?.messageOverride) {
+      setInput("");
+      setImageAttachments([]);
+      setFileAttachments([]);
+    }
+    setComposerError(null);
+    setIsStreaming(true);
+    setComposerMenuOpen(false);
+    setRowMenu(null);
+    setMoveMenuConversationId(null);
+    setAutoScrollEnabled(true);
+    setShowScrollButton(false);
+    setForceWebSearch(false);
+    setSearchIndicator(null);
+    setFileReadingIndicator(null);
+    setThinkingStatus({ variant: "thinking", label: "Generating image…" });
+
+    try {
+      if (!conversationId && isRetry) {
+        throw new Error("Cannot retry without a conversation");
+      }
+      if (!conversationId) {
+        const conv = await createConversation("New chat", selectedProjectId);
+        conversationId = conv.id;
+        setSelectedConversationId(conv.id);
+        setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
+        setViewMode("chat");
+        skipAutoLoadRef.current = conv.id;
+      }
+
+      if (!assistantMessageId) {
+        assistantMessageId = createLocalId();
+      }
+      responseTimingRef.current = {
+        start:
+          typeof performance !== "undefined" ? performance.now() : Date.now(),
+        firstToken: null,
+        assistantMessageId,
+      };
+      setActiveAssistantMessageId(assistantMessageId);
+
+      if (!isRetry) {
+        const newUserMessageId = createLocalId();
+        userMessageId = newUserMessageId;
+        const placeholderAssistantId = assistantMessageId!;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: newUserMessageId,
+            role: "user",
+            content: prompt,
+          },
+          {
+            id: placeholderAssistantId,
+            role: "assistant",
+            content: "",
+            metadata: {
+              generationType: "image",
+              imagePrompt: prompt,
+            },
+          },
+        ]);
+      } else {
+        if (assistantMessageId) {
+          pendingMetadataPersistRef.current.delete(assistantMessageId);
+        }
+        const promptCopy = prompt;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? {
+                  ...msg,
+                  content: "",
+                  usedModel: undefined,
+                  usedModelMode: undefined,
+                  usedModelFamily: undefined,
+                  metadata: {
+                    ...(msg.metadata || {}),
+                    generationType: "image",
+                    imagePrompt: promptCopy,
+                    generatedImages: [],
+                    imageModelLabel: undefined,
+                  },
+                }
+              : msg
+          )
+        );
+      }
+
+      abortControllerRef.current?.abort();
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
+      const requestBody: Record<string, unknown> = {
+        prompt,
+        conversationId,
+      };
+      if (options?.modelOverride) {
+        requestBody.model = options.modelOverride;
+      }
+      if (options?.retry?.assistantPersistedId) {
+        requestBody.retryAssistantMessageId =
+          options.retry.assistantPersistedId;
+      }
+      if (options?.retry?.userMessagePersistedId) {
+        requestBody.retryUserMessageId =
+          options.retry.userMessagePersistedId;
+      }
+
+      const res = await fetch("/api/image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      });
+      if (!res.ok) {
+        throw new Error("Image generation failed");
+      }
+      const payload = (await res.json()) as {
+        assistantMessageId?: string;
+        userMessageId?: string;
+        images: GeneratedImageResult[];
+        usedModel: ImageModelKey;
+        metadata?: Partial<MessageMetadata>;
+        content?: string;
+      };
+
+      const resolvedAssistantId =
+        payload.assistantMessageId ?? assistantMessageId;
+      const imageModelLabel =
+        IMAGE_MODEL_LABELS[payload.usedModel] ?? payload.usedModel;
+      const resolvedMetadata: MessageMetadata = {
+        generationType: "image",
+        imagePrompt: prompt,
+        imageModelLabel,
+        generatedImages: payload.images,
+        ...(payload.metadata || {}),
+      };
+      const assistantContent =
+        payload.content?.trim() ||
+        (payload.images.length > 1
+          ? "Created the requested images."
+          : "Created the requested image.");
+
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== assistantMessageId) return msg;
+          return {
+            ...msg,
+            content: assistantContent,
+            metadata: resolvedMetadata,
+            usedModel: payload.usedModel,
+            persistedId: payload.assistantMessageId ?? msg.persistedId,
+          };
+        })
+      );
+
+      if (resolvedAssistantId) {
+        persistMessageMetadata(resolvedAssistantId, resolvedMetadata);
+      } else if (assistantMessageId) {
+        pendingMetadataPersistRef.current.set(
+          assistantMessageId,
+          resolvedMetadata
+        );
+      }
+
+      if (payload.userMessageId && userMessageId) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === userMessageId
+              ? { ...msg, persistedId: payload.userMessageId ?? msg.persistedId }
+              : msg
+          )
+        );
+      }
+      refreshConversations();
+    } catch (error) {
+      if ((error as DOMException)?.name === "AbortError") {
+        console.warn("Image request aborted");
+      } else {
+        console.error(error);
+        if (assistantMessageId) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    content: "Unable to create the image. Try again.",
+                  }
+                : msg
+            )
+          );
+        } else {
+          setComposerError("Unable to create the image. Try again.");
+        }
+      }
+    } finally {
+      abortControllerRef.current = null;
+      setIsStreaming(false);
+      setActiveAssistantMessageId((current) =>
+        assistantMessageId && current === assistantMessageId ? null : current
+      );
+      setThinkingStatus(null);
+      responseTimingRef.current = {
+        start: null,
+        firstToken: null,
+        assistantMessageId: null,
+      };
+      setCreateImageArmed(false);
+      if (assistantMessageId) {
+        pendingMetadataPersistRef.current.delete(assistantMessageId);
+      }
+    }
+  }
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      if (createImageArmed) {
+        void sendImageMessage();
+      } else {
+        void sendTextMessage();
+      }
     }
   }
 
@@ -1913,6 +2280,9 @@ type RetryOptions = {
     targetFamily: Exclude<ModelFamily, "auto">,
     targetMessage: ChatMessage
   ) {
+    if (targetMessage.metadata?.generationType === "image") {
+      return;
+    }
     if (!targetMessage.id) return;
     const targetIndex = messages.findIndex(
       (msg) => msg.id === targetMessage.id
@@ -1936,10 +2306,39 @@ type RetryOptions = {
     setExpandedSourcesId((prev) =>
       prev === targetMessage.id ? null : prev
     );
-    await sendMessage({
+    await sendTextMessage({
       messageOverride: relatedUserMessage.content,
       attachmentsOverride: relatedUserMessage.attachments ?? [],
       modelOverride: targetFamily,
+      retry: retryPayload,
+    });
+  }
+
+  async function handleRetryWithImageModel(
+    targetModel: ImageModelKey,
+    targetMessage: ChatMessage
+  ) {
+    if (!targetMessage.id) return;
+    const targetIndex = messages.findIndex(
+      (msg) => msg.id === targetMessage.id
+    );
+    if (targetIndex === -1) return;
+    const relatedUserMessage = [...messages]
+      .slice(0, targetIndex)
+      .reverse()
+      .find((msg) => msg.role === "user");
+    if (!relatedUserMessage) return;
+    const retryPayload: RetryOptions | undefined =
+      targetMessage.persistedId && relatedUserMessage.persistedId
+        ? {
+            assistantMessageId: targetMessage.id,
+            assistantPersistedId: targetMessage.persistedId,
+            userMessagePersistedId: relatedUserMessage.persistedId,
+          }
+        : undefined;
+    await sendImageMessage({
+      messageOverride: relatedUserMessage.content,
+      modelOverride: targetModel,
       retry: retryPayload,
     });
   }
@@ -2495,7 +2894,7 @@ type RetryOptions = {
                   event.stopPropagation();
                   setHeaderModelMenuOpen((prev) => !prev);
                 }}
-                className={`group inline-flex items-center gap-2 text-sm font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline ${
+                className={`group inline-flex items-center gap-2 text-base font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline md:text-lg ${
                   headerModelMenuOpen ? "text-white" : ""
                 }`}
               >
@@ -2796,6 +3195,16 @@ type RetryOptions = {
                     const showSourcesButton =
                       isAssistant &&
                       (usedWebSearchFlag || displayableSources.length > 0);
+                    const generatedImages = m.metadata?.generatedImages ?? [];
+                    const isImageMessage =
+                      m.metadata?.generationType === "image" &&
+                      generatedImages.length > 0;
+                    const imageModelLabel =
+                      isImageMessage && typeof m.usedModel === "string"
+                        ? IMAGE_MODEL_LABELS[
+                            m.usedModel as ImageModelKey
+                          ] || m.usedModel
+                        : null;
                     const sourceChips = (m.metadata?.sources ?? []).filter(
                       (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
                     );
@@ -2850,6 +3259,30 @@ type RetryOptions = {
                                 </ReactMarkdown>
                               </div>
                             </div>
+
+                            {isImageMessage ? (
+                              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                {generatedImages.map((image) => (
+                                  <div
+                                    key={`${messageId}-generated-${image.id}`}
+                                    className="overflow-hidden rounded-2xl border border-white/10 bg-black/30"
+                                  >
+                                    <Image
+                                      src={image.dataUrl}
+                                      alt={
+                                        image.prompt
+                                          ? `Generated: ${image.prompt}`
+                                          : "Generated image"
+                                      }
+                                      width={512}
+                                      height={512}
+                                      className="h-auto w-full object-cover"
+                                      unoptimized
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
 
                             {m.attachments?.length ? (
                               <div className="mt-3 flex flex-wrap gap-2">
@@ -2941,34 +3374,75 @@ type RetryOptions = {
                                         }}
                                         className="rounded-full border border-[#3a3a40] px-3 py-1 text-[11px] text-zinc-200 hover:border-[#5c5cf5]"
                                       >
-                                        {m.usedModelFamily
-                                          ? describeModelFamily(m.usedModelFamily)
-                                          : m.usedModel}
+                                        {imageModelLabel
+                                          ? imageModelLabel
+                                          : m.usedModelFamily
+                                            ? describeModelFamily(
+                                                m.usedModelFamily
+                                              )
+                                            : m.usedModel}
                                       </button>
 
                                       {openModelMenuId === messageId && (
                                         <div className="absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl">
-                                          {MODEL_RETRY_OPTIONS.map((option) => {
+                                          {(isImageMessage
+                                            ? IMAGE_MODEL_OPTIONS
+                                            : MODEL_RETRY_OPTIONS
+                                          ).map((option) => {
+                                            if (isImageMessage) {
+                                              const imageOption =
+                                                option as (typeof IMAGE_MODEL_OPTIONS)[number];
+                                              const isCurrentImage =
+                                                m.usedModel === imageOption.value;
+                                              return (
+                                                <button
+                                                  key={imageOption.value}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    handleRetryWithImageModel(
+                                                      imageOption.value,
+                                                      m
+                                                    );
+                                                  }}
+                                                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                                                >
+                                                  <span>
+                                                    Retry with {imageOption.label}
+                                                  </span>
+                                                  {isCurrentImage && (
+                                                    <span className="text-[10px] text-zinc-500">
+                                                      current
+                                                    </span>
+                                                  )}
+                                                </button>
+                                              );
+                                            }
+                                            const typedOption = option as (typeof MODEL_RETRY_OPTIONS)[number];
                                             const legacyMode =
-                                              option.value === "gpt-5-nano"
+                                              typedOption.value === "gpt-5-nano"
                                                 ? "nano"
-                                                : option.value === "gpt-5-mini"
+                                                : typedOption.value === "gpt-5-mini"
                                                   ? "mini"
                                                   : "full";
                                             const isCurrent =
-                                              m.usedModelFamily === option.value ||
+                                              m.usedModelFamily === typedOption.value ||
                                               (!m.usedModelFamily &&
                                                 m.usedModelMode === legacyMode);
                                             return (
                                               <button
-                                                key={option.value}
+                                                key={typedOption.value}
                                                 onClick={(event) => {
                                                   event.stopPropagation();
-                                                  handleRetryWithModel(option.value, m);
+                                                  handleRetryWithModel(
+                                                    typedOption.value,
+                                                    m
+                                                  );
                                                 }}
                                                 className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
                                               >
-                                                <span>Retry with {option.label}</span>
+                                                <span>
+                                                  Retry with {typedOption.label}
+                                                </span>
                                                 {isCurrent && (
                                                   <span className="text-[10px] text-zinc-500">
                                                     current
@@ -3127,6 +3601,11 @@ type RetryOptions = {
                               ? "error"
                               : "search"
                           }
+                          subtext={
+                            searchIndicator.siteLabel
+                              ? `Searched ${searchIndicator.siteLabel}`
+                              : undefined
+                          }
                         />
                       )}
                       {thinkingStatus && (
@@ -3172,8 +3651,8 @@ type RetryOptions = {
                 className="mx-auto flex w-full flex-col gap-3"
                 style={{ maxWidth: MAX_MESSAGE_WIDTH }}
               >
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
                     {forceWebSearch && (
                       <button
                         type="button"
@@ -3184,23 +3663,19 @@ type RetryOptions = {
                         <span>Web search</span>
                       </button>
                     )}
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {forceWebSearch && (
-                        <button
-                          type="button"
-                          onClick={() => setForceWebSearch(false)}
-                          className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]"
-                        >
-                          <span className="text-base leading-none">🌐</span>
-                          <span>Web search</span>
-                        </button>
-                      )}
-                    </div>
+                    {createImageArmed && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCreateImageArmed(false);
+                          setComposerError(null);
+                        }}
+                        className="flex items-center gap-1 rounded-full border border-white/30 bg-[#2b2b31] px-3 py-1 text-[11px] text-zinc-200"
+                      >
+                        <span className="text-base leading-none">🎨</span>
+                        <span>Create image</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex flex-col gap-2">
@@ -3296,7 +3771,9 @@ type RetryOptions = {
 
                     <div className="flex items-end gap-3">
                       <div className="flex w-full flex-col gap-2">
-                        <div className="flex w-full items-center gap-2 rounded-[999px] border border-white/10 bg-[#2b2b31]/90 px-3 py-1.5 shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
+                        <div
+                          className={`flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`}
+                        >
                           <div className="relative mr-1 shrink-0">
                             <button
                               type="button"
@@ -3383,10 +3860,24 @@ type RetryOptions = {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => setComposerMenuOpen(false)}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    onClick={() => {
+                                      if (hasComposerAttachments) {
+                                        setComposerError(
+                                          "Image generation does not support attachments yet."
+                                        );
+                                      } else {
+                                        setComposerError(null);
+                                      }
+                                      setCreateImageArmed(true);
+                                      setForceWebSearch(false);
+                                      setComposerMenuOpen(false);
+                                    }}
+                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
                                   >
-                                    Create image
+                                    <span>Create image</span>
+                                    {createImageArmed && (
+                                      <span className="text-[#8ab4ff]">Armed</span>
+                                    )}
                                   </button>
                                   <button
                                     type="button"
@@ -3398,7 +3889,13 @@ type RetryOptions = {
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      setForceWebSearch((prev) => !prev);
+                                      setForceWebSearch((prev) => {
+                                        const next = !prev;
+                                        if (next) {
+                                          setCreateImageArmed(false);
+                                        }
+                                        return next;
+                                      });
                                       setComposerMenuOpen(false);
                                     }}
                                     className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
@@ -3423,7 +3920,7 @@ type RetryOptions = {
                           <div className="flex flex-1 items-center">
                             <textarea
                               ref={textareaRef}
-                              className={`w-full resize-none border-none bg-transparent py-1 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
+                              className={`w-full resize-none border-none bg-transparent py-0 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
                                 isVoiceFlowActive ? "hidden" : ""
                               }`}
                               style={{ maxHeight: MAX_INPUT_HEIGHT }}
@@ -3435,17 +3932,43 @@ type RetryOptions = {
                             />
                             {isVoiceFlowActive ? (
                               isRecording ? (
-                                <div className="flex h-10 w-full items-end gap-1" aria-live="polite">
-                                  {waveformLevels.map((level, index) => (
-                                    <span
-                                      key={`wave-${index}`}
-                                      className="flex-1 rounded-full bg-red-400/70"
-                                      style={{
-                                        height: `${Math.max(6, level * 40)}px`,
-                                        opacity: 0.4 + level * 0.6,
-                                      }}
+                                <div className="flex h-10 w-full items-center" aria-live="polite">
+                                  <svg
+                                    viewBox="0 0 100 24"
+                                    className="h-8 w-full text-red-400/80"
+                                    preserveAspectRatio="none"
+                                  >
+                                    <defs>
+                                      <linearGradient
+                                        id="composerWaveformGradient"
+                                        x1="0%"
+                                        y1="0%"
+                                        x2="100%"
+                                        y2="0%"
+                                      >
+                                        <stop
+                                          offset="0%"
+                                          stopColor="rgba(248,113,113,0.45)"
+                                        />
+                                        <stop
+                                          offset="100%"
+                                          stopColor="rgba(248,113,113,0.9)"
+                                        />
+                                      </linearGradient>
+                                    </defs>
+                                    <path
+                                      d={buildWaveformPath(waveformLevels)}
+                                      fill="url(#composerWaveformGradient)"
                                     />
-                                  ))}
+                                    <line
+                                      x1="0"
+                                      y1="12"
+                                      x2="100"
+                                      y2="12"
+                                      stroke="rgba(255,255,255,0.08)"
+                                      strokeWidth="0.5"
+                                    />
+                                  </svg>
                                 </div>
                               ) : (
                                 <div className="flex h-10 w-full items-center justify-center text-sm text-zinc-400">
