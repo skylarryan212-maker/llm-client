@@ -936,8 +936,6 @@ export default function Home() {
     modelFamily === "gpt-5-pro-2025-10-06" || speedMode === "auto"
       ? null
       : SPEED_LABELS[speedMode];
-  const imageAttachmentLimitReached =
-    imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
   const isVoiceFlowActive = isRecording || isTranscribing;
   const shouldShowSendButton =
     isVoiceFlowActive || isStreaming || canSendMessage;
@@ -950,8 +948,8 @@ export default function Home() {
         ? "Send image prompt"
         : "Send message";
   const composerShapeClass = isMultilineInput
-    ? "rounded-[26px] py-2.5"
-    : "rounded-full py-1.5";
+    ? "input-row-expanded"
+    : "input-row-pill";
   const handlePrimaryAction = () => {
     if (isStreaming) {
       handleStopGeneration();
@@ -1096,25 +1094,6 @@ export default function Home() {
       setComposerError(null);
     }
     event.target.value = "";
-  };
-
-  const handleTakePhotoClick = () => {
-    if (imageAttachmentLimitReached) {
-      setComposerError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
-      return;
-    }
-    photoInputRef.current?.click();
-  };
-
-  const handleAddFilesClick = () => {
-    if (
-      fileAttachments.length >= MAX_FILE_ATTACHMENTS &&
-      imageAttachmentLimitReached
-    ) {
-      setComposerError("You've reached the attachment limit.");
-      return;
-    }
-    filePickerInputRef.current?.click();
   };
 
   const handleRemoveImageAttachment = (id: string) => {
@@ -2589,254 +2568,298 @@ type RetryOptions = {
   // ------------------------------------------------------------
   const SidebarSections = () => (
     <>
-      <div className="px-3 py-3">
+      <div className="sidebar-header">
+        <div className="flex flex-col gap-1">
+          <div className="sidebar-title">Workspaces &amp; Projects</div>
+          <div className="text-[10px] uppercase tracking-[0.4em] text-white/40">
+            LLM Client
+          </div>
+        </div>
+        <div className="sidebar-actions">
+          <button
+            type="button"
+            onClick={() => handleNewChat(true)}
+            aria-label="Start a new chat"
+          >
+            New chat
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowProjectModal(true)}
+            aria-label="Create project"
+          >
+            New project
+          </button>
+        </div>
+      </div>
+      <div className="sidebar-main">
         <button
           onClick={() => handleNewChat(true)}
-          className="flex w-full items-center gap-2 rounded-md bg-[#202123] px-3 py-2 text-sm text-zinc-100 hover:bg-[#26272b]"
+          className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-br from-[#5661f6] via-[#3c4ed8] to-[#1e2a6f] px-3 py-2 text-sm font-semibold text-white shadow-lg shadow-black/40 transition hover:opacity-95"
         >
           <span className="text-lg leading-none">＋</span>
           <span>New chat</span>
         </button>
-      </div>
+        <section className="sidebar-section">
+          <div className="sidebar-section-header">Projects</div>
+          <div className="flex flex-col gap-1.5">
+            {sortedProjects.length === 0 && (
+              <div className="rounded-xl bg-white/5 px-3 py-2 text-[11px] text-white/50">
+                No projects yet.
+              </div>
+            )}
 
-      {/* Projects */}
-      <div className="mt-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase text-zinc-500">
-        <span>Projects</span>
-        <button
-          onClick={() => setShowProjectModal(true)}
-          className="text-xs text-zinc-400 hover:text-zinc-200"
-        >
-          + New
-        </button>
-      </div>
-
-      <div className="mt-1 flex flex-col gap-1 px-2">
-        {sortedProjects.length === 0 && (
-          <div className="px-1 py-2 text-[11px] text-zinc-500">No projects yet.</div>
-        )}
-
-        {sortedProjects.map((p) => {
-          const isSelectedProject = sidebarActiveProjectId === p.id;
-          const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
-          const projectChatList = projectSidebarChats.get(p.id) || [];
-          const topChats = projectChatList.slice(0, MAX_PROJECT_CHAT_PREVIEW);
-          const hasMoreChats = projectChatList.length > MAX_PROJECT_CHAT_PREVIEW;
-          return (
-            <div key={p.id} className="group relative">
-              <div
-                className={`flex items-center rounded-md ${
-                  isSelectedProject
-                    ? "bg-[#202123] text-zinc-100"
-                    : "text-zinc-300 hover:bg-[#202123]"
-                }`}
-              >
-                <button
-                  className="flex-1 truncate px-3 py-2 text-left text-sm"
-                  onClick={() => handleProjectSelect(p.id)}
+            {sortedProjects.map((p) => {
+              const isSelectedProject = sidebarActiveProjectId === p.id;
+              const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
+              const projectChatList = projectSidebarChats.get(p.id) || [];
+              const topChats = projectChatList.slice(0, MAX_PROJECT_CHAT_PREVIEW);
+              const hasMoreChats = projectChatList.length > MAX_PROJECT_CHAT_PREVIEW;
+              return (
+                <div
+                  key={p.id}
+                  className="group relative rounded-2xl border border-white/5 bg-[oklch(16%_0.03_250)]/60 text-sm shadow-sm shadow-black/30"
                 >
-                  {p.name}
-                </button>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setMoveMenuConversationId(null);
-                    setRowMenu((prev) =>
-                      prev?.type === "project" && prev.id === p.id
-                        ? null
-                        : { type: "project", id: p.id }
-                    );
-                  }}
-                  aria-label="Project actions"
-                  className="mr-2 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
-                >
-                  ⋯
-                </button>
-
-                {isMenuOpen && (
                   <div
-                    onClick={(event) => event.stopPropagation()}
-                    className="absolute right-0 top-full z-30 mt-2 w-40 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1 text-left text-xs shadow-2xl"
+                    className={`flex items-center rounded-2xl px-3 py-2 ${
+                      isSelectedProject
+                        ? "bg-white/10 text-white"
+                        : "text-white/70"
+                    }`}
                   >
                     <button
-                      onClick={() => {
-                        renameProject(p.id);
-                        setRowMenu(null);
-                      }}
-                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1d1d24]"
-                    >
-                      Rename
-                    </button>
-                    <button
-                      onClick={() => {
-                        requestDeleteProject(p.id);
-                        setRowMenu(null);
-                      }}
-                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1d1d24]"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                )}
-              </div>
-              {isSelectedProject && topChats.length > 0 && (
-                <div className="ml-6 mt-1 space-y-1 border-l border-[#2a2a30] pl-3">
-                  {topChats.map((chat) => {
-                    const chatActive =
-                      selectedConversationId === chat.id && viewMode === "chat";
-                    return (
-                      <button
-                        key={chat.id}
-                        className={`block w-full truncate rounded-md px-2 py-1 text-left text-[12px] ${
-                          chatActive
-                            ? "bg-[#202123] text-white"
-                            : "text-zinc-400 hover:text-white"
-                        }`}
-                        onClick={() => handleConversationSelect(chat.id)}
-                      >
-                        {chat.title || "Untitled chat"}
-                      </button>
-                    );
-                  })}
-                  {hasMoreChats && (
-                    <button
-                      className="block w-full truncate rounded-md px-2 py-1 text-left text-[12px] text-zinc-500 hover:text-white"
+                      className="flex flex-1 items-center gap-3 truncate text-left"
                       onClick={() => handleProjectSelect(p.id)}
                     >
-                      Show more
+                      <span className="sidebar-item-icon text-[10px]">P</span>
+                      <span className="sidebar-item-text">{p.name}</span>
                     </button>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* All chats */}
-      <div className="mt-4 px-3 text-[11px] font-semibold uppercase text-zinc-500">
-        All chats
-      </div>
-
-      <div className="mt-1 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
-        {unassignedChats.length === 0 && (
-          <div className="px-1 py-2 text-[11px] text-zinc-500">
-            No unassigned chats yet.
-          </div>
-        )}
-
-        {unassignedChats.map((c) => {
-          const isActive = selectedConversationId === c.id && viewMode === "chat";
-          const isMenuOpen = rowMenu?.type === "conversation" && rowMenu.id === c.id;
-          const showMoveMenu = moveMenuConversationId === c.id;
-          return (
-            <div
-              key={c.id}
-              className={`group relative flex items-center rounded-md px-2 text-sm ${
-                isActive
-                  ? "bg-[#202123] text-zinc-100"
-                  : "text-zinc-300 hover:bg-[#202123]"
-              }`}
-            >
-              <button
-                className="flex-1 truncate px-1 py-2 text-left"
-                onClick={() => handleConversationSelect(c.id)}
-              >
-                {c.title || "Untitled chat"}
-              </button>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setMoveMenuConversationId(null);
-                  setRowMenu((prev) =>
-                    prev?.type === "conversation" && prev.id === c.id
-                      ? null
-                      : { type: "conversation", id: c.id }
-                  );
-                }}
-                aria-label="Conversation actions"
-                className="mr-1 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 opacity-0 transition hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
-              >
-                ⋯
-              </button>
-
-              {isMenuOpen && (
-                <div
-                  onClick={(event) => event.stopPropagation()}
-                  className="absolute right-0 top-full z-30 mt-2 w-48 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
-                >
-                  <button
-                    onClick={() => {
-                      renameConversation(c.id);
-                      setRowMenu(null);
-                      setMoveMenuConversationId(null);
-                    }}
-                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                  >
-                    Rename
-                  </button>
-                  <div className="relative">
                     <button
-                      onClick={() =>
-                        setMoveMenuConversationId((prev) =>
-                          prev === c.id ? null : c.id
-                        )
-                      }
-                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                      aria-expanded={showMoveMenu}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setMoveMenuConversationId(null);
+                        setRowMenu((prev) =>
+                          prev?.type === "project" && prev.id === p.id
+                            ? null
+                            : { type: "project", id: p.id }
+                        );
+                      }}
+                      aria-label="Project actions"
+                      className="ml-2 flex h-7 w-7 items-center justify-center rounded-full text-white/40 opacity-0 transition hover:bg-white/10 hover:text-white group-hover:opacity-100"
                     >
-                      Move to project
-                      <span className="text-[10px] text-zinc-500">
-                        {showMoveMenu ? "▲" : "▼"}
-                      </span>
+                      ⋯
                     </button>
-                    {showMoveMenu && (
-                      <div className="mt-2 space-y-1 rounded-xl border border-[#2a2a30] bg-[#0f0f14] p-1">
+                  </div>
+                  {isMenuOpen && (
+                    <div
+                      onClick={(event) => event.stopPropagation()}
+                      className="absolute left-full top-2 z-30 ml-2 w-56 rounded-2xl border border-white/10 bg-[#0f111b] p-3 text-xs text-white shadow-2xl"
+                    >
+                      <div className="space-y-2 text-[13px]">
                         <button
-                          onClick={() => handleMoveFromMenu(c.id, null)}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-white/80 transition hover:bg-white/5"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            renameProject(p.id);
+                            setRowMenu(null);
+                          }}
                         >
-                          No project
+                          Rename
                         </button>
-                        <div className="max-h-48 overflow-y-auto">
-                          {sortedProjects.map((proj) => (
-                            <button
-                              key={proj.id}
-                              onClick={() => handleMoveFromMenu(c.id, proj.id)}
-                              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21] ${
-                                proj.id === c.project_id
-                                  ? "bg-[#1b1b21]"
-                                  : ""
-                              }`}
-                            >
-                              {proj.name}
-                              {proj.id === c.project_id && (
-                                <span className="text-[10px] text-zinc-500">Current</span>
-                              )}
-                            </button>
-                          ))}
+                        <button
+                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-red-300 transition hover:bg-red-500/10"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestDeleteProject(p.id);
+                            setRowMenu(null);
+                          }}
+                        >
+                          Delete project
+                        </button>
+                        <div className="rounded-2xl bg-white/5 px-3 py-2 text-[12px] text-white/70">
+                          <div className="text-[11px] uppercase tracking-wide text-white/60">
+                            Recent chats
+                          </div>
+                          <div className="mt-2 flex max-h-48 flex-col gap-1 overflow-y-auto">
+                            {sortedConversations
+                              .filter((c) => c.project_id === p.id)
+                              .map((c) => (
+                                <button
+                                  key={c.id}
+                                  onClick={() => {
+                                    handleConversationSelect(c.id);
+                                    setRowMenu(null);
+                                    setSidebarOpen(false);
+                                  }}
+                                  className="truncate rounded-xl px-2 py-1 text-left text-[12px] text-white/80 transition hover:bg-white/10"
+                                >
+                                  {c.title || "Untitled chat"}
+                                </button>
+                              ))}
+                          </div>
                         </div>
                       </div>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => {
-                      requestDeleteConversation(c.id);
-                      setRowMenu(null);
-                      setMoveMenuConversationId(null);
-                    }}
-                    className="mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1b1b21]"
-                  >
-                    Delete
-                  </button>
+                    </div>
+                  )}
+                  {isSelectedProject && topChats.length > 0 && (
+                    <div className="ml-6 mt-2 space-y-1 border-l border-white/10 pl-3">
+                      {topChats.map((chat) => {
+                        const chatActive =
+                          selectedConversationId === chat.id && viewMode === "chat";
+                        return (
+                          <button
+                            key={chat.id}
+                            className={`block w-full truncate rounded-xl px-2 py-1 text-left text-[12px] transition ${
+                              chatActive
+                                ? "bg-white/10 text-white"
+                                : "text-white/60 hover:text-white"
+                            }`}
+                            onClick={() => handleConversationSelect(chat.id)}
+                          >
+                            {chat.title || "Untitled chat"}
+                          </button>
+                        );
+                      })}
+                      {hasMoreChats && (
+                        <button
+                          className="block w-full truncate rounded-xl px-2 py-1 text-left text-[12px] text-white/40 transition hover:text-white"
+                          onClick={() => handleProjectSelect(p.id)}
+                        >
+                          Show more
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </section>
+        <section className="sidebar-section">
+          <div className="sidebar-section-header">All chats</div>
+          <div className="space-y-1.5">
+            {unassignedChats.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-white/10 px-3 py-2 text-[11px] text-white/50">
+                No unassigned chats yet.
+              </div>
+            )}
 
-      <div className="border-t border-[#202123] px-3 py-3 text-xs text-zinc-500">
-        LLM Client · dev build
+            {unassignedChats.map((c) => {
+              const isActive = selectedConversationId === c.id && viewMode === "chat";
+              const isMenuOpen = rowMenu?.type === "conversation" && rowMenu.id === c.id;
+              const showMoveMenu = moveMenuConversationId === c.id;
+              return (
+                <div
+                  key={c.id}
+                  className={`group relative flex items-center rounded-2xl border border-white/5 px-3 text-sm shadow-sm transition ${
+                    isActive
+                      ? "bg-white/10 text-white"
+                      : "bg-[oklch(15%_0.03_250)]/80 text-white/70 hover:bg-white/5"
+                  }`}
+                >
+                  <button
+                    className="flex flex-1 items-center gap-3 truncate py-2 text-left"
+                    onClick={() => handleConversationSelect(c.id)}
+                  >
+                    <span className="sidebar-item-icon text-[10px]">C</span>
+                    <span className="sidebar-item-text">{c.title || "Untitled chat"}</span>
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setMoveMenuConversationId(null);
+                      setRowMenu((prev) =>
+                        prev?.type === "conversation" && prev.id === c.id
+                          ? null
+                          : { type: "conversation", id: c.id }
+                      );
+                    }}
+                    aria-label="Conversation actions"
+                    className="ml-2 flex h-7 w-7 items-center justify-center rounded-full text-white/40 opacity-0 transition hover:bg-white/10 hover:text-white group-hover:opacity-100"
+                  >
+                    ⋯
+                  </button>
+                  {isMenuOpen && (
+                    <div
+                      onClick={(event) => event.stopPropagation()}
+                      className="absolute right-full top-2 z-30 mr-2 w-60 rounded-2xl border border-white/10 bg-[#0f111b] p-3 text-xs text-white shadow-2xl"
+                    >
+                      <div className="space-y-2 text-[13px]">
+                        <button
+                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-white/80 transition hover:bg-white/5"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            renameConversation(c.id);
+                            setRowMenu(null);
+                          }}
+                        >
+                          Rename conversation
+                        </button>
+                        <button
+                          className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-white/80 transition hover:bg-white/5"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setMoveMenuConversationId((prev) =>
+                              prev === c.id ? null : c.id
+                            );
+                          }}
+                          aria-expanded={showMoveMenu}
+                        >
+                          Move to project
+                        </button>
+                        {showMoveMenu && (
+                          <div className="rounded-2xl bg-white/5 p-2 text-left text-[12px]">
+                            <div className="mb-2 text-[11px] uppercase tracking-wide text-white/60">
+                              Choose project
+                            </div>
+                            <div className="max-h-48 space-y-1 overflow-y-auto">
+                              <button
+                                onClick={() => handleMoveFromMenu(c.id, null)}
+                                className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-zinc-200 transition hover:bg-white/10"
+                              >
+                                No project
+                              </button>
+                              {sortedProjects.map((proj) => (
+                                <button
+                                  key={proj.id}
+                                  onClick={() => handleMoveFromMenu(c.id, proj.id)}
+                                  className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-zinc-200 transition hover:bg-white/10 ${
+                                    proj.id === c.project_id
+                                      ? "bg-white/10"
+                                      : ""
+                                  }`}
+                                >
+                                  {proj.name}
+                                  {proj.id === c.project_id && (
+                                    <span className="text-[10px] text-white/60">Current</span>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => {
+                          requestDeleteConversation(c.id);
+                          setRowMenu(null);
+                          setMoveMenuConversationId(null);
+                        }}
+                        className="mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-300 transition hover:bg-red-500/10"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+      <div className="sidebar-footer">
+        <span>LLM Client · dev build</span>
+        <span className="text-white/60">{projects.length} projects</span>
       </div>
     </>
   );
@@ -2845,77 +2868,75 @@ type RetryOptions = {
   // RENDER
   // ------------------------------------------------------------
   return (
-    <div className="flex h-screen min-h-0 bg-[#212121] text-zinc-100">
-      {/* Desktop Sidebar */}
-      <aside className="hidden w-64 min-h-0 flex-col border-r border-[#202123] bg-[#181818] md:flex">
+    <div className="chat-layout text-white">
+      <aside className="sidebar hidden md:flex">
         <SidebarSections />
       </aside>
 
-      {/* Mobile sidebar */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-40 flex md:hidden">
-          <div className="flex w-64 flex-col border-r border-[#202123] bg-[#181818]">
-            <div className="flex items-center justify-between border-b border-[#202123] px-3 py-3">
-              <span className="text-sm font-semibold">Menu</span>
-              <button
-                onClick={() => setSidebarOpen(false)}
-                className="text-sm text-zinc-400 hover:text-zinc-200"
-              >
-                Close
-              </button>
-            </div>
+        <div className="fixed inset-0 z-40 flex bg-black/60 backdrop-blur md:hidden">
+          <div className="sidebar relative w-[280px]">
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="absolute right-3 top-3 rounded-full border border-white/20 px-2 py-1 text-xs text-white/70 hover:text-white"
+            >
+              Close
+            </button>
             <SidebarSections />
           </div>
           <button
-            className="flex-1 bg-black/40"
+            className="flex-1"
             aria-label="Close sidebar"
             onClick={() => setSidebarOpen(false)}
           />
         </div>
       )}
 
-      {/* Main Content */}
-      <main className="flex flex-1 min-h-0 flex-col bg-[#212121]">
-        {/* Header */}
-        <header className="flex shrink-0 items-center justify-between border-b border-[#2a2a2a] bg-transparent px-4 py-3">
-          <div className="flex items-center gap-2">
-            <button
-              className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
-              onClick={() => setSidebarOpen(true)}
-            >
-              ☰
-            </button>
-            <div className="relative">
+      <div className="main-panel">
+        <header className="main-header">
+          <div className="main-title">
+            <div className="flex items-center gap-2">
               <button
-                type="button"
-                aria-expanded={headerModelMenuOpen}
-                aria-label="Choose model and speed"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setHeaderModelMenuOpen((prev) => !prev);
-                }}
-                className={`group inline-flex items-center gap-2 text-base font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline md:text-lg ${
-                  headerModelMenuOpen ? "text-white" : ""
-                }`}
+                className="rounded-full border border-white/20 px-3 py-1 text-sm text-white/70 hover:text-white md:hidden"
+                onClick={() => setSidebarOpen(true)}
+                aria-label="Open sidebar"
               >
-                <span className="text-white">LLM Client</span>
-                <span className="text-white">{headerModelLabel}</span>
-                {headerSpeedDisplay && (
-                  <span className="text-white">{headerSpeedDisplay}</span>
-                )}
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  className={`h-3 w-3 text-white/70 transition ${
-                    headerModelMenuOpen ? "-rotate-180 text-white" : ""
-                  }`}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
+                ☰
               </button>
+              <span className="main-title-label">LLM Client</span>
+            </div>
+            <div className="main-title-text">
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-expanded={headerModelMenuOpen}
+                  aria-label="Choose model and speed"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setHeaderModelMenuOpen((prev) => !prev);
+                  }}
+                  className={`group inline-flex items-baseline gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-2 text-lg font-semibold transition hover:border-white/40 hover:text-white ${
+                    headerModelMenuOpen ? "text-white" : "text-white/90"
+                  }`}
+                >
+                  <span>LLM Client</span>
+                  <span className="text-white">{headerModelLabel}</span>
+                  {headerSpeedDisplay && (
+                    <span className="text-sm text-white/70">{headerSpeedDisplay}</span>
+                  )}
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    className={`h-3 w-3 text-white/70 transition ${
+                      headerModelMenuOpen ? "-rotate-180 text-white" : ""
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
                 {headerModelMenuOpen && (
                   <div
                     onClick={(event) => event.stopPropagation()}
@@ -3052,17 +3073,23 @@ type RetryOptions = {
                           </div>
                         )}
                       </div>
-
                     </div>
                   </div>
                 )}
               </div>
             </div>
+          </div>
+          <div className="main-actions">
+            <button onClick={() => handleNewChat(true)}>New chat</button>
+            <button onClick={() => setShowProjectModal(true)}>New project</button>
+          </div>
         </header>
+
+        <main className="main-content">
 
         {/* PROJECT VIEW */}
         {inProjectView && currentProject ? (
-          <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-6">
+          <div className="chat-window overflow-y-auto">
             <div className="mx-auto max-w-3xl">
               <h1 className="mb-4 text-lg font-semibold">
                 {currentProject.name}
@@ -3158,12 +3185,12 @@ type RetryOptions = {
           </div>
         ) : (
           /* CHAT VIEW */
-          <>
+          <div className="chat-window">
             {/* Messages */}
             <div className="relative flex-1 min-h-0">
               <div
                 ref={chatContainerRef}
-                className="flex h-full flex-col overflow-y-auto overflow-x-hidden px-4 py-6 pb-32"
+                className="chat-messages pb-24 pr-1"
               >
                 <div
                   className="mx-auto flex w-full flex-col space-y-4 pb-6"
@@ -3646,440 +3673,422 @@ type RetryOptions = {
             </div>
 
             {/* Input */}
-            <div className="shrink-0 border-t border-[#202123] bg-[#212121] px-4 py-3">
-              <div
-                className="mx-auto flex w-full flex-col gap-3"
-                style={{ maxWidth: MAX_MESSAGE_WIDTH }}
-              >
-                <div className="flex flex-col gap-2">
-                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                    {forceWebSearch && (
-                      <button
-                        type="button"
-                        onClick={() => setForceWebSearch(false)}
-                        className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]"
-                      >
-                        <span className="text-base leading-none">🌐</span>
-                        <span>Web search</span>
-                      </button>
-                    )}
-                    {createImageArmed && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCreateImageArmed(false);
-                          setComposerError(null);
-                        }}
-                        className="flex items-center gap-1 rounded-full border border-white/30 bg-[#2b2b31] px-3 py-1 text-[11px] text-zinc-200"
-                      >
-                        <span className="text-base leading-none">🎨</span>
-                        <span>Create image</span>
-                      </button>
-                    )}
-                  </div>
+            <div className="input-area">
+              {(forceWebSearch || createImageArmed) && (
+                <div className="input-chips text-[11px]">
+                  {forceWebSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setForceWebSearch(false)}
+                      className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[#a5bfff]"
+                    >
+                      <span className="text-base leading-none">🌐</span>
+                      <span>Web search</span>
+                    </button>
+                  )}
+                  {createImageArmed && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreateImageArmed(false);
+                        setComposerError(null);
+                      }}
+                      className="flex items-center gap-1 rounded-full border border-white/30 bg-[#2b2b31] px-3 py-1 text-zinc-200"
+                    >
+                      <span className="text-base leading-none">🎨</span>
+                      <span>Create image</span>
+                    </button>
+                  )}
+                </div>
+              )}
 
-                  <div className="flex flex-col gap-2">
-                    {imageAttachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {imageAttachments.map((attachment) => {
-                          const sizeLabel = formatAttachmentSize(
-                            attachment.size
-                          );
-                          return (
-                            <div
-                              key={`${attachment.id}-preview`}
-                              className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
-                            >
-                              <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
-                                <Image
-                                  src={attachment.dataUrl}
-                                  alt={attachment.name || "Attachment"}
-                                  width={48}
-                                  height={48}
-                                  className="h-full w-full object-cover"
-                                  unoptimized
-                                />
-                              </div>
-                              <div className="min-w-0 flex-1 text-left">
-                                <div className="truncate text-[12px] font-medium text-white">
-                                  {attachment.name || "Image"}
-                                </div>
-                                {sizeLabel && (
-                                  <div className="text-[10px] uppercase tracking-wide text-white/50">
-                                    {sizeLabel}
-                                  </div>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                aria-label="Remove attachment"
-                                onClick={() => handleRemoveImageAttachment(attachment.id)}
-                                className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
-                              >
-                                ×
-                              </button>
+              {(imageAttachments.length > 0 || fileAttachments.length > 0) && (
+                <div className="input-attachments">
+                  {imageAttachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {imageAttachments.map((attachment) => {
+                        const sizeLabel = formatAttachmentSize(attachment.size);
+                        return (
+                          <div
+                            key={`${attachment.id}-preview`}
+                            className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
+                          >
+                            <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
+                              <Image
+                                src={attachment.dataUrl}
+                                alt={attachment.name || "Attachment"}
+                                width={48}
+                                height={48}
+                                className="h-full w-full object-cover"
+                                unoptimized
+                              />
                             </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {fileAttachments.length > 0 && (
-                      <div className="space-y-2">
-                        {fileAttachments.map((file) => {
-                          const sizeLabel = formatAttachmentSize(file.size);
-                          return (
-                            <div
-                              key={`${file.id}-file`}
-                              className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
-                            >
-                              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-4 w-4"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={1.6}
-                                >
-                                  <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
-                                  <path d="M14 3v6h6" />
-                                </svg>
+                            <div className="min-w-0 flex-1 text-left">
+                              <div className="truncate text-[12px] font-medium text-white">
+                                {attachment.name || "Image"}
                               </div>
-                              <div className="min-w-0 flex-1 text-left">
-                                <div className="truncate text-[12px] font-medium text-white">
-                                  {file.name || "File"}
+                              {sizeLabel && (
+                                <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                  {sizeLabel}
                                 </div>
-                                {sizeLabel && (
-                                  <div className="text-[10px] uppercase tracking-wide text-white/50">
-                                    {sizeLabel}
-                                  </div>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                aria-label="Remove file attachment"
-                                onClick={() => handleRemoveFileAttachment(file.id)}
-                                className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
-                              >
-                                ×
-                              </button>
+                              )}
                             </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    <div className="flex items-end gap-3">
-                      <div className="flex w-full flex-col gap-2">
-                        <div
-                          className={`flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`}
-                        >
-                          <div className="relative mr-1 shrink-0">
                             <button
                               type="button"
-                              aria-label={
-                                isRecording
-                                  ? "Stop recording"
-                                  : isTranscribing
-                                    ? "Cancel transcription"
-                                    : "Composer options"
-                              }
-                              aria-expanded={
-                                !isVoiceFlowActive ? composerMenuOpen : undefined
-                              }
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                if (isRecording) {
-                                  void handleMicClick();
-                                  return;
-                                }
-                                if (isTranscribing) {
-                                  cancelRecordingFlow();
-                                  return;
-                                }
-                                setComposerMenuOpen((prev) => !prev);
-                              }}
-                              className={`flex h-9 w-9 items-center justify-center rounded-full transition ${
-                                isVoiceFlowActive
-                                  ? "bg-red-500/20 text-red-200"
-                                  : "text-white/80 hover:bg-white/10"
-                              }`}
+                              aria-label="Remove attachment"
+                              onClick={() => handleRemoveImageAttachment(attachment.id)}
+                              className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
                             >
-                              {isVoiceFlowActive ? (
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-5 w-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                >
-                                  <path d="M6 6l12 12M6 18 18 6" />
-                                </svg>
-                              ) : (
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 24 24"
-                                  className="h-5 w-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                >
-                                  <path d="M12 5v14M5 12h14" />
-                                </svg>
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {fileAttachments.length > 0 && (
+                    <div className="space-y-2">
+                      {fileAttachments.map((file) => {
+                        const sizeLabel = formatAttachmentSize(file.size);
+                        return (
+                          <div
+                            key={`${file.id}-file`}
+                            className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+                          >
+                            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-4 w-4"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={1.6}
+                              >
+                                <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                <path d="M14 3v6h6" />
+                              </svg>
+                            </div>
+                            <div className="min-w-0 flex-1 text-left">
+                              <div className="truncate text-white">
+                                {file.name || "File"}
+                              </div>
+                              {sizeLabel && (
+                                <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                  {sizeLabel}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              aria-label="Remove file attachment"
+                              onClick={() => handleRemoveFileAttachment(file.id)}
+                              className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="input-container">
+                <div className={`input-row ${composerShapeClass} bg-white/5`}>
+                  <div className="input-left">
+                    <div className="relative">
+                      <button
+                        type="button"
+                        aria-label={
+                          isRecording
+                            ? "Stop recording"
+                            : isTranscribing
+                              ? "Cancel transcription"
+                              : "Composer options"
+                        }
+                        aria-expanded={!isVoiceFlowActive ? composerMenuOpen : undefined}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (isRecording) {
+                            void handleMicClick();
+                            return;
+                          }
+                          if (isTranscribing) {
+                            cancelRecordingFlow();
+                            return;
+                          }
+                          setComposerMenuOpen((prev) => !prev);
+                        }}
+                        className={`input-icon-button ${
+                          isVoiceFlowActive
+                            ? "bg-red-500/20 text-red-200"
+                            : "text-white/80 hover:bg-white/10"
+                        }`}
+                      >
+                        {isVoiceFlowActive ? (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                          >
+                            <path d="M6 6l12 12M6 18 18 6" />
+                          </svg>
+                        ) : (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                          >
+                            <path d="M12 5v14M5 12h14" />
+                          </svg>
+                        )}
+                      </button>
+                      {!isVoiceFlowActive && composerMenuOpen && (
+                        <div
+                          onClick={(event) => event.stopPropagation()}
+                          className="absolute left-0 bottom-full z-30 mb-3 w-64 rounded-2xl border border-white/10 bg-[#0f111b] p-3 text-left text-xs text-white shadow-2xl"
+                        >
+                          <div className="flex flex-col text-[13px] text-white/80">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setForceWebSearch((prev) => !prev);
+                                setComposerMenuOpen(false);
+                              }}
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:text-white"
+                            >
+                              <span>Web search</span>
+                              {forceWebSearch && (
+                                <span className="text-[#8ab4ff]">On</span>
                               )}
                             </button>
-                            {!isVoiceFlowActive && composerMenuOpen && (
-                              <div
-                                onClick={(event) => event.stopPropagation()}
-                                className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
-                              >
-                                <div className="flex flex-col text-[13px] text-white/80">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      handleTakePhotoClick();
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Take photo
-                                  </button>
-                                  <div className="my-1 h-px bg-white/10" />
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      handleAddFilesClick();
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Add photos &amp; files
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (hasComposerAttachments) {
-                                        setComposerError(
-                                          "Image generation does not support attachments yet."
-                                        );
-                                      } else {
-                                        setComposerError(null);
-                                      }
-                                      setCreateImageArmed(true);
-                                      setForceWebSearch(false);
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    <span>Create image</span>
-                                    {createImageArmed && (
-                                      <span className="text-[#8ab4ff]">Armed</span>
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setComposerMenuOpen(false)}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Deep research
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setForceWebSearch((prev) => {
-                                        const next = !prev;
-                                        if (next) {
-                                          setCreateImageArmed(false);
-                                        }
-                                        return next;
-                                      });
-                                      setComposerMenuOpen(false);
-                                    }}
-                                    className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    <span>Web search</span>
-                                    {forceWebSearch && (
-                                      <span className="text-[#8ab4ff]">On</span>
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setComposerMenuOpen(false)}
-                                    className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                  >
-                                    Agent mode
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="flex flex-1 items-center">
-                            <textarea
-                              ref={textareaRef}
-                              className={`w-full resize-none border-none bg-transparent py-0 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 ${
-                                isVoiceFlowActive ? "hidden" : ""
-                              }`}
-                              style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                              value={input}
-                              onChange={(e) => setInput(e.target.value)}
-                              onKeyDown={handleKeyDown}
-                              placeholder="Message the assistant…"
-                              rows={1}
-                            />
-                            {isVoiceFlowActive ? (
-                              isRecording ? (
-                                <div className="flex h-10 w-full items-center" aria-live="polite">
-                                  <svg
-                                    viewBox="0 0 100 24"
-                                    className="h-8 w-full text-red-400/80"
-                                    preserveAspectRatio="none"
-                                  >
-                                    <defs>
-                                      <linearGradient
-                                        id="composerWaveformGradient"
-                                        x1="0%"
-                                        y1="0%"
-                                        x2="100%"
-                                        y2="0%"
-                                      >
-                                        <stop
-                                          offset="0%"
-                                          stopColor="rgba(248,113,113,0.45)"
-                                        />
-                                        <stop
-                                          offset="100%"
-                                          stopColor="rgba(248,113,113,0.9)"
-                                        />
-                                      </linearGradient>
-                                    </defs>
-                                    <path
-                                      d={buildWaveformPath(waveformLevels)}
-                                      fill="url(#composerWaveformGradient)"
-                                    />
-                                    <line
-                                      x1="0"
-                                      y1="12"
-                                      x2="100"
-                                      y2="12"
-                                      stroke="rgba(255,255,255,0.08)"
-                                      strokeWidth="0.5"
-                                    />
-                                  </svg>
-                                </div>
-                              ) : (
-                                <div className="flex h-10 w-full items-center justify-center text-sm text-zinc-400">
-                                  Transcribing…
-                                </div>
-                              )
-                            ) : null}
-                            <input
-                              ref={photoInputRef}
-                              type="file"
-                              accept="image/*"
-                              capture="environment"
-                              className="sr-only"
-                              onChange={handlePhotoInputChange}
-                            />
-                            <input
-                              ref={filePickerInputRef}
-                              type="file"
-                              accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
-                              multiple
-                              className="sr-only"
-                              onChange={handleFilePickerChange}
-                            />
-                          </div>
-
-                          <div className="flex items-center gap-2 pl-2">
-                            {!isVoiceFlowActive && (
-                              <button
-                                type="button"
-                                aria-label={
-                                  isRecording ? "Stop recording" : "Start voice input"
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCreateImageArmed((prev) => !prev);
+                                setComposerMenuOpen(false);
+                                if (composerError) {
+                                  setComposerError(null);
                                 }
-                                onClick={handleMicClick}
-                                disabled={isTranscribing}
-                                className={`flex h-9 w-9 items-center justify-center rounded-full text-white/80 transition hover:bg-white/10 ${
-                                  isTranscribing ? "cursor-wait opacity-60" : ""
-                                }`}
-                              >
-                                {isTranscribing ? (
-                                  <span className="inline-flex h-4 w-4 items-center justify-center">
-                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
-                                  </span>
-                                ) : (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-5 w-5"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth={1.8}
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  >
-                                    <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                                    <path d="M19 11.5a7 7 0 0 1-14 0" />
-                                    <path d="M12 18.5v2" />
-                                  </svg>
-                                )}
-                              </button>
-                            )}
-                            {shouldShowSendButton && (
-                              <button
-                                type="button"
-                                onClick={handlePrimaryAction}
-                                disabled={sendButtonDisabled}
-                                className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                                  isStreaming ? "hover:bg-[#225fd0]" : "hover:bg-[#3c7cff]"
-                                } ${sendButtonDisabled ? "cursor-not-allowed opacity-40" : ""}`}
-                                aria-label={sendButtonAriaLabel}
-                              >
-                                {isStreaming ? (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-4 w-4"
-                                    fill="currentColor"
-                                  >
-                                    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    viewBox="0 0 24 24"
-                                    className="h-5 w-5"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth={2}
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  >
-                                    <path d="M12 18V6" />
-                                    <path d="M6 12l6-6 6 6" />
-                                  </svg>
-                                )}
-                              </button>
-                            )}
+                              }}
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:text-white"
+                            >
+                              <span>Create image</span>
+                              {createImageArmed && (
+                                <span className="text-[#8ab4ff]">Armed</span>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setComposerMenuOpen(false);
+                                filePickerInputRef.current?.click();
+                              }}
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:text-white"
+                            >
+                              <span>Upload file</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setComposerMenuOpen(false);
+                                photoInputRef.current?.click();
+                              }}
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:text-white"
+                            >
+                              <span>Attach photo</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setComposerMenuOpen(false)}
+                              className="flex w-full items-center rounded-xl px-3 py-2 text-left transition hover:text-white"
+                            >
+                              Agent mode
+                            </button>
                           </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   </div>
 
-                  {composerError && (
-                    <div className="text-xs text-red-400">{composerError}</div>
-                  )}
+                  <div className="input-middle">
+                    {!isVoiceFlowActive && (
+                      <textarea
+                        ref={textareaRef}
+                        className="input-field placeholder:text-white/50"
+                        style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Message the assistant"
+                        rows={1}
+                      />
+                    )}
+                    {isVoiceFlowActive ? (
+                      isRecording ? (
+                        <div className="flex h-10 w-full items-center" aria-live="polite">
+                          <svg
+                            viewBox="0 0 100 24"
+                            className="h-8 w-full text-red-400/80"
+                            preserveAspectRatio="none"
+                          >
+                            <defs>
+                              <linearGradient id="composerWaveformGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stopColor="rgba(248,113,113,0.45)" />
+                                <stop offset="100%" stopColor="rgba(248,113,113,0.9)" />
+                              </linearGradient>
+                            </defs>
+                            <path d={buildWaveformPath(waveformLevels)} fill="url(#composerWaveformGradient)" />
+                            <line
+                              x1="0"
+                              y1="12"
+                              x2="100"
+                              y2="12"
+                              stroke="rgba(255,255,255,0.08)"
+                              strokeWidth="0.5"
+                            />
+                          </svg>
+                        </div>
+                      ) : (
+                        <div className="flex h-10 w-full items-center justify-center text-sm text-zinc-400">
+                          Transcribing…
+                        </div>
+                      )
+                    ) : null}
+                    <input
+                      ref={photoInputRef}
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="sr-only"
+                      onChange={handlePhotoInputChange}
+                    />
+                    <input
+                      ref={filePickerInputRef}
+                      type="file"
+                      accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
+                      multiple
+                      className="sr-only"
+                      onChange={handleFilePickerChange}
+                    />
+                  </div>
+
+                  <div className="input-actions">
+                    {!isVoiceFlowActive && (
+                      <button
+                        type="button"
+                        aria-label={isRecording ? "Stop recording" : "Start voice input"}
+                        onClick={handleMicClick}
+                        disabled={isTranscribing}
+                        className={`input-icon-button ${
+                          isTranscribing ? "cursor-wait opacity-60" : "hover:bg-white/10"
+                        }`}
+                      >
+                        {isTranscribing ? (
+                          <span className="inline-flex h-4 w-4 items-center justify-center">
+                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
+                          </span>
+                        ) : (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={1.8}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                            <path d="M19 11.5a7 7 0 0 1-14 0" />
+                            <path d="M12 18.5v2" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
+                    {shouldShowSendButton && (
+                      <button
+                        type="button"
+                        onClick={handlePrimaryAction}
+                        disabled={sendButtonDisabled}
+                        className={`input-icon-button primary ${
+                          sendButtonDisabled ? "cursor-not-allowed opacity-40" : ""
+                        } ${isStreaming ? "hover:from-[#4f6ee0]" : "hover:from-[#7a96ff]"}`}
+                        aria-label={sendButtonAriaLabel}
+                      >
+                        {isStreaming ? (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-4 w-4"
+                            fill="currentColor"
+                          >
+                            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                          </svg>
+                        ) : (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M12 18V6" />
+                            <path d="M6 12l6-6 6 6" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="input-bottom">
+                  <div className="input-mode-pill">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full bg-gradient-to-br from-[#7e8bff] to-[#4c5ed9]"
+                    />
+                    <span>
+                      {createImageArmed
+                        ? "Image generation armed"
+                        : `Reasoning · ${SPEED_LABELS[speedMode]}`}
+                    </span>
+                  </div>
+                  <div className="input-shortcuts">
+                    <div className="input-shortcut">
+                      <span>Press</span>
+                      <span className="input-shortcut-kbd">Enter</span>
+                      <span>to send</span>
+                    </div>
+                    <div className="input-shortcut">
+                      <span>Shift</span>
+                      <span className="input-shortcut-kbd">↵</span>
+                      <span>for newline</span>
+                    </div>
+                  </div>
                 </div>
               </div>
+
+              {composerError && (
+                <div className="mt-2 text-xs text-red-400">{composerError}</div>
+              )}
             </div>
-          </>
+
+          </div>
         )}
-      </main>
+        </main>
+      </div>
 
       {/* PROJECT MODAL */}
       {showProjectModal && (
