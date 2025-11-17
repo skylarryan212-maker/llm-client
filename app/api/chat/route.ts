@@ -567,11 +567,11 @@ function sanitizeFileAttachmentList(value: unknown): FileAttachment[] {
 }
 
 function dataUrlToBuffer(dataUrl: string) {
-  const match = dataUrl.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
-  if (!match || !match.groups) {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
     throw new Error("Invalid data URL");
   }
-  const base64 = match.groups.data;
+  const base64 = match[2];
   return Buffer.from(base64, "base64");
 }
 
