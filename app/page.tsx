@@ -8,13 +8,14 @@ import {
   useRef,
   useState,
 } from "react";
+import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
-import type { Source, SourceChip } from "@/lib/chatTypes";
+import type { ImageAttachment, Source, SourceChip } from "@/lib/chatTypes";
 import {
   describeModelFamily,
   getModelAndReasoningConfig,
@@ -56,6 +57,7 @@ type MessageMetadata = {
   thoughtDurationLabel?: string;
   sources?: SourceChip[];
   sourceList?: Source[];
+  attachments?: ImageAttachment[];
 };
 
 type ChatMessage = {
@@ -63,6 +65,7 @@ type ChatMessage = {
   persistedId?: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: ImageAttachment[];
   usedModel?: string;
   usedModelMode?: ModelMode;
   usedModelFamily?: ModelFamily;
@@ -115,6 +118,7 @@ const MODEL_RETRY_OPTIONS: {
   { value: "gpt-5-nano", label: "GPT 5 Nano" },
   { value: "gpt-5-mini", label: "GPT 5 Mini" },
   { value: "gpt-5.1", label: "GPT 5.1" },
+  { value: "gpt-5-pro-2025-10-06", label: "GPT 5 Pro (2025-10-06)" },
 ];
 
 const OTHER_MODEL_GROUPS: Array<{
@@ -122,9 +126,25 @@ const OTHER_MODEL_GROUPS: Array<{
   label: string;
   shortLabel: string;
 }> = [
-  { family: "gpt-5-mini", label: "GPT-5 Mini", shortLabel: "5 Mini" },
-  { family: "gpt-5-nano", label: "GPT-5 Nano", shortLabel: "5 Nano" },
+  {
+    family: "gpt-5-mini",
+    label: "GPT 5 Mini",
+    shortLabel: describeModelFamily("gpt-5-mini"),
+  },
+  {
+    family: "gpt-5-nano",
+    label: "GPT 5 Nano",
+    shortLabel: describeModelFamily("gpt-5-nano"),
+  },
+  {
+    family: "gpt-5-pro-2025-10-06",
+    label: "GPT 5 Pro (2025-10-06)",
+    shortLabel: describeModelFamily("gpt-5-pro-2025-10-06"),
+  },
 ];
+
+const MAX_IMAGE_ATTACHMENTS = 4;
+const MAX_IMAGE_SIZE_BYTES = 8 * 1024 * 1024;
 
 const MAX_INPUT_HEIGHT = 176;
 const MIN_INPUT_HEIGHT = 32;
@@ -260,6 +280,8 @@ function legacyModeFromFamily(family: ModelFamily): ModelMode {
       return "mini";
     case "gpt-5.1":
       return "full";
+    case "gpt-5-pro-2025-10-06":
+      return "full";
     default:
       return "auto";
   }
@@ -286,6 +308,12 @@ export default function Home() {
   const [modelFamily, setModelFamily] = useState<ModelFamily>("gpt-5.1");
   const [speedMode, setSpeedMode] = useState<SpeedMode>("auto");
   const [forceWebSearch, setForceWebSearch] = useState(false);
+  const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>(
+    []
+  );
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
@@ -302,11 +330,20 @@ export default function Home() {
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pendingDeleteProject, setPendingDeleteProject] = useState<Project | null>(
+    null
+  );
+  const [deleteProjectLoading, setDeleteProjectLoading] = useState(false);
 
   const skipAutoLoadRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [activeAssistantMessageId, setActiveAssistantMessageId] =
@@ -331,6 +368,12 @@ export default function Home() {
       setOtherModelsMenuOpen(false);
     }
   }, [headerModelMenuOpen]);
+
+  useEffect(() => {
+    if (isRecording || isTranscribing) {
+      setComposerMenuOpen(false);
+    }
+  }, [isRecording, isTranscribing]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -513,6 +556,9 @@ export default function Home() {
         const nextMessages = (data || []).map((m) => {
           const metadata =
             ((m as { metadata?: MessageMetadata }).metadata || {}) as MessageMetadata;
+          const attachments = Array.isArray(metadata.attachments)
+            ? metadata.attachments
+            : [];
           const thoughtSeconds = metadata.thoughtDurationSeconds;
           const thoughtLabel =
             metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
@@ -525,6 +571,7 @@ export default function Home() {
             persistedId: (m as { id?: string }).id,
             role: m.role,
             content: m.content,
+            attachments,
             usedModel: metadata.usedModel,
             usedModelMode: metadata.usedModelMode,
             usedModelFamily: metadata.usedModelFamily,
@@ -698,14 +745,243 @@ export default function Home() {
   );
 
   const inProjectView = viewMode === "project" && !!selectedProjectId;
-  const canSendMessage = input.trim().length > 0;
-  const modelShortLabel =
-    modelFamily === "auto" ? "Auto" : describeModelFamily(modelFamily);
-  const headerStatusLabel = `LLM Client ${modelShortLabel} ${SPEED_LABELS[speedMode]}`;
+  const trimmedInput = input.trim();
+  const canSendMessage =
+    trimmedInput.length > 0 || imageAttachments.length > 0;
+  const headerModelLabel =
+    modelFamily === "auto"
+      ? `Auto (${describeModelFamily("gpt-5-mini")})`
+      : describeModelFamily(modelFamily);
+  const attachmentsLimitReached =
+    imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
+  const isVoiceFlowActive = isRecording || isTranscribing;
 
   // ------------------------------------------------------------
   // HELPERS
   // ------------------------------------------------------------
+  const readFileAsDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
+  const formatAttachmentSize = (bytes?: number | null) => {
+    if (!bytes) return null;
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  };
+
+  const handleImageInputChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    const availableSlots = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
+    if (availableSlots <= 0) {
+      setComposerError(
+        `You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`
+      );
+      event.target.value = "";
+      return;
+    }
+    const selectedFiles = Array.from(files).slice(0, availableSlots);
+    const prepared: ImageAttachment[] = [];
+    for (const file of selectedFiles) {
+      if (!file.type.startsWith("image/")) {
+        setComposerError("Only image files are supported.");
+        continue;
+      }
+      if (file.size > MAX_IMAGE_SIZE_BYTES) {
+        setComposerError("Images must be 8MB or smaller.");
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        prepared.push({
+          id: createLocalId(),
+          name: file.name || "image",
+          mimeType: file.type || "image/*",
+          dataUrl,
+          size: file.size,
+        });
+      } catch (error) {
+        console.error("Failed to read attachment", error);
+        setComposerError("Failed to load one of the images.");
+      }
+    }
+    if (prepared.length) {
+      setImageAttachments((prev) => [...prev, ...prepared]);
+      setComposerError(null);
+    }
+    event.target.value = "";
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setImageAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+    setComposerError(null);
+  };
+
+  const stopRecording = useCallback(
+    (shouldReturnBlob: boolean) => {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder) {
+        return Promise.resolve<Blob | null>(null);
+      }
+      return new Promise<Blob | null>((resolve) => {
+        recorder.onstop = () => {
+          mediaRecorderRef.current = null;
+          const stream = mediaStreamRef.current;
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            mediaStreamRef.current = null;
+          }
+          const chunks = recordingChunksRef.current;
+          recordingChunksRef.current = [];
+          if (!shouldReturnBlob || chunks.length === 0) {
+            resolve(null);
+            return;
+          }
+          resolve(new Blob(chunks, { type: "audio/webm" }));
+        };
+        try {
+          recorder.stop();
+        } catch (error) {
+          console.error("Unable to stop recording", error);
+          resolve(null);
+        }
+      });
+    },
+    []
+  );
+
+  const cancelRecordingFlow = useCallback(() => {
+    if (isRecording) {
+      void stopRecording(false);
+      setIsRecording(false);
+    }
+    if (isTranscribing) {
+      transcriptionAbortRef.current?.abort();
+      transcriptionAbortRef.current = null;
+      setIsTranscribing(false);
+    }
+    setComposerError(null);
+  }, [isRecording, isTranscribing, stopRecording]);
+
+  useEffect(() => {
+    if (isVoiceFlowActive) {
+      setComposerMenuOpen(false);
+    }
+  }, [isVoiceFlowActive]);
+
+  const startRecording = useCallback(async () => {
+    if (typeof window === "undefined" || typeof MediaRecorder === "undefined") {
+      setComposerError("Voice input isn't supported in this browser.");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setComposerError("Microphone access is unavailable.");
+      return;
+    }
+    try {
+      setComposerError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordingChunksRef.current.push(event.data);
+        }
+      };
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+    } catch (error) {
+      console.error("startRecording error", error);
+      setComposerError("Microphone permission was denied.");
+    }
+  }, []);
+
+  const transcribeAudio = useCallback(
+    async (blob: Blob) => {
+      const formData = new FormData();
+      formData.append("audio", blob, "voice-message.webm");
+      const controller = new AbortController();
+      transcriptionAbortRef.current = controller;
+      try {
+        const response = await fetch("/api/transcribe", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error("Transcription failed");
+        }
+        const payload = (await response.json()) as { transcript?: string };
+        const transcript = (payload.transcript || "").trim();
+        if (transcript) {
+          setInput((prev) => {
+            if (!prev) return transcript;
+            return `${prev.trimEnd()} ${transcript}`.trim();
+          });
+          textareaRef.current?.focus();
+          setComposerError(null);
+        } else {
+          setComposerError("No speech detected in the recording.");
+        }
+      } catch (error) {
+        if ((error as DOMException)?.name === "AbortError") {
+          return;
+        }
+        console.error("transcribeAudio error", error);
+        setComposerError("Unable to transcribe audio.");
+      } finally {
+        transcriptionAbortRef.current = null;
+      }
+    },
+    []
+  );
+
+  const handleMicClick = useCallback(async () => {
+    if (isTranscribing) {
+      return;
+    }
+    if (isRecording) {
+      setIsRecording(false);
+      setIsTranscribing(true);
+      try {
+        const blob = await stopRecording(true);
+        if (blob) {
+          await transcribeAudio(blob);
+        } else {
+          setComposerError("Recording was too short.");
+        }
+      } catch (error) {
+        if ((error as DOMException)?.name !== "AbortError") {
+          setComposerError("Unable to capture audio.");
+        }
+      } finally {
+        setIsTranscribing(false);
+      }
+      return;
+    }
+    await startRecording();
+  }, [isRecording, isTranscribing, startRecording, stopRecording, transcribeAudio]);
+
+  const handleImageButtonClick = () => {
+    if (attachmentsLimitReached) {
+      setComposerError(
+        `You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`
+      );
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
   const handleConversationSelect = (id: string) => {
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
@@ -793,6 +1069,7 @@ type RetryOptions = {
 
 type SendMessageOptions = {
   messageOverride?: string;
+  attachmentsOverride?: ImageAttachment[];
   modelOverride?: ModelFamily;
   speedOverride?: SpeedMode;
   retry?: RetryOptions;
@@ -802,23 +1079,28 @@ type SendMessageOptions = {
   // SEND MESSAGE — STREAMING
   // ------------------------------------------------------------
   async function sendMessage(options?: SendMessageOptions) {
+    if (isStreaming) return;
     const sourceText = options?.messageOverride ?? input;
-    if (!sourceText.trim() || isStreaming) return;
+    const activeAttachments =
+      options?.attachmentsOverride ?? imageAttachments;
+    const text = sourceText.trim();
+    const hasAttachments = activeAttachments.length > 0;
+    if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
     let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
-    const text = sourceText.trim();
     const chosenFamily = options?.modelOverride ?? modelFamily;
     const chosenSpeed = options?.speedOverride ?? speedMode;
     const requestedLegacyMode = legacyModeFromFamily(chosenFamily);
     const previewFamilyForReasoning =
       chosenFamily === "auto" ? "gpt-5-mini" : chosenFamily;
+    const previewPrompt = text || (hasAttachments ? "[image attachments]" : text);
     const previewModelConfig = getModelAndReasoningConfig(
       previewFamilyForReasoning,
       chosenSpeed,
-      text
+      previewPrompt
     );
     const requestedReasoningEffort = previewModelConfig.reasoning?.effort;
     console.log(
@@ -826,7 +1108,11 @@ type SendMessageOptions = {
     );
     if (!options?.messageOverride) {
       setInput("");
+      if (!options?.attachmentsOverride) {
+        setImageAttachments([]);
+      }
     }
+    setComposerError(null);
     setIsStreaming(true);
     setComposerMenuOpen(false);
     setRowMenu(null);
@@ -861,13 +1147,25 @@ type SendMessageOptions = {
       responseTimingRef.current.assistantMessageId = assistantMessageId;
       setActiveAssistantMessageId(assistantMessageId);
 
+    const attachmentCopies = activeAttachments.map((attachment) => ({
+      ...attachment,
+    }));
+
     if (!isRetry) {
       const newUserMessageId = createLocalId();
       userMessageId = newUserMessageId;
       const activeAssistantId = assistantMessageId!;
       setMessages((prev) => [
         ...prev,
-        { id: newUserMessageId, role: "user", content: text },
+        {
+          id: newUserMessageId,
+          role: "user",
+          content: text,
+          attachments: attachmentCopies,
+          metadata: attachmentCopies.length
+            ? { attachments: attachmentCopies }
+            : undefined,
+        },
         {
           id: activeAssistantId,
           role: "assistant",
@@ -931,6 +1229,15 @@ type SendMessageOptions = {
         speedMode: chosenSpeed,
         forceWebSearch: shouldForceWebSearch,
       };
+      if (attachmentCopies.length > 0) {
+        requestBody.images = attachmentCopies.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          dataUrl: attachment.dataUrl,
+          size: attachment.size,
+        }));
+      }
 
       if (options?.retry?.assistantPersistedId) {
         requestBody.retryAssistantMessageId =
@@ -1321,10 +1628,14 @@ type SendMessageOptions = {
       .reverse()
       .find((msg) => msg.role === "user");
     if (!relatedUserMessage) return;
-    if (!targetMessage.persistedId || !relatedUserMessage.persistedId) {
-      console.warn("Retry unavailable until messages finish saving");
-      return;
-    }
+    const retryPayload: RetryOptions | undefined =
+      targetMessage.persistedId && relatedUserMessage.persistedId
+        ? {
+            assistantMessageId: targetMessage.id,
+            assistantPersistedId: targetMessage.persistedId,
+            userMessagePersistedId: relatedUserMessage.persistedId,
+          }
+        : undefined;
     setModelFamily(targetFamily);
     setOpenModelMenuId(null);
     setExpandedSourcesId((prev) =>
@@ -1332,12 +1643,9 @@ type SendMessageOptions = {
     );
     await sendMessage({
       messageOverride: relatedUserMessage.content,
+      attachmentsOverride: relatedUserMessage.attachments ?? [],
       modelOverride: targetFamily,
-      retry: {
-        assistantMessageId: targetMessage.id,
-        assistantPersistedId: targetMessage.persistedId,
-        userMessagePersistedId: relatedUserMessage.persistedId,
-      },
+      retry: retryPayload,
     });
   }
 
@@ -1505,29 +1813,81 @@ type SendMessageOptions = {
   }
 
   async function deleteProject(id: string) {
-    if (
-      !window.confirm(
-        "Delete this project? Chats inside will move back to 'No project'."
-      )
-    ) {
-      return;
+    const { data: conversationRows } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("project_id", id);
+
+    const conversationIds = new Set(
+      (conversationRows || []).map((row) => (row as { id: string }).id)
+    );
+    conversations
+      .filter((c) => c.project_id === id)
+      .forEach((c) => {
+        if (c.id) {
+          conversationIds.add(c.id);
+        }
+      });
+    const idsArray = Array.from(conversationIds);
+
+    if (idsArray.length > 0) {
+      await supabase
+        .from("messages")
+        .delete()
+        .in("conversation_id", idsArray);
+      await supabase
+        .from("conversations")
+        .delete()
+        .in("id", idsArray);
+      idsArray.forEach((conversationId) =>
+        removeConversationFromCache(conversationId)
+      );
     }
 
-    await supabase.from("conversations").update({ project_id: null }).eq("project_id", id);
     await supabase.from("projects").delete().eq("id", id);
 
     setProjects((prev) => prev.filter((p) => p.id !== id));
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.project_id === id ? { ...c, project_id: null } : c
-      )
-    );
+    const selectedConversationDeleted =
+      !!selectedConversationId &&
+      conversationIds.has(selectedConversationId);
+    setConversations((prev) => {
+      const remaining = prev.filter((c) => !conversationIds.has(c.id));
+      if (selectedConversationDeleted) {
+        const fallback = getNewestConversation(remaining);
+        if (fallback) {
+          setSelectedConversationId(fallback.id);
+          setSelectedProjectId(fallback.project_id);
+          setViewMode("chat");
+        } else {
+          setSelectedConversationId(null);
+          setMessages([]);
+        }
+      }
+      return remaining;
+    });
 
-    if (selectedProjectId === id) {
+    if (!selectedConversationDeleted && selectedProjectId === id) {
       setSelectedProjectId(null);
       setViewMode("chat");
     }
   }
+
+  const requestDeleteProject = (id: string) => {
+    const target = projects.find((p) => p.id === id);
+    if (!target) return;
+    setPendingDeleteProject(target);
+  };
+
+  const confirmDeleteProject = async () => {
+    if (!pendingDeleteProject) return;
+    setDeleteProjectLoading(true);
+    try {
+      await deleteProject(pendingDeleteProject.id);
+    } finally {
+      setDeleteProjectLoading(false);
+      setPendingDeleteProject(null);
+    }
+  };
 
   // ------------------------------------------------------------
   // SIDEBAR CONTENT (shared between desktop + mobile)
@@ -1613,7 +1973,7 @@ type SendMessageOptions = {
                     </button>
                     <button
                       onClick={() => {
-                        deleteProject(p.id);
+                        requestDeleteProject(p.id);
                         setRowMenu(null);
                       }}
                       className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-red-400 hover:bg-[#1d1d24]"
@@ -1832,7 +2192,7 @@ type SendMessageOptions = {
             </button>
             <div className="flex items-center gap-3">
               <span className="text-sm font-semibold text-white">
-                {headerStatusLabel}
+                LLM Client
               </span>
               <div className="relative">
                 <button
@@ -1843,10 +2203,18 @@ type SendMessageOptions = {
                     event.stopPropagation();
                     setHeaderModelMenuOpen((prev) => !prev);
                   }}
-                  className={`flex h-8 w-8 items-center justify-center rounded-full border border-white/15 text-white/80 transition hover:text-white ${
+                  className={`flex items-center gap-3 rounded-full border border-white/15 px-3 py-1.5 text-left text-white/80 transition hover:border-white/30 hover:text-white ${
                     headerModelMenuOpen ? "bg-white/5" : ""
                   }`}
                 >
+                  <div className="flex flex-col leading-tight">
+                    <span className="text-sm font-semibold text-white">
+                      {headerModelLabel}
+                    </span>
+                    <span className="text-[11px] text-white/60">
+                      {SPEED_LABELS[speedMode]}
+                    </span>
+                  </div>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     viewBox="0 0 24 24"
@@ -1868,7 +2236,9 @@ type SendMessageOptions = {
                   >
                     <div className="max-h-[70vh] space-y-5 overflow-y-auto px-4 py-4">
                       <div>
-                        <div className="text-sm font-semibold text-white">GPT-5.1</div>
+                        <div className="text-sm font-semibold text-white">
+                          {describeModelFamily("gpt-5.1")}
+                        </div>
                         <div className="text-[11px] text-white/60">Speed controls</div>
                       </div>
                       <div className="flex flex-col gap-1">
@@ -1935,41 +2305,43 @@ type SendMessageOptions = {
                           </svg>
                         </button>
                         {otherModelsMenuOpen && (
-                          <div className="mt-3 max-h-[60vh] space-y-4 overflow-y-auto rounded-2xl border border-white/10 bg-[#111116] px-3 py-3 text-left text-xs text-white shadow-2xl">
-                            {OTHER_MODEL_GROUPS.map((group) => (
-                              <div key={group.family} className="space-y-1">
-                                <div className="text-xs uppercase tracking-wide text-white/60">
-                                  {group.label}
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-[#111116] text-left text-xs text-white shadow-2xl">
+                            <div className="max-h-[60vh] space-y-4 overflow-y-auto px-3 py-3">
+                              {OTHER_MODEL_GROUPS.map((group) => (
+                                <div key={group.family} className="space-y-1">
+                                  <div className="text-xs uppercase tracking-wide text-white/60">
+                                    {group.label}
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    {SPEED_OPTIONS.map((option) => {
+                                      const isComboActive =
+                                        modelFamily === group.family &&
+                                        speedMode === option.value;
+                                      return (
+                                        <button
+                                          key={`${group.family}-${option.value}`}
+                                          onClick={() => {
+                                            setModelFamily(group.family);
+                                            setSpeedMode(option.value);
+                                            setHeaderModelMenuOpen(false);
+                                          }}
+                                          className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                                            isComboActive
+                                              ? "bg-white/10 text-white font-semibold"
+                                              : "text-white/70 hover:bg-white/5"
+                                          }`}
+                                        >
+                                          <span>{`${group.shortLabel} ${option.label}`}</span>
+                                          {isComboActive && (
+                                            <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                                          )}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
-                                <div className="flex flex-col gap-1">
-                                  {SPEED_OPTIONS.map((option) => {
-                                    const isComboActive =
-                                      modelFamily === group.family &&
-                                      speedMode === option.value;
-                                    return (
-                                      <button
-                                        key={`${group.family}-${option.value}`}
-                                        onClick={() => {
-                                          setModelFamily(group.family);
-                                          setSpeedMode(option.value);
-                                          setHeaderModelMenuOpen(false);
-                                        }}
-                                        className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                                          isComboActive
-                                            ? "bg-white/10 text-white font-semibold"
-                                            : "text-white/70 hover:bg-white/5"
-                                        }`}
-                                      >
-                                        <span>{`${group.shortLabel} ${option.label}`}</span>
-                                        {isComboActive && (
-                                          <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
-                                        )}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -2098,7 +2470,8 @@ type SendMessageOptions = {
 
                   {!isLoadingMessages && messages.length === 0 && (
                     <div className="mt-10 text-center text-sm text-zinc-400">
-                      Start chatting — GPT-5.1 chat is streaming live.
+                      Start chatting — {describeModelFamily("gpt-5.1")} chat is
+                      streaming live.
                     </div>
                   )}
 
@@ -2169,6 +2542,26 @@ type SendMessageOptions = {
                                 </ReactMarkdown>
                               </div>
                             </div>
+
+                            {m.attachments?.length ? (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {m.attachments.map((attachment) => (
+                                  <div
+                                    key={`${messageId}-assistant-attachment-${attachment.id}`}
+                                    className="overflow-hidden rounded-2xl border border-white/10 bg-white/5"
+                                  >
+                                    <Image
+                                      src={attachment.dataUrl}
+                                      alt={attachment.name || "Attachment"}
+                                      width={96}
+                                      height={96}
+                                      className="h-24 w-24 object-cover"
+                                      unoptimized
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
 
                             {showSourceChips && (
                               <div className="mt-3 flex flex-wrap gap-2">
@@ -2337,8 +2730,35 @@ type SendMessageOptions = {
                             className={`relative ${userWrapperClass} rounded-3xl bg-[#1e4fd8] px-5 py-4 text-left text-[15px] leading-relaxed text-white`}
                           >
                             <div className="whitespace-pre-wrap break-words">
-                              {m.content}
+                              {m.content && m.content.trim().length > 0 ? (
+                                m.content
+                              ) : m.attachments?.length ? (
+                                <span className="italic text-white/80">
+                                  Sent {m.attachments.length > 1
+                                    ? `${m.attachments.length} images`
+                                    : "an image"}
+                                </span>
+                              ) : null}
                             </div>
+                            {m.attachments?.length ? (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {m.attachments.map((attachment) => (
+                                  <div
+                                    key={`${m.id}-attachment-${attachment.id}`}
+                                    className="overflow-hidden rounded-2xl border border-white/10 bg-white/10"
+                                  >
+                                    <Image
+                                      src={attachment.dataUrl}
+                                      alt={attachment.name || "Chat attachment"}
+                                      width={96}
+                                      height={96}
+                                      className="h-24 w-24 object-cover"
+                                      unoptimized
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
                           </div>
                         )}
                       </div>
@@ -2418,18 +2838,249 @@ type SendMessageOptions = {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <div className="flex min-h-[3.5rem] flex-1 items-center gap-3 rounded-2xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
-                    <div className="relative">
-                      <button
-                        type="button"
-                        aria-label="Insert options"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setComposerMenuOpen((prev) => !prev);
-                        }}
-                        className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#3a3a40] text-white/80 transition hover:bg-[#4b4b52]"
-                      >
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-start gap-3">
+                    <div className="flex flex-1 flex-col gap-2 rounded-2xl border border-[#3f3f46] bg-[#303030] px-3 py-2 text-sm shadow-[0_0_0_1px_rgba(0,0,0,0.35)]">
+                      <div className="flex items-start gap-3">
+                        <div className="relative shrink-0">
+                          <button
+                            type="button"
+                            aria-label={
+                              isVoiceFlowActive
+                                ? "Cancel voice input"
+                                : "Composer options"
+                            }
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (isVoiceFlowActive) {
+                                cancelRecordingFlow();
+                                return;
+                              }
+                              setComposerMenuOpen((prev) => !prev);
+                            }}
+                            className={`flex h-10 w-10 items-center justify-center rounded-2xl text-white/80 transition ${
+                              isVoiceFlowActive
+                                ? "bg-red-500/20 text-red-200"
+                                : "bg-[#3a3a40] hover:bg-[#4b4b52]"
+                            }`}
+                          >
+                            {isVoiceFlowActive ? (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-5 w-5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={2}
+                                strokeLinecap="round"
+                              >
+                                <path d="M6 6l12 12M6 18 18 6" />
+                              </svg>
+                            ) : (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-5 w-5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={2}
+                                strokeLinecap="round"
+                              >
+                                <path d="M12 5v14M5 12h14" />
+                              </svg>
+                            )}
+                          </button>
+
+                          {composerMenuOpen && (
+                            <div
+                              onClick={(event) => event.stopPropagation()}
+                              className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
+                            >
+                              <button
+                                onClick={() => {
+                                  setForceWebSearch((prev) => !prev);
+                                  setComposerMenuOpen(false);
+                                }}
+                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                              >
+                                <span>Web search</span>
+                                {forceWebSearch && (
+                                  <span className="text-[#8ab4ff]">On</span>
+                                )}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex-1 space-y-2">
+                          {imageAttachments.length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {imageAttachments.map((attachment) => {
+                                const sizeLabel = formatAttachmentSize(
+                                  attachment.size
+                                );
+                                return (
+                                  <div
+                                    key={`${attachment.id}-preview`}
+                                    className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
+                                  >
+                                    <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
+                                      <Image
+                                        src={attachment.dataUrl}
+                                        alt={attachment.name || "Attachment"}
+                                        width={48}
+                                        height={48}
+                                        className="h-full w-full object-cover"
+                                        unoptimized
+                                      />
+                                    </div>
+                                    <div className="min-w-0 flex-1 text-left">
+                                      <div className="truncate text-[12px] font-medium text-white">
+                                        {attachment.name || "Image"}
+                                      </div>
+                                      {sizeLabel && (
+                                        <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                          {sizeLabel}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      aria-label="Remove attachment"
+                                      onClick={() => handleRemoveAttachment(attachment.id)}
+                                      className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          <div className="flex-1 px-1">
+                            <textarea
+                              ref={textareaRef}
+                              className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
+                              style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                              value={input}
+                              onChange={(e) => setInput(e.target.value)}
+                              onKeyDown={handleKeyDown}
+                              placeholder="Message the assistant…"
+                              rows={1}
+                            />
+                          </div>
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            className="sr-only"
+                            onChange={handleImageInputChange}
+                          />
+                        </div>
+
+                        <div className="flex flex-col items-center gap-2">
+                          <button
+                            type="button"
+                            aria-label="Add image"
+                            onClick={handleImageButtonClick}
+                            disabled={attachmentsLimitReached}
+                            className={`flex h-10 w-10 items-center justify-center rounded-2xl text-white/80 transition ${
+                              attachmentsLimitReached
+                                ? "cursor-not-allowed bg-[#3a3a40]/70 opacity-40"
+                                : "bg-[#3a3a40] hover:bg-[#4b4b52]"
+                            }`}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-5 w-5"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={1.8}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <rect x="3" y="3" width="18" height="18" rx="2" />
+                              <path d="m8 13 2.5 3 3.5-4.5 4 5.5" />
+                              <circle cx="8" cy="8" r="1.5" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={
+                              isRecording
+                                ? "Stop recording"
+                                : "Start voice input"
+                            }
+                            onClick={handleMicClick}
+                            disabled={isTranscribing}
+                            className={`flex h-10 w-10 items-center justify-center rounded-2xl transition ${
+                              isRecording
+                                ? "bg-red-500/20 text-red-200"
+                                : "bg-[#3a3a40] text-white/80 hover:bg-[#4b4b52]"
+                            } ${isTranscribing ? "cursor-wait opacity-60" : ""}`}
+                            aria-pressed={isRecording}
+                          >
+                            {isTranscribing ? (
+                              <span className="inline-flex h-4 w-4 items-center justify-center">
+                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
+                              </span>
+                            ) : isRecording ? (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-4 w-4"
+                                fill="currentColor"
+                              >
+                                <rect x="7" y="7" width="10" height="10" rx="2" />
+                              </svg>
+                            ) : (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                className="h-5 w-5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={1.8}
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                                <path d="M19 11.5a7 7 0 0 1-14 0" />
+                                <path d="M12 18.5v2" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={
+                        isStreaming ? handleStopGeneration : () => sendMessage()
+                      }
+                      disabled={
+                        !isStreaming && (!canSendMessage || isTranscribing)
+                      }
+                      className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                        isStreaming
+                          ? "hover:bg-[#225fd0]"
+                          : "hover:bg-[#3c7cff]"
+                      } disabled:cursor-not-allowed disabled:opacity-40`}
+                      aria-label={isStreaming ? "Stop response" : "Send message"}
+                    >
+                      {isStreaming ? (
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-4 w-4"
+                          fill="currentColor"
+                        >
+                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                        </svg>
+                      ) : (
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
                           viewBox="0 0 24 24"
@@ -2438,106 +3089,17 @@ type SendMessageOptions = {
                           stroke="currentColor"
                           strokeWidth={2}
                           strokeLinecap="round"
+                          strokeLinejoin="round"
                         >
-                          <path d="M12 5v14M5 12h14" />
+                          <path d="M12 18V6" />
+                          <path d="M6 12l6-6 6 6" />
                         </svg>
-                      </button>
-
-                      {composerMenuOpen && (
-                        <div
-                          onClick={(event) => event.stopPropagation()}
-                          className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
-                        >
-                          <button
-                            onClick={() => {
-                              setForceWebSearch((prev) => !prev);
-                              setComposerMenuOpen(false);
-                            }}
-                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                          >
-                            <span>Web search</span>
-                            {forceWebSearch && (
-                              <span className="text-[#8ab4ff]">On</span>
-                            )}
-                          </button>
-                        </div>
                       )}
-                    </div>
-
-                    <div className="flex-1 px-1">
-                      <textarea
-                        ref={textareaRef}
-                        className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
-                        style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        placeholder="Message the assistant…"
-                        rows={1}
-                      />
-                    </div>
-
-                    <button
-                      type="button"
-                      aria-label="Voice input (coming soon)"
-                      onClick={() => textareaRef.current?.focus()}
-                      className="flex h-10 w-10 items-center justify-center rounded-2xl text-white/70 transition hover:text-white"
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-5 w-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={1.8}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                        <path d="M19 11.5a7 7 0 0 1-14 0" />
-                        <path d="M12 18.5v2" />
-                      </svg>
                     </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={
-                      isStreaming ? handleStopGeneration : () => sendMessage()
-                    }
-                    disabled={!isStreaming && !canSendMessage}
-                    className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                      isStreaming
-                        ? "hover:bg-[#225fd0]"
-                        : "hover:bg-[#3c7cff]"
-                    } disabled:cursor-not-allowed disabled:opacity-40`}
-                    aria-label={isStreaming ? "Stop response" : "Send message"}
-                  >
-                    {isStreaming ? (
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-4 w-4"
-                        fill="currentColor"
-                      >
-                        <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                      </svg>
-                    ) : (
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        className="h-5 w-5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M12 18V6" />
-                        <path d="M6 12l6-6 6 6" />
-                      </svg>
-                    )}
-                  </button>
+                  {composerError && (
+                    <div className="text-xs text-red-400">{composerError}</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2586,16 +3148,16 @@ type SendMessageOptions = {
         </div>
       )}
 
-        <ConfirmDialog
-          open={Boolean(pendingDeleteConversation)}
-          title="Delete chat?"
-          body={
-            <span>
-              This will delete &ldquo;
-              {pendingDeleteConversation?.title || "this chat"}
-              &rdquo;.
-            </span>
-          }
+      <ConfirmDialog
+        open={Boolean(pendingDeleteConversation)}
+        title="Delete chat?"
+        body={
+          <span>
+            This will delete &ldquo;
+            {pendingDeleteConversation?.title || "this chat"}
+            &rdquo;.
+          </span>
+        }
         confirmLoading={deleteConversationLoading}
         onCancel={() => {
           if (!deleteConversationLoading) {
@@ -2605,6 +3167,29 @@ type SendMessageOptions = {
         onConfirm={() => {
           if (!deleteConversationLoading) {
             void confirmDeleteConversation();
+          }
+        }}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingDeleteProject)}
+        title="Delete this project?"
+        body={
+          <span>
+            This will delete &ldquo;
+            {pendingDeleteProject?.name || "this project"}
+            &rdquo; and all of its conversations.
+          </span>
+        }
+        confirmLabel="Delete project"
+        confirmLoading={deleteProjectLoading}
+        onCancel={() => {
+          if (!deleteProjectLoading) {
+            setPendingDeleteProject(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteProjectLoading) {
+            void confirmDeleteProject();
           }
         }}
       />

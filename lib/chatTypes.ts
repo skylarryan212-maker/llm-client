@@ -11,3 +11,11 @@ export type SourceChip = {
   url: string;
   domain: string;
 };
+
+export type ImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  size?: number;
+};
