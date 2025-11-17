@@ -134,7 +134,9 @@ export function getModelAndReasoningConfig(
   const isFullFamily =
     resolvedFamily === "gpt-5.1" || resolvedFamily === "gpt-5-pro-2025-10-06";
 
-  if (speedMode === "instant") {
+  if (resolvedFamily === "gpt-5-pro-2025-10-06") {
+    chosenEffort = "high";
+  } else if (speedMode === "instant") {
     chosenEffort = isFullFamily ? "none" : "low";
   } else if (speedMode === "thinking") {
     chosenEffort = pickMediumOrHigh(trimmedPrompt);
@@ -175,7 +177,7 @@ export function describeModelFamily(family: ModelFamily) {
     case "gpt-5-nano":
       return "GPT 5 Nano";
     case "gpt-5-pro-2025-10-06":
-      return "GPT 5 Pro (2025-10-06)";
+      return "GPT 5 Pro";
     default:
       return "Auto";
   }

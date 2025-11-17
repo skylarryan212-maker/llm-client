@@ -15,7 +15,12 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
-import type { ImageAttachment, Source, SourceChip } from "@/lib/chatTypes";
+import type {
+  FileAttachment,
+  ImageAttachment,
+  Source,
+  SourceChip,
+} from "@/lib/chatTypes";
 import {
   describeModelFamily,
   getModelAndReasoningConfig,
@@ -56,7 +61,9 @@ type MessageMetadata = {
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
   sources?: SourceChip[];
-  sourceList?: Source[];
+  citations?: Source[];
+  files?: FileAttachment[];
+  vectorStoreIds?: string[];
   attachments?: ImageAttachment[];
 };
 
@@ -66,6 +73,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   attachments?: ImageAttachment[];
+  files?: FileAttachment[];
   usedModel?: string;
   usedModelMode?: ModelMode;
   usedModelFamily?: ModelFamily;
@@ -118,7 +126,7 @@ const MODEL_RETRY_OPTIONS: {
   { value: "gpt-5-nano", label: "GPT 5 Nano" },
   { value: "gpt-5-mini", label: "GPT 5 Mini" },
   { value: "gpt-5.1", label: "GPT 5.1" },
-  { value: "gpt-5-pro-2025-10-06", label: "GPT 5 Pro (2025-10-06)" },
+  { value: "gpt-5-pro-2025-10-06", label: "GPT 5 Pro" },
 ];
 
 const OTHER_MODEL_GROUPS: Array<{
@@ -136,15 +144,12 @@ const OTHER_MODEL_GROUPS: Array<{
     label: "GPT 5 Nano",
     shortLabel: describeModelFamily("gpt-5-nano"),
   },
-  {
-    family: "gpt-5-pro-2025-10-06",
-    label: "GPT 5 Pro (2025-10-06)",
-    shortLabel: describeModelFamily("gpt-5-pro-2025-10-06"),
-  },
 ];
 
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_IMAGE_SIZE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_ATTACHMENTS = 6;
+const MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024;
 
 const MAX_INPUT_HEIGHT = 176;
 const MIN_INPUT_HEIGHT = 32;
@@ -311,6 +316,7 @@ export default function Home() {
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>(
     []
   );
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -339,7 +345,8 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
+  const filePickerInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
@@ -577,6 +584,7 @@ export default function Home() {
         const attachments = Array.isArray(metadata.attachments)
           ? metadata.attachments
           : [];
+        const files = Array.isArray(metadata.files) ? metadata.files : [];
         const thoughtSeconds = metadata.thoughtDurationSeconds;
         const thoughtLabel =
           metadata.thoughtDurationLabel && metadata.thoughtDurationLabel.trim().length > 0
@@ -590,6 +598,7 @@ export default function Home() {
           role: m.role,
           content: m.content,
           attachments,
+          files,
           usedModel: metadata.usedModel,
           usedModelMode: metadata.usedModelMode,
           usedModelFamily: metadata.usedModelFamily,
@@ -764,12 +773,14 @@ export default function Home() {
   const inProjectView = viewMode === "project" && !!selectedProjectId;
   const trimmedInput = input.trim();
   const canSendMessage =
-    trimmedInput.length > 0 || imageAttachments.length > 0;
+    trimmedInput.length > 0 ||
+    imageAttachments.length > 0 ||
+    fileAttachments.length > 0;
   const headerModelLabel =
     modelFamily === "auto"
       ? `Auto (${describeModelFamily("gpt-5-mini")})`
       : describeModelFamily(modelFamily);
-  const attachmentsLimitReached =
+  const imageAttachmentLimitReached =
     imageAttachments.length >= MAX_IMAGE_ATTACHMENTS;
   const isVoiceFlowActive = isRecording || isTranscribing;
 
@@ -792,7 +803,7 @@ export default function Home() {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   };
 
-  const handleImageInputChange = async (
+  const handlePhotoInputChange = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
     const files = event.target.files;
@@ -837,8 +848,102 @@ export default function Home() {
     event.target.value = "";
   };
 
-  const handleRemoveAttachment = (id: string) => {
-    setImageAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+  const handleFilePickerChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    let remainingImageSlots = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
+    let remainingFileSlots = MAX_FILE_ATTACHMENTS - fileAttachments.length;
+    const newImages: ImageAttachment[] = [];
+    const newFiles: FileAttachment[] = [];
+    for (const file of Array.from(files)) {
+      if (file.type.startsWith("image/") && remainingImageSlots > 0) {
+        if (file.size > MAX_IMAGE_SIZE_BYTES) {
+          setComposerError("Images must be 8MB or smaller.");
+          continue;
+        }
+        try {
+          const dataUrl = await readFileAsDataUrl(file);
+          newImages.push({
+            id: createLocalId(),
+            name: file.name || "image",
+            mimeType: file.type || "image/*",
+            dataUrl,
+            size: file.size,
+          });
+          remainingImageSlots -= 1;
+        } catch (error) {
+          console.error("Failed to read attachment", error);
+          setComposerError("Failed to load one of the files.");
+        }
+        continue;
+      }
+      if (remainingFileSlots <= 0) {
+        setComposerError(
+          `You can attach up to ${MAX_FILE_ATTACHMENTS} files.`
+        );
+        continue;
+      }
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        setComposerError("Files must be 16MB or smaller.");
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        newFiles.push({
+          id: createLocalId(),
+          name: file.name || "file",
+          mimeType: file.type || "application/octet-stream",
+          dataUrl,
+          size: file.size,
+        });
+        remainingFileSlots -= 1;
+      } catch (error) {
+        console.error("Failed to read file attachment", error);
+        setComposerError("Failed to load one of the files.");
+      }
+    }
+    if (newImages.length) {
+      setImageAttachments((prev) => [...prev, ...newImages]);
+    }
+    if (newFiles.length) {
+      setFileAttachments((prev) => [...prev, ...newFiles]);
+    }
+    if (newImages.length || newFiles.length) {
+      setComposerError(null);
+    }
+    event.target.value = "";
+  };
+
+  const handleTakePhotoClick = () => {
+    if (imageAttachmentLimitReached) {
+      setComposerError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
+      return;
+    }
+    photoInputRef.current?.click();
+  };
+
+  const handleAddFilesClick = () => {
+    if (
+      fileAttachments.length >= MAX_FILE_ATTACHMENTS &&
+      imageAttachmentLimitReached
+    ) {
+      setComposerError("You've reached the attachment limit.");
+      return;
+    }
+    filePickerInputRef.current?.click();
+  };
+
+  const handleRemoveImageAttachment = (id: string) => {
+    setImageAttachments((prev) =>
+      prev.filter((attachment) => attachment.id !== id)
+    );
+    setComposerError(null);
+  };
+
+  const handleRemoveFileAttachment = (id: string) => {
+    setFileAttachments((prev) => prev.filter((file) => file.id !== id));
     setComposerError(null);
   };
 
@@ -989,16 +1094,6 @@ export default function Home() {
     await startRecording();
   }, [isRecording, isTranscribing, startRecording, stopRecording, transcribeAudio]);
 
-  const handleImageButtonClick = () => {
-    if (attachmentsLimitReached) {
-      setComposerError(
-        `You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`
-      );
-      return;
-    }
-    fileInputRef.current?.click();
-  };
-
   const handleConversationSelect = (id: string) => {
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
@@ -1084,13 +1179,14 @@ type RetryOptions = {
   userMessagePersistedId?: string | null;
 };
 
-type SendMessageOptions = {
-  messageOverride?: string;
-  attachmentsOverride?: ImageAttachment[];
-  modelOverride?: ModelFamily;
-  speedOverride?: SpeedMode;
-  retry?: RetryOptions;
-};
+  type SendMessageOptions = {
+    messageOverride?: string;
+    attachmentsOverride?: ImageAttachment[];
+    fileAttachmentsOverride?: FileAttachment[];
+    modelOverride?: ModelFamily;
+    speedOverride?: SpeedMode;
+    retry?: RetryOptions;
+  };
 
   // ------------------------------------------------------------
   // SEND MESSAGE — STREAMING
@@ -1100,8 +1196,11 @@ type SendMessageOptions = {
     const sourceText = options?.messageOverride ?? input;
     const activeAttachments =
       options?.attachmentsOverride ?? imageAttachments;
+    const activeFiles =
+      options?.fileAttachmentsOverride ?? fileAttachments;
     const text = sourceText.trim();
-    const hasAttachments = activeAttachments.length > 0;
+    const hasAttachments =
+      activeAttachments.length > 0 || activeFiles.length > 0;
     if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
@@ -1113,7 +1212,8 @@ type SendMessageOptions = {
     const requestedLegacyMode = legacyModeFromFamily(chosenFamily);
     const previewFamilyForReasoning =
       chosenFamily === "auto" ? "gpt-5-mini" : chosenFamily;
-    const previewPrompt = text || (hasAttachments ? "[image attachments]" : text);
+    const previewPrompt =
+      text || (hasAttachments ? "[attachments]" : text);
     const previewModelConfig = getModelAndReasoningConfig(
       previewFamilyForReasoning,
       chosenSpeed,
@@ -1127,6 +1227,9 @@ type SendMessageOptions = {
       setInput("");
       if (!options?.attachmentsOverride) {
         setImageAttachments([]);
+      }
+      if (!options?.fileAttachmentsOverride) {
+        setFileAttachments([]);
       }
     }
     setComposerError(null);
@@ -1167,11 +1270,25 @@ type SendMessageOptions = {
     const attachmentCopies = activeAttachments.map((attachment) => ({
       ...attachment,
     }));
+    const fileAttachmentCopies = activeFiles.map((file) => ({
+      ...file,
+    }));
 
     if (!isRetry) {
       const newUserMessageId = createLocalId();
       userMessageId = newUserMessageId;
       const activeAssistantId = assistantMessageId!;
+      const userMetadata =
+        attachmentCopies.length || fileAttachmentCopies.length
+          ? {
+              ...(attachmentCopies.length
+                ? { attachments: attachmentCopies }
+                : {}),
+              ...(fileAttachmentCopies.length
+                ? { files: fileAttachmentCopies }
+                : {}),
+            }
+          : undefined;
       setMessages((prev) => [
         ...prev,
         {
@@ -1179,9 +1296,8 @@ type SendMessageOptions = {
           role: "user",
           content: text,
           attachments: attachmentCopies,
-          metadata: attachmentCopies.length
-            ? { attachments: attachmentCopies }
-            : undefined,
+          files: fileAttachmentCopies,
+          metadata: userMetadata,
         },
         {
           id: activeAssistantId,
@@ -1248,6 +1364,15 @@ type SendMessageOptions = {
       };
       if (attachmentCopies.length > 0) {
         requestBody.images = attachmentCopies.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          dataUrl: attachment.dataUrl,
+          size: attachment.size,
+        }));
+      }
+      if (fileAttachmentCopies.length > 0) {
+        requestBody.files = fileAttachmentCopies.map((attachment) => ({
           id: attachment.id,
           name: attachment.name,
           mimeType: attachment.mimeType,
@@ -1370,8 +1495,11 @@ type SendMessageOptions = {
                           [],
                         sources:
                           meta.sources ?? msg.metadata?.sources ?? [],
-                        sourceList:
-                          meta.sourceList ?? msg.metadata?.sourceList ?? [],
+                        citations:
+                          meta.citations ?? msg.metadata?.citations ?? [],
+                        vectorStoreIds:
+                          meta.vectorStoreIds ??
+                          msg.metadata?.vectorStoreIds,
                         thoughtDurationSeconds: msg.thoughtDurationSeconds,
                         thoughtDurationLabel: msg.thoughtDurationLabel,
                       };
@@ -1519,7 +1647,7 @@ type SendMessageOptions = {
                       }
                       const nextMetadata: MessageMetadata = {
                         ...(msg.metadata || {}),
-                        sourceList: sourcesEvent.sources ?? [],
+                        citations: sourcesEvent.sources ?? [],
                       };
                       metadataForPersist = nextMetadata;
                       localMessageId = msg.id ?? null;
@@ -2207,7 +2335,7 @@ type SendMessageOptions = {
             >
               ☰
             </button>
-            <div className="flex items-center gap-3">
+            <div className="flex items-end gap-3">
               <span className="text-sm font-semibold text-white">
                 LLM Client
               </span>
@@ -2220,22 +2348,22 @@ type SendMessageOptions = {
                     event.stopPropagation();
                     setHeaderModelMenuOpen((prev) => !prev);
                   }}
-                  className={`flex items-center gap-3 rounded-full border border-white/15 px-3 py-1.5 text-left text-white/80 transition hover:border-white/30 hover:text-white ${
-                    headerModelMenuOpen ? "bg-white/5" : ""
+                  className={`flex items-start gap-2 rounded-xl px-3 py-1 text-left text-white/80 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/30 ${
+                    headerModelMenuOpen ? "bg-white/10 text-white" : ""
                   }`}
                 >
                   <div className="flex flex-col leading-tight">
                     <span className="text-sm font-semibold text-white">
                       {headerModelLabel}
                     </span>
-                    <span className="text-[11px] text-white/60">
+                    <span className="text-[11px] text-white/50">
                       {SPEED_LABELS[speedMode]}
                     </span>
                   </div>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     viewBox="0 0 24 24"
-                    className={`h-3 w-3 transition ${
+                    className={`mt-1 h-3 w-3 transition ${
                       headerModelMenuOpen ? "-rotate-180" : ""
                     }`}
                     fill="none"
@@ -2361,6 +2489,30 @@ type SendMessageOptions = {
                             </div>
                           </div>
                         )}
+                      </div>
+                      <div className="border-t border-white/5 pt-3">
+                        <div className="text-sm font-semibold text-white">
+                          GPT 5 Pro
+                        </div>
+                        <p className="text-[11px] text-white/60">
+                          High-effort reasoning
+                        </p>
+                        <button
+                          onClick={() => {
+                            setModelFamily("gpt-5-pro-2025-10-06");
+                            setHeaderModelMenuOpen(false);
+                          }}
+                          className={`mt-2 flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition ${
+                            modelFamily === "gpt-5-pro-2025-10-06"
+                              ? "bg-white/10 text-white font-semibold"
+                              : "text-white/70 hover:bg-white/5"
+                          }`}
+                        >
+                          <span>GPT 5 Pro</span>
+                          {modelFamily === "gpt-5-pro-2025-10-06" && (
+                            <CheckmarkIcon className="h-3.5 w-3.5 text-white" />
+                          )}
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -2495,8 +2647,8 @@ type SendMessageOptions = {
                   {messages.map((m, i) => {
                     const messageId = m.id ?? `msg-${i}`;
                     const isAssistant = m.role === "assistant";
-                    const rawSourceList = m.metadata?.sourceList ?? [];
-                    const displayableSources = rawSourceList.filter(
+                    const rawCitations = m.metadata?.citations ?? [];
+                    const displayableSources = rawCitations.filter(
                       (source) => Boolean(source?.url)
                     );
                     const usedWebSearchFlag = Boolean(
@@ -2504,7 +2656,7 @@ type SendMessageOptions = {
                     );
                     const showSourcesButton =
                       isAssistant &&
-                      (usedWebSearchFlag || rawSourceList.length > 0);
+                      (usedWebSearchFlag || displayableSources.length > 0);
                     const sourceChips = (m.metadata?.sources ?? []).filter(
                       (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
                     );
@@ -2704,9 +2856,8 @@ type SendMessageOptions = {
                                               source.domain ||
                                               extractDomainFromUrl(source.url);
                                             const title =
-                                              source.title?.trim().length
-                                                ? source.title
-                                                : domain || source.url;
+                                              (source.title || domain || source.url)?.trim() ||
+                                              source.url;
                                             return (
                                               <a
                                                 key={`${source.url}-${idx}`}
@@ -2723,11 +2874,6 @@ type SendMessageOptions = {
                                                     {domain}
                                                   </div>
                                                 )}
-                                                {source.snippet && (
-                                                  <p className="mt-1 text-[12px] text-zinc-300">
-                                                    {source.snippet}
-                                                  </p>
-                                                )}
                                               </a>
                                             );
                                           })}
@@ -2735,8 +2881,8 @@ type SendMessageOptions = {
                                       ) : (
                                         <p className="text-[12px] text-zinc-400">
                                           {isStreamingAssistantMessage
-                                            ? "Gathering live sources…"
-                                            : "OpenAI web_search did not return shareable source data for this response."}
+                                            ? "Gathering live citations…"
+                                            : "No citations were shared for this response."}
                                         </p>
                                       )}
                                     </div>
@@ -2774,6 +2920,43 @@ type SendMessageOptions = {
                                     />
                                   </div>
                                 ))}
+                              </div>
+                            ) : null}
+                            {m.files?.length ? (
+                              <div className="mt-3 space-y-2">
+                                {m.files.map((file) => {
+                                  const sizeLabel = formatAttachmentSize(file.size);
+                                  return (
+                                    <div
+                                      key={`${m.id}-file-${file.id}`}
+                                      className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[12px]"
+                                    >
+                                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-white/70">
+                                        <svg
+                                          xmlns="http://www.w3.org/2000/svg"
+                                          viewBox="0 0 24 24"
+                                          className="h-4 w-4"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          strokeWidth={1.6}
+                                        >
+                                          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                          <path d="M14 3v6h6" />
+                                        </svg>
+                                      </div>
+                                      <div className="min-w-0 flex-1 text-left">
+                                        <div className="truncate text-white">
+                                          {file.name || "File"}
+                                        </div>
+                                        {sizeLabel && (
+                                          <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                            {sizeLabel}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
                             ) : null}
                           </div>
@@ -2913,18 +3096,40 @@ type SendMessageOptions = {
                               onClick={(event) => event.stopPropagation()}
                               className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-2 text-left text-xs shadow-2xl"
                             >
-                              <button
-                                onClick={() => {
-                                  setForceWebSearch((prev) => !prev);
-                                  setComposerMenuOpen(false);
-                                }}
-                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                              >
-                                <span>Web search</span>
-                                {forceWebSearch && (
-                                  <span className="text-[#8ab4ff]">On</span>
-                                )}
-                              </button>
+                              <div className="space-y-2">
+                                <button
+                                  onClick={() => {
+                                    handleTakePhotoClick();
+                                    setComposerMenuOpen(false);
+                                  }}
+                                  className="w-full rounded-xl bg-[#1f1f27] px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-[#2b2b36]"
+                                >
+                                  Take photo
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    handleAddFilesClick();
+                                    setComposerMenuOpen(false);
+                                  }}
+                                  className="w-full rounded-xl border border-white/10 px-3 py-2 text-[12px] text-zinc-200 transition hover:border-white/25 hover:text-white"
+                                >
+                                  Add photos &amp; files
+                                </button>
+                                <div className="mt-2 border-t border-white/5 pt-2">
+                                  <button
+                                    onClick={() => {
+                                      setForceWebSearch((prev) => !prev);
+                                      setComposerMenuOpen(false);
+                                    }}
+                                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                                  >
+                                    <span>Web search</span>
+                                    {forceWebSearch && (
+                                      <span className="text-[#8ab4ff]">On</span>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -2964,7 +3169,7 @@ type SendMessageOptions = {
                                     <button
                                       type="button"
                                       aria-label="Remove attachment"
-                                      onClick={() => handleRemoveAttachment(attachment.id)}
+                                      onClick={() => handleRemoveImageAttachment(attachment.id)}
                                       className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
                                     >
                                       ×
@@ -2974,145 +3179,227 @@ type SendMessageOptions = {
                               })}
                             </div>
                           )}
-                          <div className="flex-1 px-1">
-                            <textarea
-                              ref={textareaRef}
-                              className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
-                              style={{ maxHeight: MAX_INPUT_HEIGHT }}
-                              value={input}
-                              onChange={(e) => setInput(e.target.value)}
-                              onKeyDown={handleKeyDown}
-                              placeholder="Message the assistant…"
-                              rows={1}
-                            />
-                          </div>
-                          <input
-                            ref={fileInputRef}
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            className="sr-only"
-                            onChange={handleImageInputChange}
-                          />
+                          {fileAttachments.length > 0 && (
+                            <div className="space-y-2">
+                              {fileAttachments.map((file) => {
+                                const sizeLabel = formatAttachmentSize(file.size);
+                                return (
+                                  <div
+                                    key={`${file.id}-file`}
+                                    className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+                                  >
+                                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
+                                      <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        viewBox="0 0 24 24"
+                                        className="h-4 w-4"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth={1.6}
+                                      >
+                                        <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                        <path d="M14 3v6h6" />
+                                      </svg>
+                                    </div>
+                                    <div className="min-w-0 flex-1 text-left">
+                                      <div className="truncate text-[12px] font-medium text-white">
+                                        {file.name || "File"}
+                                      </div>
+                                      {sizeLabel && (
+                                        <div className="text-[10px] uppercase tracking-wide text-white/50">
+                                          {sizeLabel}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      aria-label="Remove file attachment"
+                                      onClick={() => handleRemoveFileAttachment(file.id)}
+                                      className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {isVoiceFlowActive ? (
+                            <div className="flex items-center justify-between rounded-2xl bg-[#1b1b21]/70 px-3 py-3 text-white">
+                              <button
+                                type="button"
+                                onClick={cancelRecordingFlow}
+                                className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white"
+                                aria-label="Cancel recording"
+                              >
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="currentColor"
+                                >
+                                  <rect x="7" y="7" width="10" height="10" rx="2" />
+                                </svg>
+                              </button>
+                              <div className="flex flex-1 justify-center gap-1 px-4">
+                                {Array.from({ length: 5 }).map((_, idx) => (
+                                  <span
+                                    key={`bar-${idx}`}
+                                    className="listening-bar h-6 w-1 rounded-full bg-white/70"
+                                    style={{ animationDelay: `${idx * 120}ms` }}
+                                  />
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={handleMicClick}
+                                className="flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white"
+                                aria-label="Send recording"
+                              >
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M5 12h14" />
+                                  <path d="M12 5l7 7-7 7" />
+                                </svg>
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex-1 px-1">
+                                <textarea
+                                  ref={textareaRef}
+                                  className="w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.45] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0 min-h-[1.5rem]"
+                                  style={{ maxHeight: MAX_INPUT_HEIGHT }}
+                                  value={input}
+                                  onChange={(e) => setInput(e.target.value)}
+                                  onKeyDown={handleKeyDown}
+                                  placeholder="Message the assistant…"
+                                  rows={1}
+                                />
+                              </div>
+                              <input
+                                ref={photoInputRef}
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="sr-only"
+                                onChange={handlePhotoInputChange}
+                              />
+                              <input
+                                ref={filePickerInputRef}
+                                type="file"
+                                accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
+                                multiple
+                                className="sr-only"
+                                onChange={handleFilePickerChange}
+                              />
+                            </>
+                          )}
                         </div>
 
                         <div className="flex flex-col items-center gap-2">
-                          <button
-                            type="button"
-                            aria-label="Add image"
-                            onClick={handleImageButtonClick}
-                            disabled={attachmentsLimitReached}
-                            className={`flex h-10 w-10 items-center justify-center rounded-2xl text-white/80 transition ${
-                              attachmentsLimitReached
-                                ? "cursor-not-allowed bg-[#3a3a40]/70 opacity-40"
-                                : "bg-[#3a3a40] hover:bg-[#4b4b52]"
-                            }`}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              className="h-5 w-5"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth={1.8}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
+                          {!isVoiceFlowActive && (
+                            <button
+                              type="button"
+                              aria-label={
+                                isRecording
+                                  ? "Stop recording"
+                                  : "Start voice input"
+                              }
+                              onClick={handleMicClick}
+                              disabled={isTranscribing}
+                              className={`flex h-10 w-10 items-center justify-center rounded-2xl transition ${
+                                isRecording
+                                  ? "bg-red-500/20 text-red-200"
+                                  : "bg-[#3a3a40] text-white/80 hover:bg-[#4b4b52]"
+                              } ${isTranscribing ? "cursor-wait opacity-60" : ""}`}
+                              aria-pressed={isRecording}
                             >
-                              <rect x="3" y="3" width="18" height="18" rx="2" />
-                              <path d="m8 13 2.5 3 3.5-4.5 4 5.5" />
-                              <circle cx="8" cy="8" r="1.5" />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={
-                              isRecording
-                                ? "Stop recording"
-                                : "Start voice input"
-                            }
-                            onClick={handleMicClick}
-                            disabled={isTranscribing}
-                            className={`flex h-10 w-10 items-center justify-center rounded-2xl transition ${
-                              isRecording
-                                ? "bg-red-500/20 text-red-200"
-                                : "bg-[#3a3a40] text-white/80 hover:bg-[#4b4b52]"
-                            } ${isTranscribing ? "cursor-wait opacity-60" : ""}`}
-                            aria-pressed={isRecording}
-                          >
-                            {isTranscribing ? (
-                              <span className="inline-flex h-4 w-4 items-center justify-center">
-                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
-                              </span>
-                            ) : isRecording ? (
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-4 w-4"
-                                fill="currentColor"
-                              >
-                                <rect x="7" y="7" width="10" height="10" rx="2" />
-                              </svg>
-                            ) : (
-                              <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                className="h-5 w-5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth={1.8}
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
-                                <path d="M19 11.5a7 7 0 0 1-14 0" />
-                                <path d="M12 18.5v2" />
-                              </svg>
-                            )}
-                          </button>
+                              {isTranscribing ? (
+                                <span className="inline-flex h-4 w-4 items-center justify-center">
+                                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-transparent" />
+                                </span>
+                              ) : isRecording ? (
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-4 w-4"
+                                  fill="currentColor"
+                                >
+                                  <rect x="7" y="7" width="10" height="10" rx="2" />
+                                </svg>
+                              ) : (
+                                <svg
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  viewBox="0 0 24 24"
+                                  className="h-5 w-5"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={1.8}
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M12 4a2.5 2.5 0 0 0-2.5 2.5v5A2.5 2.5 0 0 0 12 14.5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 12 4Z" />
+                                  <path d="M19 11.5a7 7 0 0 1-14 0" />
+                                  <path d="M12 18.5v2" />
+                                </svg>
+                              )}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={
-                        isStreaming ? handleStopGeneration : () => sendMessage()
-                      }
-                      disabled={
-                        !isStreaming && (!canSendMessage || isTranscribing)
-                      }
-                      className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
-                        isStreaming
-                          ? "hover:bg-[#225fd0]"
-                          : "hover:bg-[#3c7cff]"
-                      } disabled:cursor-not-allowed disabled:opacity-40`}
-                      aria-label={isStreaming ? "Stop response" : "Send message"}
-                    >
-                      {isStreaming ? (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-4 w-4"
-                          fill="currentColor"
-                        >
-                          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
-                        </svg>
-                      ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          className="h-5 w-5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 18V6" />
-                          <path d="M6 12l6-6 6 6" />
-                        </svg>
-                      )}
-                    </button>
+                    {!isVoiceFlowActive && (
+                      <button
+                        type="button"
+                        onClick={
+                          isStreaming ? handleStopGeneration : () => sendMessage()
+                        }
+                        disabled={
+                          !isStreaming && (!canSendMessage || isTranscribing)
+                        }
+                        className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
+                          isStreaming
+                            ? "hover:bg-[#225fd0]"
+                            : "hover:bg-[#3c7cff]"
+                        } disabled:cursor-not-allowed disabled:opacity-40`}
+                        aria-label={isStreaming ? "Stop response" : "Send message"}
+                      >
+                        {isStreaming ? (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-4 w-4"
+                            fill="currentColor"
+                          >
+                            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+                          </svg>
+                        ) : (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-5 w-5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M12 18V6" />
+                            <path d="M6 12l6-6 6 6" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
                   </div>
                   {composerError && (
                     <div className="text-xs text-red-400">{composerError}</div>
@@ -3210,6 +3497,26 @@ type SendMessageOptions = {
           }
         }}
       />
+      <style jsx>{`
+        @keyframes listeningPulse {
+          0% {
+            transform: scaleY(0.4);
+            opacity: 0.4;
+          }
+          50% {
+            transform: scaleY(1);
+            opacity: 1;
+          }
+          100% {
+            transform: scaleY(0.4);
+            opacity: 0.4;
+          }
+        }
+
+        .listening-bar {
+          animation: listeningPulse 1.2s ease-in-out infinite;
+        }
+      `}</style>
     </div>
   );
 }
