@@ -136,6 +136,17 @@ type ResponseMetadata = {
   sources: SourceChip[];
   citations: Source[];
   vectorStoreIds?: string[];
+  generationType?: "text" | "image";
+  imagePrompt?: string;
+  imageModelLabel?: string;
+  generatedImages?: Array<{
+    id: string;
+    dataUrl?: string;
+    url?: string;
+    model?: string;
+    prompt?: string;
+  }>;
+  searchedSiteLabel?: string;
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
@@ -201,6 +212,69 @@ const LIVE_DATA_HINTS = [
   "launch",
   "trend",
 ];
+
+const CROSS_CHAT_STOP_WORDS = new Set([
+  "this",
+  "that",
+  "with",
+  "from",
+  "about",
+  "your",
+  "have",
+  "will",
+  "they",
+  "them",
+  "their",
+  "what",
+  "when",
+  "where",
+  "which",
+  "would",
+  "could",
+  "should",
+  "there",
+  "here",
+  "please",
+  "thanks",
+  "thank",
+  "like",
+  "just",
+  "need",
+  "want",
+  "into",
+  "using",
+  "been",
+  "some",
+  "more",
+  "also",
+  "really",
+  "because",
+  "while",
+  "after",
+  "before",
+  "since",
+  "those",
+  "these",
+  "through",
+  "over",
+  "such",
+  "only",
+  "even",
+  "many",
+  "very",
+  "make",
+  "made",
+  "does",
+  "doing",
+  "done",
+  "said",
+  "asks",
+  "help",
+  "idea",
+  "ideas",
+  "project",
+  "projects",
+]);
 
 const EMERGING_ENTITY_KEYWORDS = [
   "buy",
@@ -900,16 +974,27 @@ export async function POST(req: Request) {
 
     const { data: conversationRow } = await supabase
       .from("conversations")
-      .select("title")
+      .select("title, user_id")
       .eq("id", conversationId)
       .single();
 
     const existingConversationTitle = (conversationRow?.title || "").trim();
+    const conversationOwnerId =
+      conversationRow && typeof conversationRow.user_id === "string"
+        ? conversationRow.user_id
+        : null;
     const hasAssistantHistory = historyForModel.some(
       (msg) => msg.role === "assistant"
     );
     const needsTitle =
       !hasAssistantHistory && isPlaceholderTitle(existingConversationTitle);
+    const crossChatSummary = conversationOwnerId
+      ? await buildCrossChatSummary({
+          supabase,
+          userId: conversationOwnerId,
+          excludeConversationId: conversationId,
+        })
+      : null;
 
     let userRowId: string | null = null;
     let assistantRowId: string | null = isRetryRequest
@@ -1059,6 +1144,17 @@ export async function POST(req: Request) {
         content: BASE_SYSTEM_PROMPT,
         type: "message",
       },
+      ...(crossChatSummary
+        ? ([
+            {
+              role: "system",
+              content:
+                "High-level summary of this user's behavior and interests across their other chats: " +
+                crossChatSummary,
+              type: "message",
+            },
+          ] satisfies EasyInputMessage[])
+        : []),
       ...(forceWebSearch
         ? ([
             {
@@ -1279,6 +1375,7 @@ export async function POST(req: Request) {
             sources,
             citations,
             vectorStoreIds,
+            generationType: "text",
           };
 
           if (!assistantRowId) {
@@ -1839,6 +1936,90 @@ async function ensureChatTitle({
   } catch (err) {
     console.warn("Title generation failed", err);
   }
+}
+
+async function buildCrossChatSummary({
+  supabase,
+  userId,
+  excludeConversationId,
+}: {
+  supabase: ReturnType<typeof getServerSupabaseClient>;
+  userId: string;
+  excludeConversationId: string;
+}): Promise<string | null> {
+  try {
+    const { data: otherConversations, error } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("user_id", userId)
+      .neq("id", excludeConversationId)
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    if (error || !otherConversations?.length) {
+      return null;
+    }
+
+    const conversationIds = otherConversations
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string");
+    if (!conversationIds.length) {
+      return null;
+    }
+
+    const { data: otherMessages, error: otherMessagesError } = await supabase
+      .from("messages")
+      .select("conversation_id, role, content")
+      .in("conversation_id", conversationIds)
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (otherMessagesError || !otherMessages?.length) {
+      return null;
+    }
+
+    const recentUserMessages = otherMessages
+      .filter(
+        (row): row is { content: string } =>
+          row?.role === "user" && typeof row?.content === "string"
+      )
+      .map((row) => row.content)
+      .slice(0, 80);
+
+    if (!recentUserMessages.length) {
+      return null;
+    }
+
+    return summarizeOtherChats(recentUserMessages);
+  } catch (error) {
+    console.warn("Unable to summarize cross-chat behavior", error);
+    return null;
+  }
+}
+
+function summarizeOtherChats(contents: string[]): string | null {
+  const frequency = new Map<string, number>();
+  contents.forEach((entry) => {
+    const normalized = entry
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(
+        (token) => token.length >= 4 && !CROSS_CHAT_STOP_WORDS.has(token)
+      );
+    const uniqueTokens = new Set(normalized);
+    uniqueTokens.forEach((token) => {
+      frequency.set(token, (frequency.get(token) ?? 0) + 1);
+    });
+  });
+  const ranked = Array.from(frequency.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([token]) => token);
+  if (!ranked.length) {
+    return null;
+  }
+  return `Top recurring topics from the user's other chats include ${ranked.join(", ")}.`;
 }
 
 async function requestNanoTitle({
