@@ -3,7 +3,15 @@ import type { NextRequest } from "next/server";
 import { AUTH_COOKIE_NAME, isAuthCookieValid } from "@/lib/auth";
 
 const PUBLIC_PATHS = ["/login", "/api/login"];
-const MATCHER_EXCLUSIONS = ["/_next", "/favicon.ico", "/robots.txt", "/sitemap.xml", "/static", "/assets", "/public"];
+const MATCHER_EXCLUSIONS = [
+  "/_next",
+  "/favicon.ico",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/static",
+  "/assets",
+  "/public",
+];
 
 function isPublicPath(pathname: string) {
   return PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
@@ -13,7 +21,7 @@ function isExcludedPath(pathname: string) {
   return MATCHER_EXCLUSIONS.some((prefix) => pathname.startsWith(prefix));
 }
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (isExcludedPath(pathname)) {
@@ -44,3 +52,5 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
+
+export default proxy;
