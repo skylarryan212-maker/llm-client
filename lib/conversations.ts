@@ -31,44 +31,70 @@ export async function createConversationRecord({
     metadata && Object.keys(metadata).length > 0 ? { ...metadata } : null;
 
   async function insertConversation(
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    { includeMetadataColumn = true }: { includeMetadataColumn?: boolean } = {}
   ): Promise<ConversationMeta> {
+    const selectColumns = includeMetadataColumn
+      ? "id, title, project_id, created_at, metadata"
+      : "id, title, project_id, created_at";
     const { data, error } = await supabase
       .from("conversations")
       .insert(payload)
-      .select("id, title, project_id, created_at, metadata")
+      .select(selectColumns)
       .single();
 
     if (error || !data) {
       throw error || new Error("Conversation not created");
     }
 
-    return data as ConversationMeta;
+    const record = data as ConversationMeta;
+    if (includeMetadataColumn) {
+      return record;
+    }
+    return {
+      ...record,
+      metadata: record.metadata ?? null,
+    };
+  }
+
+  async function insertWithColumnFallback(
+    payload: Record<string, unknown>,
+    metadataForReturn: Record<string, unknown> | null
+  ) {
+    try {
+      return await insertConversation(payload);
+    } catch (error) {
+      if (!shouldRetryWithoutMetadata(error)) {
+        throw error;
+      }
+
+      console.warn(
+        "Conversation metadata column missing, retrying without metadata"
+      );
+      const record = await insertConversation(payload, {
+        includeMetadataColumn: false,
+      });
+      if (metadataForReturn) {
+        return {
+          ...record,
+          metadata: metadataForReturn,
+        };
+      }
+      return record;
+    }
   }
 
   if (!metadataPayload) {
-    return insertConversation(basePayload);
+    return insertWithColumnFallback(basePayload, null);
   }
 
-  try {
-    return await insertConversation({
+  return insertWithColumnFallback(
+    {
       ...basePayload,
       metadata: metadataPayload,
-    });
-  } catch (error) {
-    if (!shouldRetryWithoutMetadata(error)) {
-      throw error;
-    }
-
-    console.warn(
-      "Conversation metadata column missing, retrying without metadata"
-    );
-    const record = await insertConversation(basePayload);
-    return {
-      ...record,
-      metadata: metadataPayload,
-    };
-  }
+    },
+    metadataPayload
+  );
 }
 
 function shouldRetryWithoutMetadata(error: unknown): error is PostgrestError {
