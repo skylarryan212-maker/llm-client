@@ -150,6 +150,11 @@ type ResponseMetadata = {
   }>;
   searchedSiteLabel?: string;
   thinkingDurationMs?: number;
+  thinking?: {
+    effort?: ReasoningEffort | null;
+    durationMs?: number;
+    durationSeconds?: number;
+  };
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
@@ -229,6 +234,32 @@ function formatSearchDomainLabel(domain?: string | null) {
   }
   const normalized = domain.toLowerCase();
   return SEARCH_DOMAIN_LABELS[normalized] ?? normalized;
+}
+
+function mergeDomainLabels(...lists: Array<string[] | undefined>) {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  lists.forEach((list) => {
+    if (!Array.isArray(list)) {
+      return;
+    }
+    list.forEach((label) => {
+      if (typeof label !== "string") {
+        return;
+      }
+      const trimmed = label.trim();
+      if (!trimmed) {
+        return;
+      }
+      const normalized = trimmed.toLowerCase();
+      if (seen.has(normalized)) {
+        return;
+      }
+      seen.add(normalized);
+      merged.push(trimmed);
+    });
+  });
+  return merged;
 }
 
 const CROSS_CHAT_STOP_WORDS = new Set([
@@ -1343,6 +1374,31 @@ export async function POST(req: Request) {
               console.warn("Unable to announce title update", err)
             );
         };
+        const requestStartMs = Date.now();
+        let firstTokenAtMs: number | null = null;
+        const liveSearchDomainSet = new Set<string>();
+        const liveSearchDomainList: string[] = [];
+        const recordLiveSearchDomain = (domain?: string | null) => {
+          const label = formatSearchDomainLabel(domain);
+          if (!label) {
+            return;
+          }
+          const normalized = label.toLowerCase();
+          if (liveSearchDomainSet.has(normalized)) {
+            return;
+          }
+          liveSearchDomainSet.add(normalized);
+          liveSearchDomainList.push(label);
+          enqueueJson({ type: "web_search_domain", domain: label });
+        };
+        const noteDomainsFromResults = (results: RankedSource[]) => {
+          results.forEach((result) => {
+            const domainLabel = result.domain || extractDomainFromUrl(result.url);
+            if (domainLabel) {
+              recordLiveSearchDomain(domainLabel);
+            }
+          });
+        };
         let fullAssistantMessage = "";
         let responseMetadata: ResponseMetadata | null = null;
         const streamedWebSearchCallIds = new Set<string>();
@@ -1354,6 +1410,7 @@ export async function POST(req: Request) {
           if (!results.length) {
             return;
           }
+          noteDomainsFromResults(results);
           const callId = typeof item.id === "string" ? item.id : null;
           if (callId && streamedWebSearchCallIds.has(callId)) {
             return;
@@ -1408,6 +1465,9 @@ export async function POST(req: Request) {
               if (token) {
                 fullAssistantMessage += token;
                 enqueueJson({ token });
+                if (!firstTokenAtMs) {
+                  firstTokenAtMs = Date.now();
+                }
               }
             } else if (
               event.type === "response.web_search_call.in_progress" ||
@@ -1468,8 +1528,25 @@ export async function POST(req: Request) {
               message: "Web search failed; using prior knowledge.",
             });
           }
-          const latestSearchDomain =
-            searchMetadata.domains[searchMetadata.domains.length - 1];
+          const combinedDomains = mergeDomainLabels(
+            searchMetadata.domains,
+            liveSearchDomainList
+          );
+          const latestSearchDomain = combinedDomains[combinedDomains.length - 1];
+          const thinkingDurationMs =
+            typeof firstTokenAtMs === "number"
+              ? Math.max(0, firstTokenAtMs - requestStartMs)
+              : null;
+          const thinkingMetadata =
+            typeof thinkingDurationMs === "number"
+              ? {
+                  effort: modelConfig.reasoning?.effort ?? null,
+                  durationMs: thinkingDurationMs,
+                  durationSeconds: thinkingDurationMs / 1000,
+                }
+              : modelConfig.reasoning?.effort
+                ? { effort: modelConfig.reasoning?.effort ?? null }
+                : undefined;
 
           responseMetadata = {
             usedModel: targetModel,
@@ -1480,12 +1557,14 @@ export async function POST(req: Request) {
             reasoningEffort: modelConfig.reasoning?.effort,
             usedWebSearch,
             searchRecords: searchMetadata.records,
-            searchedDomains: searchMetadata.domains,
+            searchedDomains: combinedDomains,
             sources,
             citations,
             vectorStoreIds,
             generationType: "text",
-            searchedSiteLabel: latestSearchDomain,
+            searchedSiteLabel: latestSearchDomain ?? undefined,
+            thinkingDurationMs: thinkingDurationMs ?? undefined,
+            thinking: thinkingMetadata,
           };
 
           if (!assistantRowId) {

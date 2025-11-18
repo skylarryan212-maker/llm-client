@@ -62,6 +62,11 @@ type MessageMetadata = {
   thoughtDurationSeconds?: number;
   thoughtDurationLabel?: string;
   thinkingDurationMs?: number;
+  thinking?: {
+    effort?: ReasoningEffort | null;
+    durationSeconds?: number;
+    durationMs?: number;
+  };
   sources?: SourceChip[];
   citations?: Source[];
   files?: FileAttachment[];
@@ -321,6 +326,15 @@ function formatThoughtDurationLabel(seconds: number) {
   return `Thought for ${seconds.toFixed(1)} seconds`;
 }
 
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return (
+    value === "none" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high"
+  );
+}
+
 const markdownComponents: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
   ul: ({ children }) => (
@@ -421,7 +435,8 @@ function formatSearchedDomainsLine(domains?: string[] | null) {
   }
   const preview = ordered.slice(0, 3).join(", ");
   const remainder = ordered.length - Math.min(3, ordered.length);
-  const suffix = remainder > 0 ? ` + ${remainder} other${remainder === 1 ? "" : "s"}` : "";
+  const suffix =
+    remainder > 0 ? `, +${remainder} other${remainder === 1 ? "" : "s"}` : "";
   return `Searched ${preview}${suffix}`;
 }
 
@@ -658,6 +673,7 @@ export default function Home() {
   const [searchIndicator, setSearchIndicator] = useState<
     { message: string; variant: "running" | "error"; domains: string[] } | null
   >(null);
+  const [liveSearchDomains, setLiveSearchDomains] = useState<string[]>([]);
   const [fileReadingIndicator, setFileReadingIndicator] = useState<
     "running" | "error" | null
   >(null);
@@ -924,6 +940,7 @@ export default function Home() {
         const sanitizedMetadata: MessageMetadata = {
           ...rawMetadata,
         };
+        delete sanitizedMetadata.thinking;
         const sanitizedDomains = Array.isArray(rawMetadata.searchedDomains)
           ? rawMetadata.searchedDomains
               .map((label) => (typeof label === "string" ? label.trim() : ""))
@@ -932,6 +949,28 @@ export default function Home() {
         if (sanitizedDomains.length > 0) {
           sanitizedMetadata.searchedDomains = sanitizedDomains;
         }
+        if (rawMetadata.thinking) {
+          const sanitizedThinking: NonNullable<MessageMetadata["thinking"]> = {};
+          if (rawMetadata.thinking.effort === null) {
+            sanitizedThinking.effort = null;
+          } else if (isReasoningEffort(rawMetadata.thinking.effort)) {
+            sanitizedThinking.effort = rawMetadata.thinking.effort;
+          }
+          if (typeof rawMetadata.thinking.durationMs === "number") {
+            sanitizedThinking.durationMs = rawMetadata.thinking.durationMs;
+          }
+          if (typeof rawMetadata.thinking.durationSeconds === "number") {
+            sanitizedThinking.durationSeconds =
+              rawMetadata.thinking.durationSeconds;
+          }
+          if (
+            typeof sanitizedThinking.durationMs === "number" ||
+            typeof sanitizedThinking.durationSeconds === "number" ||
+            typeof sanitizedThinking.effort !== "undefined"
+          ) {
+            sanitizedMetadata.thinking = sanitizedThinking;
+          }
+        }
         const attachments = Array.isArray(sanitizedMetadata.attachments)
           ? sanitizedMetadata.attachments
           : [];
@@ -939,13 +978,17 @@ export default function Home() {
           ? sanitizedMetadata.files
           : [];
         const timingMs =
-          typeof sanitizedMetadata.thinkingDurationMs === "number"
-            ? sanitizedMetadata.thinkingDurationMs
-            : null;
+          typeof sanitizedMetadata.thinking?.durationMs === "number"
+            ? sanitizedMetadata.thinking.durationMs
+            : typeof sanitizedMetadata.thinkingDurationMs === "number"
+              ? sanitizedMetadata.thinkingDurationMs
+              : null;
         const thoughtSeconds =
-          typeof timingMs === "number"
-            ? timingMs / 1000
-            : sanitizedMetadata.thoughtDurationSeconds;
+          typeof sanitizedMetadata.thinking?.durationSeconds === "number"
+            ? sanitizedMetadata.thinking.durationSeconds
+            : typeof timingMs === "number"
+              ? timingMs / 1000
+              : sanitizedMetadata.thoughtDurationSeconds;
         const thoughtLabel =
           sanitizedMetadata.thoughtDurationLabel &&
           sanitizedMetadata.thoughtDurationLabel.trim().length > 0
@@ -1805,6 +1848,7 @@ type RetryOptions = {
     setShowScrollButton(false);
     setSearchIndicator(null);
     setFileReadingIndicator(null);
+    setLiveSearchDomains([]);
     responseTimingRef.current = {
       start: typeof performance !== "undefined" ? performance.now() : Date.now(),
       firstToken: null,
@@ -1977,6 +2021,7 @@ type RetryOptions = {
         setSearchIndicator((prev) =>
           prev?.variant === "running" ? null : prev
         );
+        setLiveSearchDomains([]);
         responseTimingRef.current = {
           start: null,
           firstToken: null,
@@ -2040,9 +2085,19 @@ type RetryOptions = {
                         msg.metadata?.reasoningEffort ??
                         requestedReasoningEffort;
                       const incomingThinkingMs =
-                        typeof meta.thinkingDurationMs === "number"
-                          ? meta.thinkingDurationMs
-                          : msg.metadata?.thinkingDurationMs;
+                        typeof meta.thinking?.durationMs === "number"
+                          ? meta.thinking.durationMs
+                          : typeof meta.thinkingDurationMs === "number"
+                            ? meta.thinkingDurationMs
+                            : msg.metadata?.thinking?.durationMs ??
+                              msg.metadata?.thinkingDurationMs;
+                      const incomingThinkingSeconds =
+                        typeof meta.thinking?.durationSeconds === "number"
+                          ? meta.thinking.durationSeconds
+                          : typeof incomingThinkingMs === "number"
+                            ? incomingThinkingMs / 1000
+                            : msg.metadata?.thinking?.durationSeconds ??
+                              msg.metadata?.thoughtDurationSeconds;
                       const mergedMetadata: MessageMetadata = {
                         ...(msg.metadata || {}),
                         usedModel: meta.usedModel ?? msg.metadata?.usedModel,
@@ -2079,8 +2134,8 @@ type RetryOptions = {
                           msg.metadata?.vectorStoreIds,
                         thinkingDurationMs: incomingThinkingMs,
                         thoughtDurationSeconds:
-                          typeof incomingThinkingMs === "number"
-                            ? incomingThinkingMs / 1000
+                          typeof incomingThinkingSeconds === "number"
+                            ? incomingThinkingSeconds
                             : msg.thoughtDurationSeconds,
                         thoughtDurationLabel:
                           msg.thoughtDurationLabel &&
@@ -2112,6 +2167,48 @@ type RetryOptions = {
                       }
                       if (!mergedMetadata.generationType) {
                         mergedMetadata.generationType = "text";
+                      }
+                      const mergedThinking: MessageMetadata["thinking"] = {
+                        ...(msg.metadata?.thinking || {}),
+                      };
+                      if (meta.thinking) {
+                        if (typeof meta.thinking.durationMs === "number") {
+                          mergedThinking.durationMs = meta.thinking.durationMs;
+                        }
+                        if (typeof meta.thinking.durationSeconds === "number") {
+                          mergedThinking.durationSeconds =
+                            meta.thinking.durationSeconds;
+                        }
+                        if (meta.thinking.effort === null) {
+                          mergedThinking.effort = null;
+                        } else if (meta.thinking.effort) {
+                          mergedThinking.effort = meta.thinking.effort;
+                        }
+                      }
+                      if (typeof incomingThinkingMs === "number") {
+                        mergedThinking.durationMs = incomingThinkingMs;
+                      }
+                      if (typeof incomingThinkingSeconds === "number") {
+                        mergedThinking.durationSeconds =
+                          incomingThinkingSeconds;
+                      }
+                      if (
+                        typeof mergedThinking.effort === "undefined" &&
+                        (meta.reasoningEffort ||
+                          msg.metadata?.reasoningEffort ||
+                          resolvedReasoning)
+                      ) {
+                        mergedThinking.effort =
+                          meta.reasoningEffort ??
+                          msg.metadata?.reasoningEffort ??
+                          resolvedReasoning;
+                      }
+                      if (
+                        typeof mergedThinking.durationMs === "number" ||
+                        typeof mergedThinking.durationSeconds === "number" ||
+                        typeof mergedThinking.effort !== "undefined"
+                      ) {
+                        mergedMetadata.thinking = mergedThinking;
                       }
                       return {
                         ...msg,
@@ -2154,6 +2251,28 @@ type RetryOptions = {
                     payload.metadata
                   );
                   applyLiveSearchDomains(domainUpdates);
+                  if (domainUpdates.length > 0) {
+                    setLiveSearchDomains((prev) => {
+                      const merged = mergeSearchedDomains(
+                        prev,
+                        domainUpdates
+                      );
+                      return merged.length === prev.length ? prev : merged;
+                    });
+                  }
+                } else if (payload.type === "web_search_domain") {
+                  const domainPayload = payload as {
+                    type: "web_search_domain";
+                    domain?: string;
+                  };
+                  const domainLabel = domainPayload.domain?.trim();
+                  if (domainLabel) {
+                    setLiveSearchDomains((prev) => {
+                      const merged = mergeSearchedDomains(prev, [domainLabel]);
+                      return merged.length === prev.length ? prev : merged;
+                    });
+                    applyLiveSearchDomains([domainLabel]);
+                  }
                 } else if (typeof payload.token === "string") {
                   const token = payload.token as string;
                   if (!responseTimingRef.current.firstToken) {
@@ -2182,11 +2301,29 @@ type RetryOptions = {
                         prev.map((msg) => {
                           if (msg.id !== targetMessageId) return msg;
                           persistedIdForTiming = msg.persistedId;
+                          const nextThinking: MessageMetadata["thinking"] = {
+                            ...(msg.metadata?.thinking || {}),
+                          };
+                          nextThinking.durationMs = elapsedMs;
+                          nextThinking.durationSeconds = seconds;
+                          if (
+                            typeof nextThinking.effort === "undefined" &&
+                            (msg.metadata?.reasoningEffort ||
+                              msg.reasoningEffort ||
+                              requestedReasoningEffort)
+                          ) {
+                            nextThinking.effort =
+                              msg.metadata?.reasoningEffort ??
+                              msg.reasoningEffort ??
+                              requestedReasoningEffort ??
+                              null;
+                          }
                           const nextMetadata: MessageMetadata = {
                             ...(msg.metadata || {}),
                             thinkingDurationMs: elapsedMs,
                             thoughtDurationSeconds: seconds,
                             thoughtDurationLabel: formatted,
+                            thinking: nextThinking,
                           };
                           updatedMetadata = nextMetadata;
                           return {
@@ -2373,6 +2510,7 @@ type RetryOptions = {
       resetThinkingIndicator();
       setSearchIndicator(null);
       setFileReadingIndicator(null);
+      setLiveSearchDomains([]);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -2391,6 +2529,7 @@ type RetryOptions = {
         assistantMessageId && current === assistantMessageId ? null : current
       );
       setFileReadingIndicator(null);
+      setLiveSearchDomains([]);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -2439,6 +2578,7 @@ type RetryOptions = {
     setForceWebSearch(false);
     setSearchIndicator(null);
     setFileReadingIndicator(null);
+    setLiveSearchDomains([]);
     setThinkingStatus({ variant: "thinking", label: "Generating image…" });
 
     try {
@@ -2627,6 +2767,7 @@ type RetryOptions = {
         assistantMessageId && current === assistantMessageId ? null : current
       );
       setThinkingStatus(null);
+      setLiveSearchDomains([]);
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -3617,13 +3758,19 @@ type RetryOptions = {
                     const isStreamingAssistantMessage =
                       isAssistant &&
                       activeAssistantMessageId === messageId;
+                    const derivedThoughtSeconds =
+                      typeof m.metadata?.thinking?.durationSeconds === "number"
+                        ? m.metadata?.thinking?.durationSeconds
+                        : typeof m.metadata?.thinking?.durationMs === "number"
+                          ? m.metadata?.thinking?.durationMs / 1000
+                          : m.thoughtDurationSeconds;
                     const thoughtLabel =
                       m.thoughtDurationLabel &&
                       m.thoughtDurationLabel.trim().length > 0
                         ? m.thoughtDurationLabel
-                        : typeof m.thoughtDurationSeconds === "number"
+                        : typeof derivedThoughtSeconds === "number"
                           ? formatThoughtDurationLabel(
-                              m.thoughtDurationSeconds
+                              derivedThoughtSeconds
                             )
                           : null;
                     const finalSearchLine = formatSearchedDomainsLine(
@@ -3664,6 +3811,22 @@ type RetryOptions = {
                                     <span>{thoughtLabel}</span>
                                   </div>
                                 );
+                              }
+                              if (
+                                isStreamingAssistantMessage &&
+                                searchIndicator?.variant === "running" &&
+                                liveSearchDomains.length > 0
+                              ) {
+                                liveSearchDomains.forEach((domain, index) => {
+                                  statusChips.push(
+                                    <div
+                                      key={`${messageId}-live-search-${domain}-${index}`}
+                                      className="flex items-center rounded-full border border-[#2f3750] bg-[#141826]/80 px-3 py-1 text-xs text-[#9bb8ff]"
+                                    >
+                                      <span>{`Searched ${domain}`}</span>
+                                    </div>
+                                  );
+                                });
                               }
                               if (showSearchChip && finalSearchLine) {
                                 statusChips.push(
@@ -4371,10 +4534,10 @@ type RetryOptions = {
                                 )}
                               </div>
 
-                              <div className="flex flex-1 items-stretch">
+                              <div className="flex flex-1 items-center">
                                 <textarea
                                   ref={textareaRef}
-                                  className="block h-full w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                                  className="block w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
                                   style={{
                                     maxHeight: MAX_INPUT_HEIGHT,
                                     minHeight: MIN_INPUT_HEIGHT,
