@@ -3193,8 +3193,7 @@ type RetryOptions = {
           }`}
           aria-current={isAgentsView ? "page" : undefined}
         >
-          <span className="text-base leading-none">⚡</span>
-          <span>Agents</span>
+          <span className="text-base leading-none">Agents</span>
         </button>
       </div>
 

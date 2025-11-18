@@ -4,40 +4,40 @@ const AGENT_FILTERS = ["All", "Coding", "Research", "Productivity", "Analysis"];
 
 const FEATURED_AGENTS = [
   {
-    id: "code-navigator",
-    name: "Code Navigator",
+    id: "codex",
+    name: "Codex",
     description:
-      "Understands large repositories, prepares refactors, and highlights risky areas before you touch the keyboard.",
-    tags: ["Context aware", "Diff ready", "TypeScript"],
-    iconLabel: "CN",
-    iconHint: "Repo intelligence",
+      "Deep code assistant for debugging, refactoring, repo analysis, and large-scale project modifications.",
+    tags: ["Coding", "Refactors", "TypeScript"],
+    iconLabel: "CX",
+    iconHint: "Code intelligence",
   },
   {
-    id: "brief-writer",
-    name: "Brief Writer",
+    id: "market-agent",
+    name: "Market Agent",
     description:
-      "Turns rough meeting notes into concise briefs with callouts, blockers, and stakeholder-ready summaries.",
-    tags: ["Summaries", "Narratives", "Meetings"],
-    iconLabel: "BW",
-    iconHint: "Writing",
+      "Volatility-aware market watcher for intraday monitoring, pre-open predictions, and end-of-day summaries.",
+    tags: ["Markets", "Live monitoring", "Summaries"],
+    iconLabel: "MA",
+    iconHint: "Financial analysis",
   },
   {
-    id: "launch-analyst",
-    name: "Launch Analyst",
+    id: "automation-builder",
+    name: "Automation Builder",
     description:
-      "Monitors launches across sources, surfaces sentiment, and prepares talking points for leadership updates.",
-    tags: ["Signals", "Dashboards", "Live tracking"],
-    iconLabel: "LA",
-    iconHint: "Monitoring",
+      "Creates task workflows, scripts, and automations. Converts your instructions into repeatable, executable processes.",
+    tags: ["Automation", "Workflows", "Scripting"],
+    iconLabel: "AB",
+    iconHint: "Process builder",
   },
   {
-    id: "market-notes",
-    name: "Market Notes",
+    id: "data-interpreter",
+    name: "Data Interpreter",
     description:
-      "Tracks macro data, compares prior periods, and ships annotated briefs for quick investor check-ins.",
-    tags: ["Finance", "Comparisons", "Summaries"],
-    iconLabel: "MN",
-    iconHint: "Markets",
+      "Processes spreadsheets and datasets to surface trends, detect anomalies, and generate charts and interpretations.",
+    tags: ["Data", "Charts", "Analytics"],
+    iconLabel: "DI",
+    iconHint: "Data analysis"
   },
 ];
 
