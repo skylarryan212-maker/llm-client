@@ -19,6 +19,11 @@ import type {
   SourceChip,
 } from "@/lib/chatTypes";
 import {
+  CODEX_AGENT_ID,
+  parseAgentId,
+  type AgentId,
+} from "@/lib/agents";
+import {
   getModelAndReasoningConfig,
   suggestSmallerModelForEffort,
   type ModelFamily,
@@ -49,7 +54,7 @@ type PersistedHistoryRow = {
 };
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
-type ModelKey = Exclude<ModelMode, "auto">;
+type ModelKey = "nano" | "mini" | "full" | "codex-mini" | "codex-full";
 
 export type RankedSource = {
   title: string;
@@ -161,6 +166,8 @@ const MODEL_MAP: Record<ModelKey, string> = {
   nano: "gpt-5-nano-2025-08-07",
   mini: "gpt-5-mini-2025-08-07",
   full: "gpt-5.1-2025-11-13",
+  "codex-mini": "gpt-5.1-codex-mini",
+  "codex-full": "gpt-5.1-codex",
 };
 
 const MODEL_FAMILY_TO_MODE: Record<Exclude<ModelFamily, "auto">, ModelKey> = {
@@ -174,6 +181,8 @@ const MODEL_KEY_TO_FAMILY: Record<ModelKey, Exclude<ModelFamily, "auto">> = {
   nano: "gpt-5-nano",
   mini: "gpt-5-mini",
   full: "gpt-5.1",
+  "codex-mini": "gpt-5.1",
+  "codex-full": "gpt-5.1",
 };
 
 const BASE_SYSTEM_PROMPT =
@@ -879,6 +888,7 @@ export async function POST(req: Request) {
     const conversationId = (body.conversationId ?? "").toString();
     const requestedModelFamily = parseModelFamily(body.modelFamily);
     const speedMode = parseSpeedMode(body.speedMode);
+    const agentId = parseAgentId(body.agentId);
     const requestedMode: ModelMode =
       requestedModelFamily === "auto"
         ? "auto"
@@ -1166,6 +1176,7 @@ export async function POST(req: Request) {
         userText: userTextForContext || userText,
         requestedMode,
         requestTitle: needsTitle && requestedMode === "auto",
+        agentId,
       });
     }
 
@@ -1738,11 +1749,17 @@ type RouteModelArgs = {
   userText: string;
   requestedMode: ModelMode;
   requestTitle?: boolean;
+  agentId: AgentId;
 };
 
 type RoutedModelConfig = {
   modelKey: ModelKey;
   titleSuggestion?: string | null;
+};
+
+type CodexSelectionArgs = {
+  history: HistoryMessage[];
+  userText: string;
 };
 
 async function routeModel({
@@ -1751,11 +1768,26 @@ async function routeModel({
   userText,
   requestedMode,
   requestTitle = false,
+  agentId,
 }: RouteModelArgs): Promise<RoutedModelConfig> {
   if (requestedMode === "nano" || requestedMode === "mini" || requestedMode === "full") {
     return {
       modelKey: requestedMode,
     };
+  }
+
+  if (agentId === CODEX_AGENT_ID) {
+    const codexKey = selectCodexModelKey({ history, userText });
+    if (codexKey) {
+      return { modelKey: codexKey };
+    }
+  }
+
+  if (agentId === CODEX_AGENT_ID) {
+    const codexKey = selectCodexModelKey({ history, userText });
+    if (codexKey) {
+      return { modelKey: codexKey };
+    }
   }
 
   try {
@@ -1789,6 +1821,103 @@ async function routeModel({
     modelKey: "mini",
     titleSuggestion: null,
   };
+}
+
+function selectCodexModelKey({ history, userText }: CodexSelectionArgs): ModelKey | null {
+  const latestUserText = getLatestUserText(history, userText);
+  if (!latestUserText) {
+    return null;
+  }
+  if (!looksLikeCodeTask(latestUserText)) {
+    return null;
+  }
+  return isComplexCodeTask(latestUserText) ? "codex-full" : "codex-mini";
+}
+
+function getLatestUserText(history: HistoryMessage[], fallback: string) {
+  if (fallback?.trim()) {
+    return fallback.trim();
+  }
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry.role === "user" && entry.content?.trim()) {
+      return entry.content.trim();
+    }
+  }
+  return "";
+}
+
+const CODE_KEYWORDS = [
+  "refactor",
+  "bug",
+  "stack trace",
+  "component",
+  "typescript",
+  "compile",
+  "optimize",
+  "lint",
+  "tests",
+  "interface",
+  "api response",
+];
+const CODE_SYMBOL_REGEX = /(import\s+.+from|export\s+|function\s+|class\s+|=>|console\.log|#include|async\s+def|def\s+\w+\s*\()/i;
+const FILE_REFERENCE_TEST_REGEX =
+  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib)\//i;
+const FILE_REFERENCE_COUNT_REGEX =
+  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib)\//gi;
+const COMPLEXITY_HINTS = [
+  "entire project",
+  "whole repo",
+  "multiple files",
+  "large refactor",
+  "migration",
+  "rewrite",
+];
+
+function looksLikeCodeTask(text: string) {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (/```/.test(normalized)) {
+    return true;
+  }
+  if (CODE_SYMBOL_REGEX.test(normalized)) {
+    return true;
+  }
+  if (FILE_REFERENCE_TEST_REGEX.test(normalized)) {
+    return true;
+  }
+  const lower = normalized.toLowerCase();
+  return CODE_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+function isComplexCodeTask(text: string) {
+  const normalized = text.trim();
+  const lower = normalized.toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.length > 1200) {
+    return true;
+  }
+  if (countCodeBlocks(normalized) >= 2) {
+    return true;
+  }
+  if (countFileMentions(normalized) >= 3) {
+    return true;
+  }
+  return COMPLEXITY_HINTS.some((hint) => lower.includes(hint));
+}
+
+function countCodeBlocks(text: string) {
+  const matches = text.match(/```/g);
+  return matches ? Math.floor(matches.length / 2) : 0;
+}
+
+function countFileMentions(text: string) {
+  const matches = text.match(FILE_REFERENCE_COUNT_REGEX);
+  return matches ? matches.length : 0;
 }
 
 function buildRouterPrompt(
