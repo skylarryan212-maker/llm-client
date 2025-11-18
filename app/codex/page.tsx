@@ -62,7 +62,7 @@ export default function CodexPage() {
   };
 
   return (
-    <div className="flex h-screen flex-col bg-[#06060c] text-white">
+    <div className="flex h-screen flex-col bg-[#212121] text-zinc-100">
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar

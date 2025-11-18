@@ -1784,13 +1784,6 @@ async function routeModel({
     }
   }
 
-  if (agentId === CODEX_AGENT_ID) {
-    const codexKey = selectCodexModelKey({ history, userText });
-    if (codexKey) {
-      return { modelKey: codexKey };
-    }
-  }
-
   try {
     const response = await openai.responses.create({
       model: MODEL_MAP.nano,
