@@ -1809,16 +1809,26 @@ export function MainApp({
     projectId: string | null,
     options?: CreateConversationOptions
   ) {
-    const resolvedAgentId = options?.agentId ?? DEFAULT_AGENT_ID;
-    const metadata: Record<string, unknown> = {
-      ...(options?.metadata ?? {}),
-      agentId: resolvedAgentId,
-    };
+    const resolvedAgentId: AgentId = options?.agentId ?? DEFAULT_AGENT_ID;
+    const hasMetadataOverrides =
+      options?.metadata && Object.keys(options.metadata).length > 0;
+    const metadataOverrides = hasMetadataOverrides && options?.metadata
+      ? { ...options.metadata }
+      : null;
+    const mergedMetadata =
+      resolvedAgentId === DEFAULT_AGENT_ID && !metadataOverrides
+        ? null
+        : {
+            ...(metadataOverrides ?? {}),
+            ...(resolvedAgentId === DEFAULT_AGENT_ID
+              ? {}
+              : { agentId: resolvedAgentId }),
+          };
 
     const record = await createConversationRecord({
       title: initialTitle,
       projectId,
-      metadata,
+      metadata: mergedMetadata,
     });
     setConversations((prev) => [record, ...prev]);
     return record;
@@ -1861,7 +1871,7 @@ type RetryOptions = {
     if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
-    let activeAgentId = getConversationAgentId(conversationId);
+    let activeAgentId: AgentId = getConversationAgentId(conversationId);
     let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
@@ -1924,6 +1934,8 @@ type RetryOptions = {
       }
 
       setStreamingConversationId(conversationId);
+
+      const resolvedAgentId: AgentId = activeAgentId ?? DEFAULT_AGENT_ID;
 
       if (!assistantMessageId) {
         assistantMessageId = createLocalId();
@@ -2027,7 +2039,7 @@ type RetryOptions = {
         modelFamily: chosenFamily,
         speedMode: chosenSpeed,
         forceWebSearch: shouldForceWebSearch,
-        agentId: activeAgentId,
+        agentId: resolvedAgentId,
       };
       if (attachmentCopies.length > 0) {
         requestBody.images = attachmentCopies.map((attachment) => ({
