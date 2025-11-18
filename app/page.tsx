@@ -1800,15 +1800,21 @@ export function MainApp({
   // CREATE CONVERSATION
   // ------------------------------------------------------------
   type CreateConversationOptions = {
+    title?: string | null;
+    projectId?: string | null;
     metadata?: Record<string, unknown> | null;
     agentId?: AgentId;
   };
 
-  async function createConversation(
-    initialTitle: string,
-    projectId: string | null,
-    options?: CreateConversationOptions
-  ) {
+  async function createConversation(options?: CreateConversationOptions) {
+    const rawTitle = options?.title ?? "New chat";
+    const resolvedTitle = rawTitle && rawTitle.trim()
+      ? rawTitle.trim()
+      : "New chat";
+    const resolvedProjectId =
+      typeof options?.projectId === "undefined"
+        ? selectedProjectId ?? null
+        : options.projectId ?? null;
     const resolvedAgentId: AgentId = options?.agentId ?? DEFAULT_AGENT_ID;
     const hasMetadataOverrides =
       options?.metadata && Object.keys(options.metadata).length > 0;
@@ -1826,11 +1832,11 @@ export function MainApp({
           };
 
     const record = await createConversationRecord({
-      title: initialTitle,
-      projectId,
+      title: resolvedTitle,
+      projectId: resolvedProjectId,
       metadata: mergedMetadata,
     });
-    setConversations((prev) => [record, ...prev]);
+    setConversations((prev) => [record, ...prev.filter((c) => c.id !== record.id)]);
     return record;
   }
 
@@ -1847,6 +1853,7 @@ type RetryOptions = {
     modelOverride?: ModelFamily;
     speedOverride?: SpeedMode;
     retry?: RetryOptions;
+    agentId?: AgentId;
   };
 
   type SendImageMessageOptions = {
@@ -1871,7 +1878,8 @@ type RetryOptions = {
     if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
-    let activeAgentId: AgentId = getConversationAgentId(conversationId);
+    let activeAgentId: AgentId =
+      options?.agentId ?? getConversationAgentId(conversationId);
     let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
@@ -1924,9 +1932,13 @@ type RetryOptions = {
         throw new Error("Cannot retry without a conversation");
       }
       if (!conversationId) {
-        const conv = await createConversation("New chat", selectedProjectId);
+        const conv = await createConversation({
+          projectId: selectedProjectId,
+          agentId: activeAgentId,
+        });
         conversationId = conv.id;
-        activeAgentId = agentIdFromMetadata(conv.metadata) ?? DEFAULT_AGENT_ID;
+        activeAgentId =
+          agentIdFromMetadata(conv.metadata) ?? activeAgentId ?? DEFAULT_AGENT_ID;
         setSelectedConversationId(conv.id);
         setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
         setViewMode("chat");
@@ -2667,7 +2679,9 @@ type RetryOptions = {
         throw new Error("Cannot retry without a conversation");
       }
       if (!conversationId) {
-        const conv = await createConversation("New chat", selectedProjectId);
+        const conv = await createConversation({
+          projectId: selectedProjectId,
+        });
         conversationId = conv.id;
         setSelectedConversationId(conv.id);
         setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
@@ -3013,7 +3027,7 @@ type RetryOptions = {
     ensureChatRoute();
     const projectId = global ? null : selectedProjectId;
     try {
-      const conv = await createConversation("New chat", projectId);
+      const conv = await createConversation({ projectId });
       setSelectedConversationId(conv.id);
       setSelectedProjectId(conv.project_id ?? projectId ?? null);
       setMessages([]);
