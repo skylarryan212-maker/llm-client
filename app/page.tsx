@@ -369,7 +369,7 @@ function ShareIcon({ className = "" }: { className?: string }) {
   );
 }
 
-function BellIcon({ className = "" }: { className?: string }) {
+function PullRequestIcon({ className = "" }: { className?: string }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -381,8 +381,11 @@ function BellIcon({ className = "" }: { className?: string }) {
       strokeLinejoin="round"
       className={className}
     >
-      <path d="M18 8a6 6 0 0 0-12 0c0 7-2 9-2 9h16s-2-2-2-9" />
-      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      <circle cx="6" cy="6" r="2" />
+      <circle cx="6" cy="18" r="2" />
+      <circle cx="18" cy="12" r="2" />
+      <path d="M6 8v8" />
+      <path d="M8 6h6a4 4 0 0 1 4 4v1" />
     </svg>
   );
 }
@@ -411,6 +414,33 @@ function createLocalId() {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
+}
+
+function formatConversationTimestamp(iso?: string | null) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatConversationDateLabel(iso?: string | null) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
 }
 
 function formatThoughtDurationLabel(seconds: number) {
@@ -731,6 +761,9 @@ export function MainApp({
   const [pendingNewChat, setPendingNewChat] = useState<
     { projectId: string | null; agentId: AgentId } | null
   >(null);
+  const [codexActiveTab, setCodexActiveTab] = useState<
+    "tasks" | "code-reviews" | "archive"
+  >("tasks");
 
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -752,6 +785,8 @@ export function MainApp({
   const transcriptionAbortRef = useRef<AbortController | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const router = useRouter();
+  const codexLandingScrollRef = useRef<HTMLDivElement | null>(null);
+  const codexLandingScrollPositionRef = useRef(0);
   const isAgentsView = initialPrimaryView === "agents";
   const isCodexMode = mode === "codex";
   const allowProjectSections = !isCodexMode;
@@ -764,7 +799,7 @@ export function MainApp({
   const codexHeaderActions = [
     { label: "Archive", Icon: ArchiveIcon },
     { label: "Share", Icon: ShareIcon },
-    { label: "Notifications", Icon: BellIcon },
+    { label: "View PR", Icon: PullRequestIcon },
   ];
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -898,6 +933,15 @@ export function MainApp({
       console.warn("Failed to hydrate conversation history", error);
     }
   }, []);
+
+  useEffect(() => {
+    if (!isCodexMode) return;
+    if (selectedConversationId) return;
+    const node = codexLandingScrollRef.current;
+    if (node) {
+      node.scrollTop = codexLandingScrollPositionRef.current;
+    }
+  }, [isCodexMode, selectedConversationId]);
   const [rowMenu, setRowMenu] = useState<
     { type: "conversation" | "project"; id: string } | null
   >(null);
@@ -986,6 +1030,14 @@ export function MainApp({
     setAutoScrollEnabled(true);
     setShowScrollButton(false);
   }
+
+  const rememberCodexLandingScroll = useCallback(() => {
+    if (!isCodexMode) return;
+    if (codexLandingScrollRef.current) {
+      codexLandingScrollPositionRef.current =
+        codexLandingScrollRef.current.scrollTop;
+    }
+  }, [isCodexMode]);
 
   // ------------------------------------------------------------
   // INITIAL LOAD: projects + conversations
@@ -1203,6 +1255,13 @@ export function MainApp({
   useEffect(() => {
     if (!selectedConversationId) {
       setMessages([]);
+      setIsLoadingMessages(false);
+      return;
+    }
+
+    if (skipAutoLoadRef.current === selectedConversationId) {
+      skipAutoLoadRef.current = null;
+      setIsLoadingMessages(false);
       return;
     }
 
@@ -1428,9 +1487,14 @@ export function MainApp({
         return "Voice chat (coming soon)";
     }
   })();
+  const composerSize: "default" | "tall" = isCodexMode ? "tall" : "default";
   const composerShapeClass = isMultilineInput
-    ? "rounded-[24px] py-2.5"
-    : "rounded-full py-1.5";
+    ? composerSize === "tall"
+      ? "rounded-[32px] py-3.5"
+      : "rounded-[24px] py-2.5"
+    : composerSize === "tall"
+      ? "rounded-full py-3"
+      : "rounded-full py-1.5";
   const composerPlaceholder = isTranscribing
     ? "Transcribing voice input…"
     : "Message the assistant…";
@@ -1488,6 +1552,851 @@ export function MainApp({
       )}
     </button>
   );
+
+  type ComposerPanelVariant = "default" | "codexTop" | "codexBottom";
+  type ChatInterfaceOptions = {
+    composerVariant?: ComposerPanelVariant;
+    messageContainerClass?: string;
+    showInlineTitle?: boolean;
+    wrapperClass?: string;
+  };
+
+  const renderComposerArea = (
+    panelVariant: ComposerPanelVariant = "default"
+  ) => {
+    const wrapperClassMap: Record<ComposerPanelVariant, string> = {
+      default: "shrink-0 border-t border-[#202123] bg-[#212121] px-4 py-3",
+      codexBottom:
+        "shrink-0 border-t border-white/10 bg-[#050509] px-6 py-5",
+      codexTop: "w-full px-6 pt-6",
+    };
+    const innerClass =
+      panelVariant === "codexTop"
+        ? "mx-auto flex w-full max-w-3xl flex-col gap-3"
+        : "mx-auto flex w-full flex-col gap-3";
+    return (
+      <div className={wrapperClassMap[panelVariant]}>
+        <div className={innerClass} style={{ maxWidth: MAX_MESSAGE_WIDTH }}>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              {forceWebSearch && (
+                <button
+                  type="button"
+                  onClick={() => setForceWebSearch(false)}
+                  className="flex items-center gap-1 rounded-full border border-[#4b64ff]/50 bg-[#1a1e2f] px-3 py-1 text-[11px] text-[#a5bfff]"
+                >
+                  <span className="text-base leading-none">🌐</span>
+                  <span>Web search</span>
+                </button>
+              )}
+              {createImageArmed && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreateImageArmed(false);
+                    setComposerError(null);
+                  }}
+                  className="flex items-center gap-1 rounded-full border border-white/30 bg-[#2b2b31] px-3 py-1 text-[11px] text-zinc-200"
+                >
+                  <span className="text-base leading-none">🎨</span>
+                  <span>Create image</span>
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2">
+              {imageAttachments.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {imageAttachments.map((attachment) => {
+                    const sizeLabel = formatAttachmentSize(attachment.size);
+                    return (
+                      <div
+                        key={`${attachment.id}-preview`}
+                        className="group flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2 py-1"
+                      >
+                        <div className="h-12 w-12 overflow-hidden rounded-xl bg-black/20">
+                          <Image
+                            src={attachment.dataUrl}
+                            alt={attachment.name || "Attachment"}
+                            width={48}
+                            height={48}
+                            className="h-full w-full object-cover"
+                            unoptimized
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1 text-left">
+                          <div className="truncate text-[12px] font-medium text-white">
+                            {attachment.name || "Image"}
+                          </div>
+                          {sizeLabel && (
+                            <div className="text-[10px] uppercase tracking-wide text-white/50">
+                              {sizeLabel}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          aria-label="Remove attachment"
+                          onClick={() => handleRemoveImageAttachment(attachment.id)}
+                          className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {fileAttachments.length > 0 && (
+                <div className="space-y-2">
+                  {fileAttachments.map((file) => {
+                    const sizeLabel = formatAttachmentSize(file.size);
+                    return (
+                      <div
+                        key={`${file.id}-file`}
+                        className="group flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+                      >
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#1b1b21] text-white/70">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-4 w-4"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={1.6}
+                          >
+                            <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                            <path d="M14 3v6h6" />
+                          </svg>
+                        </div>
+                        <div className="min-w-0 flex-1 text-left">
+                          <div className="truncate text-[12px] font-medium text-white">
+                            {file.name || "File"}
+                          </div>
+                          {sizeLabel && (
+                            <div className="text-[10px] uppercase tracking-wide text-white/50">
+                              {sizeLabel}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          aria-label="Remove file attachment"
+                          onClick={() => handleRemoveFileAttachment(file.id)}
+                          className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                <div className="flex w-full flex-col gap-2">
+                  <div className={composerContainerClass}>
+                    {isRecording ? (
+                      <>
+                        <button
+                          type="button"
+                          aria-label="Cancel voice recording"
+                          onClick={() => cancelRecordingFlow({ clearInput: true })}
+                          className="flex h-9 w-9 items-center justify-center rounded-full border border-red-500/60 bg-red-500/10 text-red-300 transition hover:bg-red-500/20"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            className="h-4 w-4"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                          >
+                            <path d="M6 6l12 12M6 18 18 6" />
+                          </svg>
+                        </button>
+                        <div className="flex flex-1 items-center py-1.5" aria-live="polite">
+                          <svg viewBox="0 0 100 32" className="h-8 w-full" aria-hidden>
+                            <path
+                              d={recordingWaveformPath}
+                              fill="none"
+                              stroke="#f87171"
+                              strokeWidth={2}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </div>
+                        {renderPrimaryButton()}
+                      </>
+                    ) : (
+                      <>
+                        <div className="relative mr-1 flex shrink-0 items-center self-end">
+                          <button
+                            type="button"
+                            aria-label="Composer options"
+                            aria-expanded={!isRecording ? composerMenuOpen : undefined}
+                            disabled={isRecording}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (isRecording) {
+                                return;
+                              }
+                              setComposerMenuOpen((prev) => !prev);
+                            }}
+                            className={`flex h-9 w-9 items-center justify-center rounded-full text-white/80 transition hover:bg-white/10 ${
+                              isRecording ? "cursor-not-allowed text-white/30" : ""
+                            }`}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              className="h-5 w-5"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={2}
+                              strokeLinecap="round"
+                            >
+                              <path d="M12 5v14M5 12h14" />
+                            </svg>
+                          </button>
+                          {!isRecording && composerMenuOpen && (
+                            <div
+                              onClick={(event) => event.stopPropagation()}
+                              className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
+                            >
+                              <div className="flex flex-col text-[13px] text-white/80">
+                                {isCodexMode ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setInput((prev) =>
+                                          prev && prev.trim().length > 0
+                                            ? prev
+                                            : "Plan:"
+                                        );
+                                        setComposerMenuOpen(false);
+                                        textareaRef.current?.focus();
+                                      }}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Plan
+                                    </button>
+                                    <div className="my-1 h-px bg-white/10" />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        handleAddFilesClick();
+                                        setComposerMenuOpen(false);
+                                      }}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Add photos &amp; files
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        handleTakePhotoClick();
+                                        setComposerMenuOpen(false);
+                                      }}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Take photo
+                                    </button>
+                                    <div className="my-1 h-px bg-white/10" />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        handleAddFilesClick();
+                                        setComposerMenuOpen(false);
+                                      }}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Add photos &amp; files
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (hasComposerAttachments) {
+                                          setComposerError(
+                                            "Image generation does not support attachments yet."
+                                          );
+                                        } else {
+                                          setComposerError(null);
+                                        }
+                                        setCreateImageArmed(true);
+                                        setForceWebSearch(false);
+                                        setComposerMenuOpen(false);
+                                      }}
+                                      className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      <span>Create image</span>
+                                      {createImageArmed && (
+                                        <span className="text-[#8ab4ff]">Armed</span>
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setComposerMenuOpen(false)}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Deep research
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setForceWebSearch((prev) => {
+                                          const next = !prev;
+                                          if (next) {
+                                            setCreateImageArmed(false);
+                                          }
+                                          return next;
+                                        });
+                                        setComposerMenuOpen(false);
+                                      }}
+                                      className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      <span>Web search</span>
+                                      {forceWebSearch && (
+                                        <span className="text-[#8ab4ff]">On</span>
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setComposerMenuOpen(false)}
+                                      className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                    >
+                                      Agent mode
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex flex-1 items-center self-stretch">
+                          <textarea
+                            ref={textareaRef}
+                            className="block w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
+                            style={{
+                              maxHeight: MAX_INPUT_HEIGHT,
+                              minHeight: resolvedMinInputHeight,
+                            }}
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder={composerPlaceholder}
+                            rows={1}
+                          />
+                          <input
+                            ref={photoInputRef}
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="sr-only"
+                            onChange={handlePhotoInputChange}
+                          />
+                          <input
+                            ref={filePickerInputRef}
+                            type="file"
+                            accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.txt,.csv,.tsv,.json,.md,.rtf,.html,.zip,.log"
+                            multiple
+                            className="sr-only"
+                            onChange={handleFilePickerChange}
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-2 self-end pl-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!micDisabled) {
+                                void startRecording();
+                              }
+                            }}
+                            disabled={micDisabled}
+                            aria-label="Start dictation"
+                            className={`flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-white/5 text-white/80 transition ${
+                              micDisabled
+                                ? "cursor-not-allowed opacity-40"
+                                : "hover:bg-white/10"
+                            }`}
+                          >
+                            <MicrophoneIcon className="h-4 w-4" />
+                          </button>
+                          {renderPrimaryButton()}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {isTranscribing && !isRecording && (
+                    <div className="flex items-center gap-2 text-xs text-zinc-400">
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-white/60" aria-hidden />
+                      <span>Transcribing…</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {composerError && (
+              <div className="text-xs text-red-400">{composerError}</div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderChatInterface = (options: ChatInterfaceOptions = {}) => {
+    const {
+      composerVariant = "default",
+      messageContainerClass =
+        "flex h-full flex-col overflow-y-auto overflow-x-hidden px-4 py-6 pb-32",
+      showInlineTitle = true,
+      wrapperClass = "",
+    } = options;
+    const inlineTitle = selectedConversationMeta?.title?.trim()
+      ? selectedConversationMeta.title.trim()
+      : pendingNewChat
+        ? "New chat"
+        : null;
+
+    return (
+      <>
+        <div className={`relative flex-1 min-h-0 ${wrapperClass}`}>
+          <div ref={chatContainerRef} className={messageContainerClass}>
+            <div
+              className="mx-auto flex w-full flex-col space-y-4 pb-6"
+              style={{ maxWidth: MAX_MESSAGE_WIDTH }}
+            >
+              {isLoadingMessages && (
+                <div className="mb-2 text-center text-xs text-zinc-500">
+                  Loading messages...
+                </div>
+              )}
+
+              {showInlineTitle && inlineTitle && (
+                <div className="text-center text-sm font-semibold text-white/80">
+                  {inlineTitle}
+                </div>
+              )}
+
+              {!isLoadingMessages && messages.length === 0 && (
+                <div className="mt-10 text-center text-sm text-zinc-400">
+                  Start chatting — {describeModelFamily("gpt-5.1")} chat is
+                  streaming live.
+                </div>
+              )}
+
+              {messages.map((m, i) => {
+                const messageId = m.id ?? `msg-${i}`;
+                const isAssistant = m.role === "assistant";
+                const rawCitations = m.metadata?.citations ?? [];
+                const displayableSources = rawCitations.filter((source) =>
+                  Boolean(source?.url)
+                );
+                const usedWebSearchFlag = Boolean(
+                  m.usedWebSearch || m.metadata?.usedWebSearch
+                );
+                const showSourcesButton =
+                  isAssistant &&
+                  (usedWebSearchFlag || displayableSources.length > 0);
+                const generatedImages = m.metadata?.generatedImages ?? [];
+                const isImageMessage =
+                  m.metadata?.generationType === "image" &&
+                  generatedImages.length > 0;
+                const imageModelLabel =
+                  isImageMessage && typeof m.usedModel === "string"
+                    ? IMAGE_MODEL_LABELS[m.usedModel as ImageModelKey] ||
+                      m.usedModel
+                    : null;
+                const sourceChips = (m.metadata?.sources ?? []).filter(
+                  (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
+                );
+                const showSourceChips = sourceChips.length > 0;
+                const isStreamingAssistantMessage =
+                  isAssistant && activeAssistantMessageId === messageId;
+                const derivedThoughtSeconds =
+                  typeof m.metadata?.thinking?.durationSeconds === "number"
+                    ? m.metadata?.thinking?.durationSeconds
+                    : typeof m.metadata?.thinking?.durationMs === "number"
+                      ? m.metadata?.thinking?.durationMs / 1000
+                      : m.thoughtDurationSeconds;
+                const thoughtLabel =
+                  m.thoughtDurationLabel &&
+                  m.thoughtDurationLabel.trim().length > 0
+                    ? m.thoughtDurationLabel
+                    : typeof derivedThoughtSeconds === "number"
+                      ? formatThoughtDurationLabel(derivedThoughtSeconds)
+                      : null;
+                const finalSearchLine = formatSearchedDomainsLine(
+                  m.metadata?.searchedDomains
+                );
+                const showSearchChip =
+                  isAssistant &&
+                  !isStreamingAssistantMessage &&
+                  Boolean(finalSearchLine);
+                const assistantWrapperClass =
+                  "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
+                const userWrapperClass =
+                  "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
+
+                return (
+                  <div
+                    key={messageId}
+                    className={`flex ${
+                      isAssistant ? "justify-start" : "justify-end"
+                    }`}
+                  >
+                    {isAssistant ? (
+                      <div
+                        className={`${assistantWrapperClass} px-1 py-1 text-left text-[15px] leading-relaxed text-zinc-100 md:px-2`}
+                      >
+                        {(() => {
+                          const statusChips: ReactNode[] = [];
+                          if (thoughtLabel) {
+                            statusChips.push(
+                              <div
+                                key={`${messageId}-thought-chip`}
+                                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#15151a]/80 px-3 py-1 text-xs text-zinc-300"
+                              >
+                                <span
+                                  className="h-2 w-2 rounded-full bg-zinc-500"
+                                  aria-hidden
+                                />
+                                <span>{thoughtLabel}</span>
+                              </div>
+                            );
+                          }
+                          if (
+                            isStreamingAssistantMessage &&
+                            searchIndicator?.variant === "running" &&
+                            liveSearchDomains.length > 0
+                          ) {
+                            liveSearchDomains.forEach((domain, index) => {
+                              statusChips.push(
+                                <div
+                                  key={`${messageId}-live-search-${domain}-${index}`}
+                                  className="flex items-center rounded-full border border-[#2f3750] bg-[#141826]/80 px-3 py-1 text-xs text-[#9bb8ff]"
+                                >
+                                  <span className="h-2 w-2 rounded-full bg-[#6f8dff]" aria-hidden />
+                                  <span>{domain}</span>
+                                </div>
+                              );
+                            });
+                          }
+                          return statusChips.length > 0 ? (
+                            <div className="mb-2 flex flex-wrap gap-2">
+                              {statusChips}
+                            </div>
+                          ) : null;
+                        })()}
+
+                        <div className="rounded-2xl bg-[#1f1f28] px-4 py-3 shadow-lg">
+                          <ReactMarkdown
+                            components={markdownComponents}
+                            rehypePlugins={[rehypeRaw]}
+                            remarkPlugins={[remarkGfm, remarkBreaks]}
+                          >
+                            {m.content}
+                          </ReactMarkdown>
+
+                          {isImageMessage && (
+                            <div className="mt-4 space-y-3">
+                              <div className="flex flex-wrap gap-3">
+                                {generatedImages.map((image) => (
+                                  <div
+                                    key={image.id}
+                                    className="overflow-hidden rounded-2xl border border-white/10 bg-black/20"
+                                  >
+                                    <Image
+                                      src={image.dataUrl}
+                                      alt={image.prompt || "Generated image"}
+                                      width={512}
+                                      height={512}
+                                      className="h-48 w-48 object-cover"
+                                      unoptimized
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                              {imageModelLabel && (
+                                <div className="text-xs text-white/60">
+                                  Generated with {imageModelLabel}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {m.metadata?.attachments &&
+                            m.metadata.attachments.length > 0 && (
+                              <div className="mt-4 grid grid-cols-2 gap-3">
+                                {m.metadata.attachments.map((attachment) => (
+                                  <div
+                                    key={`${attachment.id}-attached`}
+                                    className="overflow-hidden rounded-xl border border-white/10"
+                                  >
+                                    <Image
+                                      src={attachment.dataUrl}
+                                      alt={attachment.name || "Attachment"}
+                                      width={256}
+                                      height={256}
+                                      className="h-32 w-full object-cover"
+                                      unoptimized
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                          {m.metadata?.files && m.metadata.files.length > 0 && (
+                            <div className="mt-4 space-y-2">
+                              {m.metadata.files.map((file) => (
+                                <div
+                                  key={`${file.id}-file-row`}
+                                  className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                                >
+                                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-black/30">
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      className="h-4 w-4"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth={1.6}
+                                    >
+                                      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                      <path d="M14 3v6h6" />
+                                    </svg>
+                                  </div>
+                                  <div className="flex-1 text-sm">
+                                    {file.name || "File"}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {showSourcesButton && (
+                            <div className="mt-4">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedSourcesId((prev) =>
+                                    prev === messageId ? null : messageId
+                                  )
+                                }
+                                className="text-sm text-[#8ab4ff] hover:underline"
+                              >
+                                {expandedSourcesId === messageId
+                                  ? "Hide sources"
+                                  : "Show sources"}
+                              </button>
+                              {expandedSourcesId === messageId && (
+                                <div className="mt-3 space-y-2 text-sm text-white/70">
+                                      {displayableSources.map((source, index) => {
+                                        const sourceSnippet =
+                                          typeof (source as { snippet?: unknown }).snippet ===
+                                            "string"
+                                            ? (source as { snippet?: string }).snippet
+                                            : null;
+                                        return (
+                                          <div key={`${messageId}-source-${index}`}>
+                                            <a
+                                              href={source.url}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="text-[#8ab4ff] hover:underline"
+                                            >
+                                              {source.title || source.url}
+                                            </a>
+                                            {sourceSnippet && (
+                                              <p className="text-white/70">
+                                                {sourceSnippet}
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {showSourceChips && (
+                            <div className="mt-4 flex flex-wrap gap-2">
+                              {sourceChips.map((chip, index) => (
+                                <a
+                                  key={`${messageId}-chip-${index}`}
+                                  href={chip.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80"
+                                >
+                                  <span className="h-2 w-2 rounded-full bg-[#6f8dff]" aria-hidden />
+                                  <span>{chip.domain}</span>
+                                </a>
+                              ))}
+                            </div>
+                          )}
+
+                          {showSearchChip && finalSearchLine && (
+                            <div className="mt-4 text-xs text-white/60">
+                              {finalSearchLine}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={`${userWrapperClass} items-end text-right text-[15px] text-white`}
+                      >
+                        <div className="rounded-2xl bg-[#2b6eea] px-4 py-3 text-left shadow-lg">
+                          <ReactMarkdown
+                            components={markdownComponents}
+                            rehypePlugins={[rehypeRaw]}
+                            remarkPlugins={[remarkGfm, remarkBreaks]}
+                          >
+                            {m.content}
+                          </ReactMarkdown>
+
+                          {m.attachments && m.attachments.length > 0 && (
+                            <div className="mt-4 grid grid-cols-2 gap-3">
+                              {m.attachments.map((attachment) => (
+                                <div
+                                  key={`${attachment.id}-user-attachment`}
+                                  className="overflow-hidden rounded-xl border border-white/20"
+                                >
+                                  <Image
+                                    src={attachment.dataUrl}
+                                    alt={attachment.name || "Attachment"}
+                                    width={256}
+                                    height={256}
+                                    className="h-32 w-full object-cover"
+                                    unoptimized
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {m.files && m.files.length > 0 && (
+                            <div className="mt-4 space-y-2">
+                              {m.files.map((file) => (
+                                <div
+                                  key={`${file.id}-user-file`}
+                                  className="flex items-center gap-3 rounded-xl border border-white/20 bg-white/10 px-3 py-2"
+                                >
+                                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-black/20">
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      className="h-4 w-4"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth={1.6}
+                                    >
+                                      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                                      <path d="M14 3v6h6" />
+                                    </svg>
+                                  </div>
+                                  <div className="flex-1 truncate text-sm">
+                                    {file.name || "File"}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyMessage(m)}
+                          className="mt-2 text-xs text-white/70 hover:text-white"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {(searchIndicator || fileReadingIndicator || thinkingStatus) && (
+                <div className="flex flex-wrap gap-2">
+                  {fileReadingIndicator && (
+                    <StatusBubble
+                      label="Reading documents"
+                      variant={
+                        fileReadingIndicator === "error"
+                          ? "error"
+                          : "reading"
+                      }
+                    />
+                  )}
+                  {searchIndicator && (
+                    <StatusBubble
+                      label={searchIndicator.message}
+                      variant={
+                        searchIndicator.variant === "error"
+                          ? "error"
+                          : "search"
+                      }
+                      subtext={
+                        searchIndicator.variant === "running" &&
+                        searchStatusSubtext
+                          ? searchStatusSubtext
+                          : undefined
+                      }
+                    />
+                  )}
+                  {thinkingStatus && (
+                    <StatusBubble
+                      label={thinkingStatus.label}
+                      variant={
+                        thinkingStatus.variant === "extended"
+                          ? "extended"
+                          : "default"
+                      }
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {showScrollButton && messages.length > 0 && (
+            <button
+              onClick={handleJumpToBottom}
+              className="pointer-events-auto absolute bottom-5 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-[#1b1b25]/90 p-3 text-white shadow-xl transition hover:bg-[#242433] sm:bottom-6"
+              aria-label="Jump to latest message"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {renderComposerArea(composerVariant)}
+      </>
+    );
+  };
   const handlePrimaryAction = () => {
     if (primaryActionMode === "stop") {
       handleStopGeneration();
@@ -1886,6 +2795,9 @@ export function MainApp({
 
   const handleConversationSelect = (id: string) => {
     ensureChatRoute();
+    if (isCodexMode && !selectedConversationId) {
+      rememberCodexLandingScroll();
+    }
     setPendingNewChat(null);
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
@@ -2101,6 +3013,9 @@ type RetryOptions = {
           agentIdFromMetadata(conv.metadata) ??
           activeAgentId ??
           defaultAgentId;
+        if (isCodexMode) {
+          rememberCodexLandingScroll();
+        }
         setSelectedConversationId(conv.id);
         if (allowProjectSections) {
           setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
@@ -2854,6 +3769,9 @@ type RetryOptions = {
           agentId: defaultAgentId,
         });
         conversationId = conv.id;
+        if (isCodexMode) {
+          rememberCodexLandingScroll();
+        }
         setSelectedConversationId(conv.id);
         if (allowProjectSections) {
           setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
@@ -3199,46 +4117,26 @@ type RetryOptions = {
     }
   };
 
-  async function handleNewChat(global = false) {
+  function handleNewChat(global = false) {
     ensureChatRoute();
     const projectId = global ? null : selectedProjectId;
     const resolvedProjectId = allowProjectSections ? projectId ?? null : null;
-    if (!isCodexMode) {
-      if (!selectedConversationId && pendingNewChat) {
-        return;
-      }
-      setPendingNewChat({
-        projectId: resolvedProjectId,
-        agentId: defaultAgentId,
-      });
-      setSelectedConversationId(null);
-      if (allowProjectSections) {
-        setSelectedProjectId(resolvedProjectId);
-      } else {
-        setSelectedProjectId(null);
-      }
-      setMessages([]);
-      setViewMode("chat");
-      setSidebarOpen(false);
+    if (!selectedConversationId && pendingNewChat) {
       return;
     }
-    try {
-      const conv = await createConversation({
-        projectId: resolvedProjectId,
-        agentId: defaultAgentId,
-      });
-      setSelectedConversationId(conv.id);
-      if (allowProjectSections) {
-        setSelectedProjectId(conv.project_id ?? resolvedProjectId ?? null);
-      } else {
-        setSelectedProjectId(null);
-      }
-      setMessages([]);
-      setViewMode("chat");
-      setSidebarOpen(false);
-    } catch {
-      // noop
+    setPendingNewChat({
+      projectId: resolvedProjectId,
+      agentId: defaultAgentId,
+    });
+    setSelectedConversationId(null);
+    if (allowProjectSections) {
+      setSelectedProjectId(resolvedProjectId);
+    } else {
+      setSelectedProjectId(null);
     }
+    setMessages([]);
+    setViewMode("chat");
+    setSidebarOpen(false);
   }
 
   async function handleCreateProject() {
@@ -3727,11 +4625,312 @@ type RetryOptions = {
     </>
   );
 
+  const renderCodexExperience = () => {
+    if (selectedConversationId) {
+      const title =
+        selectedConversationMeta?.title?.trim() || "Untitled task";
+      const dateLabel = formatConversationDateLabel(
+        selectedConversationMeta?.created_at
+      );
+      return (
+        <div className="flex h-screen min-h-0 flex-col bg-[#030308] text-white">
+          <header className="flex items-center justify-between border-b border-white/10 px-6 py-4">
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedConversationId(null);
+                  setPendingNewChat(null);
+                  setMessages([]);
+                  setIsLoadingMessages(false);
+                  setViewMode("chat");
+                  setSidebarOpen(false);
+                }}
+                className="rounded-full border border-white/15 p-2 text-white/80 transition hover:text-white"
+                aria-label="Back to Codex tasks"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  className="h-4 w-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M15 18l-6-6 6-6" />
+                </svg>
+              </button>
+              <div className="h-8 w-px bg-white/10" />
+              <div>
+                <div className="text-lg font-semibold text-white">{title}</div>
+                <div className="text-sm text-white/60">
+                  {dateLabel || ""}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              {codexHeaderActions.map(({ label, Icon }) => (
+                <button
+                  key={label}
+                  type="button"
+                  className="flex items-center gap-1 text-sm text-white/70 transition hover:text-white"
+                >
+                  <Icon className="h-4 w-4 text-white/70" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          </header>
+          <div className="flex flex-1 min-h-0 flex-col">
+            {renderChatInterface({
+              composerVariant: "codexBottom",
+              messageContainerClass:
+                "flex h-full flex-col overflow-y-auto overflow-x-hidden px-4 py-6 pb-32 md:px-12",
+              showInlineTitle: false,
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    const agentEntries = [
+      { id: "codex", label: "Codex", active: true },
+      { id: "market", label: "Market agent", active: false },
+      { id: "automation", label: "Automation builder", active: false },
+      { id: "data", label: "Data interpreter", active: false },
+    ];
+    const codexTabs: Array<{ id: typeof codexActiveTab; label: string }> = [
+      { id: "tasks", label: "Tasks" },
+      { id: "code-reviews", label: "Code reviews" },
+      { id: "archive", label: "Archive" },
+    ];
+    const newChatDisabled = !selectedConversationId && Boolean(pendingNewChat);
+
+    return (
+      <div className="flex h-screen min-h-0 bg-[#030308] text-white">
+        <aside className="hidden w-64 flex-col border-r border-white/5 bg-[#050509] p-4 lg:flex">
+          <button
+            type="button"
+            onClick={() => router.push("/agents")}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-white/80 transition hover:bg-white/10"
+          >
+            <span className="flex h-4 w-4 items-center justify-center">
+              <AgentsToolIcon className="h-4 w-4" />
+            </span>
+            <span>Agents</span>
+          </button>
+          <div className="mt-6 space-y-1 text-sm text-white/70">
+            {agentEntries.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className={`flex w-full items-center rounded-xl px-3 py-2 text-left transition ${
+                  entry.active
+                    ? "bg-white/10 text-white"
+                    : "text-white/60 hover:bg-white/5"
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        </aside>
+        <div
+          className="flex-1 overflow-y-auto"
+          ref={codexLandingScrollRef}
+        >
+          <div className="mx-auto flex w-full max-w-5xl flex-col items-center px-6 py-10">
+            <div className="w-full lg:hidden">
+              <button
+                type="button"
+                onClick={() => router.push("/agents")}
+                className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 px-4 py-2 text-sm text-white/80 transition hover:text-white"
+              >
+                <AgentsToolIcon className="h-4 w-4" />
+                <span>Agents</span>
+              </button>
+              <div className="flex gap-2 overflow-x-auto text-xs text-white/60">
+                {agentEntries.map((entry) => (
+                  <div
+                    key={`mobile-${entry.id}`}
+                    className={`rounded-full px-3 py-1 ${
+                      entry.active
+                        ? "bg-white/15 text-white"
+                        : "bg-white/5"
+                    }`}
+                  >
+                    {entry.label}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-6 flex w-full flex-col items-center gap-4 text-center">
+              <h1 className="text-3xl font-semibold text-white">
+                What should we code next?
+              </h1>
+              <div className="flex w-full max-w-3xl justify-end">
+                <button
+                  type="button"
+                  onClick={() => handleNewChat(true)}
+                  disabled={newChatDisabled}
+                  className={`inline-flex items-center gap-2 rounded-full border border-white/15 px-4 py-2 text-sm transition ${
+                    newChatDisabled
+                      ? "cursor-not-allowed opacity-40"
+                      : "hover:bg-white/10"
+                  }`}
+                >
+                  <span className="text-lg leading-none">＋</span>
+                  <span>New chat</span>
+                </button>
+              </div>
+            </div>
+
+            {renderComposerArea("codexTop")}
+
+            <div className="mt-6 w-full max-w-3xl">
+              <div className="flex flex-wrap gap-4 text-sm text-white/70">
+                {codexTabs.map((tab) => {
+                  const isActive = codexActiveTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setCodexActiveTab(tab.id)}
+                      className={`border-b-2 px-1 pb-1 transition ${
+                        isActive
+                          ? "border-white text-white"
+                          : "border-transparent text-white/60"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-6 space-y-2">
+                {codexActiveTab === "tasks" ? (
+                  sortedConversations.length === 0 ? (
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-6 text-center text-sm text-white/60">
+                      No tasks yet.
+                    </div>
+                  ) : (
+                    sortedConversations.map((conversation) => (
+                      <button
+                        key={conversation.id}
+                        type="button"
+                        onClick={() => handleConversationSelect(conversation.id)}
+                        className="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:bg-white/10"
+                      >
+                        <div>
+                          <div className="text-sm font-semibold text-white">
+                            {conversation.title?.trim() || "Untitled task"}
+                          </div>
+                          <div className="text-xs text-white/60">
+                            {formatConversationTimestamp(conversation.created_at) ||
+                              "Just now"}
+                          </div>
+                        </div>
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          className="h-4 w-4 text-white/50"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M9 6l6 6-6 6" />
+                        </svg>
+                      </button>
+                    ))
+                  )
+                ) : (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-6 text-center text-sm text-white/60">
+                    {codexActiveTab === "code-reviews"
+                      ? "Code reviews will appear here soon."
+                      : "Archived tasks will live here soon."}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const confirmDialogs = (
+    <>
+      <ConfirmDialog
+        open={Boolean(pendingDeleteConversation)}
+        title="Delete chat?"
+        body={
+          <span>
+            This will delete &ldquo;
+            {pendingDeleteConversation?.title || "this chat"}
+            &rdquo;.
+          </span>
+        }
+        confirmLoading={deleteConversationLoading}
+        onCancel={() => {
+          if (!deleteConversationLoading) {
+            setPendingDeleteConversation(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteConversationLoading) {
+            void confirmDeleteConversation();
+          }
+        }}
+      />
+      {allowProjectSections && (
+        <ConfirmDialog
+          open={Boolean(pendingDeleteProject)}
+          title="Delete this project?"
+          body={
+            <span>
+              This will delete &ldquo;
+              {pendingDeleteProject?.name || "this project"}
+              &rdquo; and all of its conversations.
+            </span>
+          }
+          confirmLabel="Delete project"
+          confirmLoading={deleteProjectLoading}
+          onCancel={() => {
+            if (!deleteProjectLoading) {
+              setPendingDeleteProject(null);
+            }
+          }}
+          onConfirm={() => {
+            if (!deleteProjectLoading) {
+              void confirmDeleteProject();
+            }
+          }}
+        />
+      )}
+    </>
+  );
+
   // ------------------------------------------------------------
   // RENDER
   // ------------------------------------------------------------
+  if (isCodexMode) {
+    return (
+      <>
+        {renderCodexExperience()}
+        {confirmDialogs}
+      </>
+    );
+  }
+
   return (
-    <div className="flex h-screen min-h-0 bg-[#212121] text-zinc-100">
+    <>
+      <div className="flex h-screen min-h-0 bg-[#212121] text-zinc-100">
       {/* Desktop Sidebar */}
       <aside className="hidden w-64 min-h-0 flex-col border-r border-[#202123] bg-[#181818] md:flex">
         <SidebarSections />
@@ -4090,6 +5289,22 @@ type RetryOptions = {
                   className="mx-auto flex w-full flex-col space-y-4 pb-6"
                   style={{ maxWidth: MAX_MESSAGE_WIDTH }}
                 >
+                  {(() => {
+                    const titleLabel = selectedConversationMeta?.title?.trim()
+                      ? selectedConversationMeta.title.trim()
+                      : pendingNewChat
+                        ? "New chat"
+                        : null;
+                    if (!titleLabel) {
+                      return null;
+                    }
+                    return (
+                      <div className="text-center text-sm font-semibold text-white/80">
+                        {titleLabel}
+                      </div>
+                    );
+                  })()}
+
                   {isLoadingMessages && (
                     <div className="mb-2 text-center text-xs text-zinc-500">
                       Loading messages...
@@ -5061,53 +6276,8 @@ type RetryOptions = {
         </div>
       )}
 
-      <ConfirmDialog
-        open={Boolean(pendingDeleteConversation)}
-        title="Delete chat?"
-        body={
-          <span>
-            This will delete &ldquo;
-            {pendingDeleteConversation?.title || "this chat"}
-            &rdquo;.
-          </span>
-        }
-        confirmLoading={deleteConversationLoading}
-        onCancel={() => {
-          if (!deleteConversationLoading) {
-            setPendingDeleteConversation(null);
-          }
-        }}
-        onConfirm={() => {
-          if (!deleteConversationLoading) {
-            void confirmDeleteConversation();
-          }
-        }}
-      />
-      {allowProjectSections && (
-        <ConfirmDialog
-          open={Boolean(pendingDeleteProject)}
-          title="Delete this project?"
-          body={
-            <span>
-              This will delete &ldquo;
-              {pendingDeleteProject?.name || "this project"}
-              &rdquo; and all of its conversations.
-            </span>
-          }
-          confirmLabel="Delete project"
-          confirmLoading={deleteProjectLoading}
-          onCancel={() => {
-            if (!deleteProjectLoading) {
-              setPendingDeleteProject(null);
-            }
-          }}
-          onConfirm={() => {
-            if (!deleteProjectLoading) {
-              void confirmDeleteProject();
-            }
-          }}
-        />
-      )}
-    </div>
+      </div>
+      {confirmDialogs}
+    </>
   );
 }
