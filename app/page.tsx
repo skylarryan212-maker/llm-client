@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -29,6 +30,7 @@ import {
   type SpeedMode,
 } from "@/lib/modelConfig";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { AgentsCatalog } from "@/components/agents/AgentsCatalog";
 
 type SearchSource = {
   title: string;
@@ -122,6 +124,7 @@ type ConversationMeta = {
 };
 
 type ViewMode = "chat" | "project";
+type PrimaryView = "chat" | "agents";
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
 
@@ -258,6 +261,10 @@ function StatusBubble({
       ) : null}
     </div>
   );
+}
+
+export default function Home() {
+  return <MainApp initialPrimaryView="chat" />;
 }
 
 function CheckmarkIcon({ className = "" }: { className?: string }) {
@@ -598,7 +605,11 @@ function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
   return deriveSearchDomain(metadata.searchRecords, metadata.citations);
 }
 
-export default function Home() {
+export function MainApp({
+  initialPrimaryView = "chat",
+}: {
+  initialPrimaryView?: PrimaryView;
+}) {
   // ------------------------------------------------------------
   // STATE
   // ------------------------------------------------------------
@@ -651,6 +662,8 @@ export default function Home() {
   const recordingChunksRef = useRef<Blob[]>([]);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const router = useRouter();
+  const isAgentsView = initialPrimaryView === "agents";
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const waveformDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
@@ -1695,6 +1708,7 @@ export default function Home() {
   }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
+    ensureChatRoute();
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
       loadMessages(id, { force: true });
@@ -1707,6 +1721,7 @@ export default function Home() {
   };
 
   const handleProjectSelect = (id: string) => {
+    ensureChatRoute();
     setSelectedProjectId(id);
     setViewMode("project");
     setSidebarOpen(false);
@@ -2937,7 +2952,14 @@ type RetryOptions = {
   // ------------------------------------------------------------
   // PROJECTS + CHAT MGMT
   // ------------------------------------------------------------
+  const ensureChatRoute = () => {
+    if (isAgentsView) {
+      router.push("/");
+    }
+  };
+
   async function handleNewChat(global = false) {
+    ensureChatRoute();
     const projectId = global ? null : selectedProjectId;
     try {
       const conv = await createConversation("New chat", projectId);
@@ -3157,6 +3179,22 @@ type RetryOptions = {
         >
           <span className="text-lg leading-none">＋</span>
           <span>New chat</span>
+        </button>
+        <button
+          onClick={() => {
+            if (!isAgentsView) {
+              router.push("/agents");
+            }
+          }}
+          className={`mt-3 flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
+            isAgentsView
+              ? "bg-[#2a2b30] text-white"
+              : "text-zinc-300 hover:bg-[#202123] hover:text-zinc-100"
+          }`}
+          aria-current={isAgentsView ? "page" : undefined}
+        >
+          <span className="text-base leading-none">⚡</span>
+          <span>Agents</span>
         </button>
       </div>
 
@@ -3621,8 +3659,10 @@ type RetryOptions = {
             </div>
         </header>
 
-        {/* PROJECT VIEW */}
-        {inProjectView && currentProject ? (
+        {/* MAIN CONTENT SWITCH */}
+        {isAgentsView ? (
+          <AgentsCatalog />
+        ) : inProjectView && currentProject ? (
           <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-6">
             <div className="mx-auto max-w-3xl">
               <h1 className="mb-4 text-lg font-semibold">
