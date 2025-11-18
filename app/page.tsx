@@ -322,6 +322,25 @@ function MicrophoneIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function AgentsToolIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <rect x="3.5" y="3.5" width="9" height="9" rx="2" />
+      <path d="M11 11L20 20" />
+      <path d="M15.5 20H20V15.5" />
+    </svg>
+  );
+}
+
 function createLocalId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -3193,7 +3212,10 @@ type RetryOptions = {
           }`}
           aria-current={isAgentsView ? "page" : undefined}
         >
-          <span className="text-base leading-none">Agents</span>
+          <span className="flex h-4 w-4 items-center justify-center text-current">
+            <AgentsToolIcon className="h-4 w-4" />
+          </span>
+          <span className="leading-none">Agents</span>
         </button>
       </div>
 
@@ -3475,7 +3497,12 @@ type RetryOptions = {
       {/* Main Content */}
       <main className="flex flex-1 min-h-0 flex-col bg-[#212121]">
         {/* Header */}
-        <header className="flex shrink-0 items-center justify-between border-b border-[#2a2a2a] bg-transparent px-4 py-3">
+        <header className="relative flex shrink-0 items-center justify-between border-b border-[#2a2a2a] bg-transparent px-4 py-3">
+          {isAgentsView && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <p className="text-base font-semibold text-white md:text-lg">Explore Agents</p>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <button
               className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
@@ -3483,37 +3510,38 @@ type RetryOptions = {
             >
               ☰
             </button>
-            <div className="relative">
-              <button
-                type="button"
-                aria-expanded={headerModelMenuOpen}
-                aria-label="Choose model and speed"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setHeaderModelMenuOpen((prev) => !prev);
-                }}
-                className={`group inline-flex items-center gap-2 text-base font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline md:text-lg ${
-                  headerModelMenuOpen ? "text-white" : ""
-                }`}
-              >
-                <span className="text-white">LLM Client</span>
-                <span className="text-white">{headerModelLabel}</span>
-                {headerSpeedDisplay && (
-                  <span className="text-white">{headerSpeedDisplay}</span>
-                )}
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  className={`h-3 w-3 text-white/70 transition ${
-                    headerModelMenuOpen ? "-rotate-180 text-white" : ""
+            {!isAgentsView && (
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-expanded={headerModelMenuOpen}
+                  aria-label="Choose model and speed"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setHeaderModelMenuOpen((prev) => !prev);
+                  }}
+                  className={`group inline-flex items-center gap-2 text-base font-semibold text-white/80 transition hover:text-white focus-visible:outline-none focus-visible:underline md:text-lg ${
+                    headerModelMenuOpen ? "text-white" : ""
                   }`}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
                 >
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
+                  <span className="text-white">LLM Client</span>
+                  <span className="text-white">{headerModelLabel}</span>
+                  {headerSpeedDisplay && (
+                    <span className="text-white">{headerSpeedDisplay}</span>
+                  )}
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    className={`h-3 w-3 text-white/70 transition ${
+                      headerModelMenuOpen ? "-rotate-180 text-white" : ""
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
                 {headerModelMenuOpen && (
                   <div
                     onClick={(event) => event.stopPropagation()}
@@ -3655,7 +3683,8 @@ type RetryOptions = {
                   </div>
                 )}
               </div>
-            </div>
+            )}
+          </div>
         </header>
 
         {/* MAIN CONTENT SWITCH */}

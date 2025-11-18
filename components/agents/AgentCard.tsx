@@ -6,6 +6,7 @@ type AgentCardProps = {
   tags: string[];
   iconLabel: string;
   iconHint?: string;
+  onOpen?: () => void;
 };
 
 export function AgentCard({
@@ -14,9 +15,12 @@ export function AgentCard({
   tags,
   iconLabel,
   iconHint,
+  onOpen,
 }: AgentCardProps) {
+  const openEnabled = typeof onOpen === "function";
+
   return (
-    <article className="flex h-full flex-col rounded-2xl border border-[#2a2a30] bg-[#111116] p-5 shadow-[0_25px_60px_rgba(5,5,9,0.45)]">
+    <article className="flex h-full flex-col rounded-2xl border border-[#2a2a30] bg-[#111116] p-5">
       <div className="flex items-center gap-3">
         <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#1b1b21] text-sm font-semibold uppercase text-white">
           {iconLabel}
@@ -41,8 +45,13 @@ export function AgentCard({
         <span>Preview unavailable</span>
         <button
           type="button"
-          disabled
-          className="cursor-not-allowed rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-[13px] font-medium text-white/70"
+          onClick={onOpen}
+          disabled={!openEnabled}
+          className={`rounded-full px-4 py-1.5 text-[13px] font-medium transition ${
+            openEnabled
+              ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
+              : "cursor-not-allowed border border-white/15 bg-white/5 text-white/50"
+          }`}
         >
           Open agent
         </button>
