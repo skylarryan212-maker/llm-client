@@ -22,6 +22,7 @@ import {
   type ConversationMeta,
 } from "@/lib/conversations";
 import {
+  CODEX_AGENT_ID,
   DEFAULT_AGENT_ID,
   agentIdFromMetadata,
   type AgentId,
@@ -128,8 +129,14 @@ type Project = {
 
 type ViewMode = "chat" | "project";
 type PrimaryView = "chat" | "agents";
+type ExperienceMode = "default" | "codex";
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
+
+const LAST_CONVERSATION_STORAGE_KEYS: Record<ExperienceMode, string> = {
+  default: "chat:lastConversationId",
+  codex: "codex:lastConversationId",
+};
 
 const SPEED_OPTIONS: { value: SpeedMode; label: string; hint: string }[] = [
   { value: "auto", label: "Auto", hint: "Balanced" },
@@ -197,6 +204,7 @@ const MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024;
 
 const MAX_INPUT_HEIGHT = 176;
 const MIN_INPUT_HEIGHT = 32;
+const CODEX_MIN_INPUT_HEIGHT = 88;
 const MAX_MESSAGE_WIDTH = 900;
 const AUTO_SCROLL_THRESHOLD_PX = 140;
 const MAX_PROJECT_CHAT_PREVIEW = 5;
@@ -319,6 +327,62 @@ function MicrophoneIcon({ className = "" }: { className?: string }) {
       <path d="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z" />
       <path d="M19 11a7 7 0 0 1-14 0" />
       <path d="M12 19v3" />
+    </svg>
+  );
+}
+
+function ArchiveIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <rect x="3" y="4" width="18" height="4" rx="1.5" />
+      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <path d="M9 12h6" />
+    </svg>
+  );
+}
+
+function ShareIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" />
+      <path d="M16 6l-4-4-4 4" />
+      <path d="M12 2v13" />
+    </svg>
+  );
+}
+
+function BellIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-2 9-2 9h16s-2-2-2-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
     </svg>
   );
 }
@@ -627,8 +691,10 @@ function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
 
 export function MainApp({
   initialPrimaryView = "chat",
+  mode = "default",
 }: {
   initialPrimaryView?: PrimaryView;
+  mode?: ExperienceMode;
 }) {
   // ------------------------------------------------------------
   // STATE
@@ -662,6 +728,9 @@ export function MainApp({
 
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
+  const [pendingNewChat, setPendingNewChat] = useState<
+    { projectId: string | null; agentId: AgentId } | null
+  >(null);
 
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -684,6 +753,19 @@ export function MainApp({
   const audioContextRef = useRef<AudioContext | null>(null);
   const router = useRouter();
   const isAgentsView = initialPrimaryView === "agents";
+  const isCodexMode = mode === "codex";
+  const allowProjectSections = !isCodexMode;
+  const showAgentsCatalog = !isCodexMode && isAgentsView;
+  const defaultAgentId = isCodexMode ? CODEX_AGENT_ID : DEFAULT_AGENT_ID;
+  const conversationStorageKey = LAST_CONVERSATION_STORAGE_KEYS[mode];
+  const resolvedMinInputHeight = isCodexMode
+    ? CODEX_MIN_INPUT_HEIGHT
+    : MIN_INPUT_HEIGHT;
+  const codexHeaderActions = [
+    { label: "Archive", Icon: ArchiveIcon },
+    { label: "Share", Icon: ShareIcon },
+    { label: "Notifications", Icon: BellIcon },
+  ];
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const waveformDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
@@ -737,15 +819,27 @@ export function MainApp({
     []
   );
 
+  const filterConversationsForMode = useCallback(
+    (list: ConversationMeta[]) =>
+      list.filter((conversation) => {
+        const agentId = agentIdFromMetadata(conversation.metadata);
+        if (isCodexMode) {
+          return agentId === CODEX_AGENT_ID;
+        }
+        return agentId !== CODEX_AGENT_ID;
+      }),
+    [isCodexMode]
+  );
+
   const getConversationAgentId = useCallback(
     (conversationId: string | null) => {
       if (!conversationId) {
-        return DEFAULT_AGENT_ID;
+        return pendingNewChat?.agentId ?? defaultAgentId;
       }
       const target = conversations.find((c) => c.id === conversationId);
-      return agentIdFromMetadata(target?.metadata) ?? DEFAULT_AGENT_ID;
+      return agentIdFromMetadata(target?.metadata) ?? defaultAgentId;
     },
-    [conversations]
+    [conversations, defaultAgentId, pendingNewChat]
   );
 
   const cleanupWaveformVisualizer = useCallback(() => {
@@ -898,30 +992,58 @@ export function MainApp({
   // ------------------------------------------------------------
   useEffect(() => {
     (async () => {
-      const { data: projData } = await supabase
-        .from("projects")
-        .select("id, name, created_at")
-        .eq("user_id", TEST_USER_ID);
+      try {
+        if (allowProjectSections) {
+          const { data: projData } = await supabase
+            .from("projects")
+            .select("id, name, created_at")
+            .eq("user_id", TEST_USER_ID);
+          setProjects((projData || []) as Project[]);
+        } else {
+          setProjects([]);
+          setSelectedProjectId(null);
+        }
 
-      const { data: convData } = await supabase
-        .from("conversations")
-        .select("id, title, project_id, created_at, metadata")
-        .eq("user_id", TEST_USER_ID);
+        const { data: convData } = await supabase
+          .from("conversations")
+          .select("id, title, project_id, created_at, metadata")
+          .eq("user_id", TEST_USER_ID);
 
-      setProjects((projData || []) as Project[]);
-      setConversations((convData || []) as ConversationMeta[]);
+        const filtered = filterConversationsForMode(
+          (convData || []) as ConversationMeta[]
+        );
+        setConversations(filtered);
 
-      if (convData && convData.length > 0) {
-        const newest = [...convData].sort((a, b) =>
-          (b.created_at || "").localeCompare(a.created_at || "")
-        )[0];
-
-        setSelectedConversationId(newest.id);
-        setSelectedProjectId(newest.project_id);
-        setViewMode("chat");
+        const storedId =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(conversationStorageKey)
+            : null;
+        const preferred =
+          storedId && filtered.find((conversation) => conversation.id === storedId);
+        const newest = preferred || getNewestConversation(filtered);
+        if (newest) {
+          setSelectedConversationId(newest.id);
+          if (allowProjectSections) {
+            setSelectedProjectId(newest.project_id);
+          } else {
+            setSelectedProjectId(null);
+          }
+          setViewMode("chat");
+        } else {
+          setSelectedConversationId(null);
+          if (!allowProjectSections) {
+            setSelectedProjectId(null);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load conversations", error);
       }
     })();
-  }, []);
+  }, [
+    allowProjectSections,
+    conversationStorageKey,
+    filterConversationsForMode,
+  ]);
 
   // ------------------------------------------------------------
   // LOAD MESSAGES
@@ -1096,6 +1218,23 @@ export function MainApp({
     loadMessages(selectedConversationId);
   }, [selectedConversationId, loadMessages]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!conversationStorageKey) {
+      return;
+    }
+    if (selectedConversationId) {
+      window.localStorage.setItem(
+        conversationStorageKey,
+        selectedConversationId
+      );
+    } else {
+      window.localStorage.removeItem(conversationStorageKey);
+    }
+  }, [conversationStorageKey, selectedConversationId]);
+
   // ------------------------------------------------------------
   // AUTOSCROLL WHEN MESSAGES CHANGE
   // ------------------------------------------------------------
@@ -1130,14 +1269,14 @@ export function MainApp({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const measuredHeight = Math.max(el.scrollHeight, MIN_INPUT_HEIGHT);
+    const measuredHeight = Math.max(el.scrollHeight, resolvedMinInputHeight);
     const nextHeight = Math.min(measuredHeight, MAX_INPUT_HEIGHT);
     el.style.height = `${nextHeight}px`;
     el.style.overflowY =
       el.scrollHeight > MAX_INPUT_HEIGHT ? "auto" : "hidden";
-    const isMulti = el.scrollHeight > MIN_INPUT_HEIGHT + 2;
+    const isMulti = el.scrollHeight > resolvedMinInputHeight + 2;
     setIsMultilineInput((prev) => (prev === isMulti ? prev : isMulti));
-  }, [input]);
+  }, [input, resolvedMinInputHeight]);
 
   useEffect(() => {
     const handleWindowClick = () => {
@@ -1181,20 +1320,24 @@ export function MainApp({
     [conversations]
   );
 
-  const sortedProjects = useMemo(
-    () =>
-      [...projects].sort((a, b) => {
-        const lastA =
-          latestConvTimeForProject(a.id, conversations) || a.created_at || "";
-        const lastB =
-          latestConvTimeForProject(b.id, conversations) || b.created_at || "";
-        return lastB.localeCompare(lastA);
-      }),
-    [projects, conversations]
-  );
+  const sortedProjects = useMemo(() => {
+    if (!allowProjectSections) {
+      return [] as Project[];
+    }
+    return [...projects].sort((a, b) => {
+      const lastA =
+        latestConvTimeForProject(a.id, conversations) || a.created_at || "";
+      const lastB =
+        latestConvTimeForProject(b.id, conversations) || b.created_at || "";
+      return lastB.localeCompare(lastA);
+    });
+  }, [allowProjectSections, projects, conversations]);
 
   const projectSidebarChats = useMemo(() => {
     const map = new Map<string, ConversationMeta[]>();
+    if (!allowProjectSections) {
+      return map;
+    }
     sortedConversations.forEach((conversation) => {
       if (!conversation.project_id) {
         return;
@@ -1205,30 +1348,33 @@ export function MainApp({
       map.get(conversation.project_id)?.push(conversation);
     });
     return map;
-  }, [sortedConversations]);
+  }, [allowProjectSections, sortedConversations]);
 
-  const currentProject = projects.find((p) => p.id === selectedProjectId);
+  const currentProject = allowProjectSections
+    ? projects.find((p) => p.id === selectedProjectId)
+    : null;
   const selectedConversationMeta = useMemo(
     () => conversations.find((c) => c.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId]
   );
-  const sidebarActiveProjectId =
-    selectedProjectId ?? selectedConversationMeta?.project_id ?? null;
+  const sidebarActiveProjectId = allowProjectSections
+    ? selectedProjectId ?? selectedConversationMeta?.project_id ?? null
+    : null;
 
-  const projectChats = useMemo(
-    () =>
-      selectedProjectId
-        ? sortedConversations.filter((c) => c.project_id === selectedProjectId)
-        : [],
-    [sortedConversations, selectedProjectId]
-  );
+  const projectChats = useMemo(() => {
+    if (!allowProjectSections || !selectedProjectId) {
+      return [] as ConversationMeta[];
+    }
+    return sortedConversations.filter((c) => c.project_id === selectedProjectId);
+  }, [allowProjectSections, sortedConversations, selectedProjectId]);
 
   const unassignedChats = useMemo(
     () => sortedConversations.filter((c) => !c.project_id),
     [sortedConversations]
   );
 
-  const inProjectView = viewMode === "project" && !!selectedProjectId;
+  const inProjectView =
+    allowProjectSections && viewMode === "project" && !!selectedProjectId;
   const trimmedInput = input.trim();
   const hasComposerAttachments =
     imageAttachments.length > 0 || fileAttachments.length > 0;
@@ -1740,19 +1886,28 @@ export function MainApp({
 
   const handleConversationSelect = (id: string) => {
     ensureChatRoute();
+    setPendingNewChat(null);
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
       loadMessages(id, { force: true });
     } else {
       setSelectedConversationId(id);
     }
-    setSelectedProjectId(convo?.project_id ?? null);
+    if (allowProjectSections) {
+      setSelectedProjectId(convo?.project_id ?? null);
+    } else {
+      setSelectedProjectId(null);
+    }
     setViewMode("chat");
     setSidebarOpen(false);
   };
 
   const handleProjectSelect = (id: string) => {
+    if (!allowProjectSections) {
+      return;
+    }
     ensureChatRoute();
+    setPendingNewChat(null);
     setSelectedProjectId(id);
     setViewMode("project");
     setSidebarOpen(false);
@@ -1765,9 +1920,11 @@ export function MainApp({
       .eq("user_id", TEST_USER_ID);
 
     if (Array.isArray(data)) {
-      setConversations(data as ConversationMeta[]);
+      setConversations(
+        filterConversationsForMode((data || []) as ConversationMeta[])
+      );
     }
-  }, []);
+  }, [filterConversationsForMode]);
 
   const persistMessageMetadata = useCallback(
     async (messageId: string, metadata: MessageMetadata) => {
@@ -1815,7 +1972,7 @@ export function MainApp({
       typeof options?.projectId === "undefined"
         ? selectedProjectId ?? null
         : options.projectId ?? null;
-    const resolvedAgentId: AgentId = options?.agentId ?? DEFAULT_AGENT_ID;
+    const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
       options?.metadata && Object.keys(options.metadata).length > 0;
     const metadataOverrides = hasMetadataOverrides && options?.metadata
@@ -1932,17 +2089,27 @@ type RetryOptions = {
         throw new Error("Cannot retry without a conversation");
       }
       if (!conversationId) {
+        const projectTarget = allowProjectSections
+          ? pendingNewChat?.projectId ?? selectedProjectId ?? null
+          : null;
         const conv = await createConversation({
-          projectId: selectedProjectId,
+          projectId: projectTarget,
           agentId: activeAgentId,
         });
         conversationId = conv.id;
         activeAgentId =
-          agentIdFromMetadata(conv.metadata) ?? activeAgentId ?? DEFAULT_AGENT_ID;
+          agentIdFromMetadata(conv.metadata) ??
+          activeAgentId ??
+          defaultAgentId;
         setSelectedConversationId(conv.id);
-        setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
+        if (allowProjectSections) {
+          setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
+        } else {
+          setSelectedProjectId(null);
+        }
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
+        setPendingNewChat(null);
       }
 
       setStreamingConversationId(conversationId);
@@ -2679,14 +2846,23 @@ type RetryOptions = {
         throw new Error("Cannot retry without a conversation");
       }
       if (!conversationId) {
+        const projectTarget = allowProjectSections
+          ? pendingNewChat?.projectId ?? selectedProjectId ?? null
+          : null;
         const conv = await createConversation({
-          projectId: selectedProjectId,
+          projectId: projectTarget,
+          agentId: defaultAgentId,
         });
         conversationId = conv.id;
         setSelectedConversationId(conv.id);
-        setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
+        if (allowProjectSections) {
+          setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
+        } else {
+          setSelectedProjectId(null);
+        }
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
+        setPendingNewChat(null);
       }
 
       if (!assistantMessageId) {
@@ -3026,10 +3202,37 @@ type RetryOptions = {
   async function handleNewChat(global = false) {
     ensureChatRoute();
     const projectId = global ? null : selectedProjectId;
+    const resolvedProjectId = allowProjectSections ? projectId ?? null : null;
+    if (!isCodexMode) {
+      if (!selectedConversationId && pendingNewChat) {
+        return;
+      }
+      setPendingNewChat({
+        projectId: resolvedProjectId,
+        agentId: defaultAgentId,
+      });
+      setSelectedConversationId(null);
+      if (allowProjectSections) {
+        setSelectedProjectId(resolvedProjectId);
+      } else {
+        setSelectedProjectId(null);
+      }
+      setMessages([]);
+      setViewMode("chat");
+      setSidebarOpen(false);
+      return;
+    }
     try {
-      const conv = await createConversation({ projectId });
+      const conv = await createConversation({
+        projectId: resolvedProjectId,
+        agentId: defaultAgentId,
+      });
       setSelectedConversationId(conv.id);
-      setSelectedProjectId(conv.project_id ?? projectId ?? null);
+      if (allowProjectSections) {
+        setSelectedProjectId(conv.project_id ?? resolvedProjectId ?? null);
+      } else {
+        setSelectedProjectId(null);
+      }
       setMessages([]);
       setViewMode("chat");
       setSidebarOpen(false);
@@ -3039,6 +3242,9 @@ type RetryOptions = {
   }
 
   async function handleCreateProject() {
+    if (!allowProjectSections) {
+      return;
+    }
     const name = newProjectName.trim();
     if (!name) return;
 
@@ -3156,6 +3362,9 @@ type RetryOptions = {
   }
 
   async function deleteProject(id: string) {
+    if (!allowProjectSections) {
+      return;
+    }
     const { data: conversationRows } = await supabase
       .from("conversations")
       .select("id")
@@ -3216,12 +3425,18 @@ type RetryOptions = {
   }
 
   const requestDeleteProject = (id: string) => {
+    if (!allowProjectSections) {
+      return;
+    }
     const target = projects.find((p) => p.id === id);
     if (!target) return;
     setPendingDeleteProject(target);
   };
 
   const confirmDeleteProject = async () => {
+    if (!allowProjectSections) {
+      return;
+    }
     if (!pendingDeleteProject) return;
     setDeleteProjectLoading(true);
     try {
@@ -3247,16 +3462,16 @@ type RetryOptions = {
         </button>
         <button
           onClick={() => {
-            if (!isAgentsView) {
+            if (!showAgentsCatalog) {
               router.push("/agents");
             }
           }}
           className={`mt-3 flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
-            isAgentsView
+            showAgentsCatalog
               ? "bg-[#2a2b30] text-white"
               : "text-zinc-300 hover:bg-[#202123] hover:text-zinc-100"
           }`}
-          aria-current={isAgentsView ? "page" : undefined}
+          aria-current={showAgentsCatalog ? "page" : undefined}
         >
           <span className="flex h-4 w-4 items-center justify-center text-current">
             <AgentsToolIcon className="h-4 w-4" />
@@ -3265,23 +3480,24 @@ type RetryOptions = {
         </button>
       </div>
 
-      {/* Projects */}
-      <div className="mt-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase text-zinc-500">
-        <span>Projects</span>
-        <button
-          onClick={() => setShowProjectModal(true)}
-          className="text-xs text-zinc-400 hover:text-zinc-200"
-        >
-          + New
-        </button>
-      </div>
+      {allowProjectSections && (
+        <>
+          <div className="mt-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase text-zinc-500">
+            <span>Projects</span>
+            <button
+              onClick={() => setShowProjectModal(true)}
+              className="text-xs text-zinc-400 hover:text-zinc-200"
+            >
+              + New
+            </button>
+          </div>
 
-      <div className="mt-1 flex flex-col gap-1 px-2">
-        {sortedProjects.length === 0 && (
-          <div className="px-1 py-2 text-[11px] text-zinc-500">No projects yet.</div>
-        )}
+          <div className="mt-1 flex flex-col gap-1 px-2">
+            {sortedProjects.length === 0 && (
+              <div className="px-1 py-2 text-[11px] text-zinc-500">No projects yet.</div>
+            )}
 
-        {sortedProjects.map((p) => {
+            {sortedProjects.map((p) => {
           const isSelectedProject = sidebarActiveProjectId === p.id;
           const isMenuOpen = rowMenu?.type === "project" && rowMenu.id === p.id;
           const projectChatList = projectSidebarChats.get(p.id) || [];
@@ -3375,8 +3591,10 @@ type RetryOptions = {
               )}
             </div>
           );
-        })}
-      </div>
+            })}
+          </div>
+        </>
+      )}
 
       {/* All chats */}
       <div className="mt-4 px-3 text-[11px] font-semibold uppercase text-zinc-500">
@@ -3440,50 +3658,52 @@ type RetryOptions = {
                   >
                     Rename
                   </button>
-                  <div className="relative">
-                    <button
-                      onClick={() =>
-                        setMoveMenuConversationId((prev) =>
-                          prev === c.id ? null : c.id
-                        )
-                      }
-                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                      aria-expanded={showMoveMenu}
-                    >
-                      Move to project
-                      <span className="text-[10px] text-zinc-500">
-                        {showMoveMenu ? "▲" : "▼"}
-                      </span>
-                    </button>
-                    {showMoveMenu && (
-                      <div className="mt-2 space-y-1 rounded-xl border border-[#2a2a30] bg-[#0f0f14] p-1">
-                        <button
-                          onClick={() => handleMoveFromMenu(c.id, null)}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
-                        >
-                          No project
-                        </button>
-                        <div className="max-h-48 overflow-y-auto">
-                          {sortedProjects.map((proj) => (
-                            <button
-                              key={proj.id}
-                              onClick={() => handleMoveFromMenu(c.id, proj.id)}
-                              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21] ${
-                                proj.id === c.project_id
-                                  ? "bg-[#1b1b21]"
-                                  : ""
-                              }`}
-                            >
-                              {proj.name}
-                              {proj.id === c.project_id && (
-                                <span className="text-[10px] text-zinc-500">Current</span>
-                              )}
-                            </button>
-                          ))}
+                  {allowProjectSections && (
+                    <div className="relative">
+                      <button
+                        onClick={() =>
+                          setMoveMenuConversationId((prev) =>
+                            prev === c.id ? null : c.id
+                          )
+                        }
+                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                        aria-expanded={showMoveMenu}
+                      >
+                        Move to project
+                        <span className="text-[10px] text-zinc-500">
+                          {showMoveMenu ? "▲" : "▼"}
+                        </span>
+                      </button>
+                      {showMoveMenu && (
+                        <div className="mt-2 space-y-1 rounded-xl border border-[#2a2a30] bg-[#0f0f14] p-1">
+                          <button
+                            onClick={() => handleMoveFromMenu(c.id, null)}
+                            className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]"
+                          >
+                            No project
+                          </button>
+                          <div className="max-h-48 overflow-y-auto">
+                            {sortedProjects.map((proj) => (
+                              <button
+                                key={proj.id}
+                                onClick={() => handleMoveFromMenu(c.id, proj.id)}
+                                className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21] ${
+                                  proj.id === c.project_id
+                                    ? "bg-[#1b1b21]"
+                                    : ""
+                                }`}
+                              >
+                                {proj.name}
+                                {proj.id === c.project_id && (
+                                  <span className="text-[10px] text-zinc-500">Current</span>
+                                )}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
+                      )}
+                    </div>
+                  )}
                   <button
                     onClick={() => {
                       requestDeleteConversation(c.id);
@@ -3544,11 +3764,6 @@ type RetryOptions = {
       <main className="flex flex-1 min-h-0 flex-col bg-[#212121]">
         {/* Header */}
         <header className="relative flex shrink-0 items-center justify-between border-b border-[#2a2a2a] bg-transparent px-4 py-3">
-          {isAgentsView && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <p className="text-base font-semibold text-white md:text-lg">Explore Agents</p>
-            </div>
-          )}
           <div className="flex items-center gap-2">
             <button
               className="rounded-md border border-[#2f2f32] px-2 py-1 text-sm text-zinc-300 hover:bg-[#2a2a2e] md:hidden"
@@ -3556,7 +3771,25 @@ type RetryOptions = {
             >
               ☰
             </button>
-            {!isAgentsView && (
+            {showAgentsCatalog ? (
+              <span className="text-base font-semibold text-white md:text-lg">
+                Explore Agents
+              </span>
+            ) : isCodexMode ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => router.push("/agents")}
+                  className="text-sm font-semibold text-white/80 transition hover:text-white"
+                >
+                  Agents
+                </button>
+                <span className="text-white/40">/</span>
+                <span className="text-base font-semibold text-white">
+                  Codex
+                </span>
+              </div>
+            ) : (
               <div className="relative">
                 <button
                   type="button"
@@ -3731,10 +3964,23 @@ type RetryOptions = {
               </div>
             )}
           </div>
+          <div className="flex items-center gap-3">
+            {isCodexMode &&
+              codexHeaderActions.map(({ label, Icon }) => (
+                <button
+                  key={label}
+                  type="button"
+                  className="flex items-center gap-1 text-sm text-white/70 transition hover:text-white"
+                >
+                  <Icon className="h-3.5 w-3.5 text-white/70" />
+                  <span>{label}</span>
+                </button>
+              ))}
+          </div>
         </header>
 
         {/* MAIN CONTENT SWITCH */}
-        {isAgentsView ? (
+        {showAgentsCatalog ? (
           <AgentsCatalog />
         ) : inProjectView && currentProject ? (
           <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-6">
@@ -4583,81 +4829,114 @@ type RetryOptions = {
                                     className="absolute left-0 bottom-full z-30 mb-2 w-60 rounded-2xl border border-[#2a2a30] bg-[#101014] p-1.5 text-left text-xs shadow-2xl"
                                   >
                                     <div className="flex flex-col text-[13px] text-white/80">
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          handleTakePhotoClick();
-                                          setComposerMenuOpen(false);
-                                        }}
-                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        Take photo
-                                      </button>
-                                      <div className="my-1 h-px bg-white/10" />
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          handleAddFilesClick();
-                                          setComposerMenuOpen(false);
-                                        }}
-                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        Add photos &amp; files
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          if (hasComposerAttachments) {
-                                            setComposerError(
-                                              "Image generation does not support attachments yet."
-                                            );
-                                          } else {
-                                            setComposerError(null);
-                                          }
-                                          setCreateImageArmed(true);
-                                          setForceWebSearch(false);
-                                          setComposerMenuOpen(false);
-                                        }}
-                                        className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        <span>Create image</span>
-                                        {createImageArmed && (
-                                          <span className="text-[#8ab4ff]">Armed</span>
-                                        )}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setComposerMenuOpen(false)}
-                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        Deep research
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setForceWebSearch((prev) => {
-                                            const next = !prev;
-                                            if (next) {
-                                              setCreateImageArmed(false);
-                                            }
-                                            return next;
-                                          });
-                                          setComposerMenuOpen(false);
-                                        }}
-                                        className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        <span>Web search</span>
-                                        {forceWebSearch && (
-                                          <span className="text-[#8ab4ff]">On</span>
-                                        )}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setComposerMenuOpen(false)}
-                                        className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
-                                      >
-                                        Agent mode
-                                      </button>
+                                      {isCodexMode ? (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setInput((prev) =>
+                                                prev && prev.trim().length > 0
+                                                  ? prev
+                                                  : "Plan:"
+                                              );
+                                              setComposerMenuOpen(false);
+                                              textareaRef.current?.focus();
+                                            }}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Plan
+                                          </button>
+                                          <div className="my-1 h-px bg-white/10" />
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              handleAddFilesClick();
+                                              setComposerMenuOpen(false);
+                                            }}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Add photos &amp; files
+                                          </button>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              handleTakePhotoClick();
+                                              setComposerMenuOpen(false);
+                                            }}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Take photo
+                                          </button>
+                                          <div className="my-1 h-px bg-white/10" />
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              handleAddFilesClick();
+                                              setComposerMenuOpen(false);
+                                            }}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Add photos &amp; files
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (hasComposerAttachments) {
+                                                setComposerError(
+                                                  "Image generation does not support attachments yet."
+                                                );
+                                              } else {
+                                                setComposerError(null);
+                                              }
+                                              setCreateImageArmed(true);
+                                              setForceWebSearch(false);
+                                              setComposerMenuOpen(false);
+                                            }}
+                                            className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            <span>Create image</span>
+                                            {createImageArmed && (
+                                              <span className="text-[#8ab4ff]">Armed</span>
+                                            )}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setComposerMenuOpen(false)}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Deep research
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setForceWebSearch((prev) => {
+                                                const next = !prev;
+                                                if (next) {
+                                                  setCreateImageArmed(false);
+                                                }
+                                                return next;
+                                              });
+                                              setComposerMenuOpen(false);
+                                            }}
+                                            className="flex w-full items-center justify-between px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            <span>Web search</span>
+                                            {forceWebSearch && (
+                                              <span className="text-[#8ab4ff]">On</span>
+                                            )}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setComposerMenuOpen(false)}
+                                            className="flex w-full items-center px-2.5 py-2 text-left transition hover:text-white"
+                                          >
+                                            Agent mode
+                                          </button>
+                                        </>
+                                      )}
                                     </div>
                                   </div>
                                 )}
@@ -4669,7 +4948,7 @@ type RetryOptions = {
                                   className="block w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
                                   style={{
                                     maxHeight: MAX_INPUT_HEIGHT,
-                                    minHeight: MIN_INPUT_HEIGHT,
+                                    minHeight: resolvedMinInputHeight,
                                   }}
                                   value={input}
                                   onChange={(e) => setInput(e.target.value)}
@@ -4742,7 +5021,7 @@ type RetryOptions = {
       </main>
 
       {/* PROJECT MODAL */}
-      {showProjectModal && (
+      {allowProjectSections && showProjectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-full max-w-md rounded-xl border border-[#3f3f46] bg-[#181818] p-4">
             <div className="mb-3 flex items-center justify-between">
@@ -4804,29 +5083,31 @@ type RetryOptions = {
           }
         }}
       />
-      <ConfirmDialog
-        open={Boolean(pendingDeleteProject)}
-        title="Delete this project?"
-        body={
-          <span>
-            This will delete &ldquo;
-            {pendingDeleteProject?.name || "this project"}
-            &rdquo; and all of its conversations.
-          </span>
-        }
-        confirmLabel="Delete project"
-        confirmLoading={deleteProjectLoading}
-        onCancel={() => {
-          if (!deleteProjectLoading) {
-            setPendingDeleteProject(null);
+      {allowProjectSections && (
+        <ConfirmDialog
+          open={Boolean(pendingDeleteProject)}
+          title="Delete this project?"
+          body={
+            <span>
+              This will delete &ldquo;
+              {pendingDeleteProject?.name || "this project"}
+              &rdquo; and all of its conversations.
+            </span>
           }
-        }}
-        onConfirm={() => {
-          if (!deleteProjectLoading) {
-            void confirmDeleteProject();
-          }
-        }}
-      />
+          confirmLabel="Delete project"
+          confirmLoading={deleteProjectLoading}
+          onCancel={() => {
+            if (!deleteProjectLoading) {
+              setPendingDeleteProject(null);
+            }
+          }}
+          onConfirm={() => {
+            if (!deleteProjectLoading) {
+              void confirmDeleteProject();
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -197,6 +197,10 @@ const BASE_SYSTEM_PROMPT =
   "- Do not send capability or identity questions to `web_search`; answer those directly.\n" +
   "- Keep answers clear and grounded, blending background context with any live data you retrieved.";
 
+const CODEX_SYSTEM_PROMPT =
+  "You are Codex, the professional engineering assistant inside the Codex workspace. Focus on coding, debugging, and multi-file reasoning across entire repositories.\n" +
+  "Use the Codex-tuned GPT-5.1 models to propose concrete changes with file paths, explain tradeoffs, and maintain a calm, implementation-focused tone.";
+
 const FORCE_WEB_SEARCH_PROMPT =
   "The user explicitly requested live web search. Ensure you call the `web_search` tool for this turn unless it would clearly be redundant.";
 
@@ -1274,6 +1278,15 @@ export async function POST(req: Request) {
         content: BASE_SYSTEM_PROMPT,
         type: "message",
       },
+      ...(agentId === CODEX_AGENT_ID
+        ? ([
+            {
+              role: "system",
+              content: CODEX_SYSTEM_PROMPT,
+              type: "message",
+            },
+          ] satisfies EasyInputMessage[])
+        : []),
       ...(crossChatSummary
         ? ([
             {
@@ -1853,12 +1866,18 @@ const CODE_KEYWORDS = [
   "tests",
   "interface",
   "api response",
+  "fix this",
+  "fix bug",
+  "multi-file",
+  "repo-wide",
+  "repository",
+  "rename file",
 ];
 const CODE_SYMBOL_REGEX = /(import\s+.+from|export\s+|function\s+|class\s+|=>|console\.log|#include|async\s+def|def\s+\w+\s*\()/i;
 const FILE_REFERENCE_TEST_REGEX =
-  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib)\//i;
+  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib|src|server|api)\//i;
 const FILE_REFERENCE_COUNT_REGEX =
-  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib)\//gi;
+  /\.(tsx?|jsx?|py|rs|java|cs|json|ya?ml|css|scss|md)\b|\/(app|components|lib|src|server|api)\//gi;
 const COMPLEXITY_HINTS = [
   "entire project",
   "whole repo",
@@ -1866,6 +1885,9 @@ const COMPLEXITY_HINTS = [
   "large refactor",
   "migration",
   "rewrite",
+  "repo-wide",
+  "monorepo",
+  "multi-file",
 ];
 
 function looksLikeCodeTask(text: string) {
