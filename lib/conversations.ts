@@ -76,15 +76,28 @@ function shouldRetryWithoutMetadata(error: unknown): error is PostgrestError {
     return false;
   }
   const candidate = error as Partial<PostgrestError> & { message?: string };
+  const errorCode = typeof candidate.code === "string"
+    ? candidate.code.trim().toUpperCase()
+    : null;
+  if (errorCode === "42703") {
+    // 42703 => undefined column
+    return true;
+  }
   const segments = [candidate.message, candidate.details, candidate.hint]
     .filter((segment): segment is string => typeof segment === "string")
     .map((segment) => segment.toLowerCase());
   if (segments.length === 0) {
     return false;
   }
-  return segments.some(
-    (segment) =>
-      segment.includes("metadata") &&
-      (segment.includes("does not exist") || segment.includes("column"))
-  );
+  return segments.some((segment) => {
+    if (!segment.includes("metadata")) {
+      return false;
+    }
+    return (
+      segment.includes("does not exist") ||
+      segment.includes("missing") ||
+      segment.includes("unknown") ||
+      segment.includes("column")
+    );
+  });
 }
