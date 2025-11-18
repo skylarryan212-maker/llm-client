@@ -54,7 +54,9 @@ type PersistedHistoryRow = {
 };
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
+type NonAutoModelMode = Exclude<ModelMode, "auto">;
 type ModelKey = "nano" | "mini" | "full" | "codex-mini" | "codex-full";
+type NonAutoModelFamily = Exclude<ModelFamily, "auto">;
 
 export type RankedSource = {
   title: string;
@@ -170,14 +172,13 @@ const MODEL_MAP: Record<ModelKey, string> = {
   "codex-full": "gpt-5.1-codex",
 };
 
-const MODEL_FAMILY_TO_MODE: Record<Exclude<ModelFamily, "auto">, ModelKey> = {
+const MODEL_FAMILY_TO_MODE: Record<NonAutoModelFamily, NonAutoModelMode> = {
   "gpt-5-nano": "nano",
   "gpt-5-mini": "mini",
   "gpt-5.1": "full",
   "gpt-5-pro-2025-10-06": "full",
 };
-
-const MODEL_KEY_TO_FAMILY: Record<ModelKey, Exclude<ModelFamily, "auto">> = {
+const MODEL_KEY_TO_FAMILY: Record<ModelKey, NonAutoModelFamily> = {
   nano: "gpt-5-nano",
   mini: "gpt-5-mini",
   full: "gpt-5.1",
