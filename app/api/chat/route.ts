@@ -970,6 +970,7 @@ export async function POST(req: Request) {
     let historyRowsForModel = validHistoryRows;
     let retryUserAttachments: ImageAttachment[] = [];
     let retryUserFiles: FileAttachment[] = [];
+    let retryAssistantRow: PersistedHistoryRow | null = null;
 
     if (isRetryRequest && retryAssistantMessageId) {
       const assistantIndex = validHistoryRows.findIndex(
@@ -982,6 +983,8 @@ export async function POST(req: Request) {
           { status: 404 }
         );
       }
+
+      retryAssistantRow = validHistoryRows[assistantIndex];
 
       if (!retryUserMessageId) {
         for (let i = assistantIndex - 1; i >= 0; i -= 1) {
@@ -1125,13 +1128,46 @@ export async function POST(req: Request) {
 
     const openai = getOpenAIClient();
 
-    const routerResult = await routeModel({
-      openai,
-      history: historyForModel,
-      userText: userTextForContext || userText,
-      requestedMode,
-      requestTitle: needsTitle && requestedMode === "auto",
-    });
+    let forcedRetryFamily: Exclude<ModelFamily, "auto"> | null = null;
+    let routerResult: RoutedModelConfig;
+    if (isRetryRequest) {
+      if (requestedModelFamily !== "auto") {
+        forcedRetryFamily = requestedModelFamily;
+      } else if (retryAssistantRow?.metadata) {
+        const priorFamily = parseModelFamily(
+          (retryAssistantRow.metadata as { usedModelFamily?: unknown })
+            ?.usedModelFamily
+        );
+        if (priorFamily !== "auto") {
+          forcedRetryFamily = priorFamily;
+        } else {
+          const priorMode = (retryAssistantRow.metadata as {
+            usedModelMode?: unknown;
+          })?.usedModelMode;
+          if (
+            priorMode === "nano" ||
+            priorMode === "mini" ||
+            priorMode === "full"
+          ) {
+            forcedRetryFamily = MODEL_KEY_TO_FAMILY[priorMode];
+          }
+        }
+      }
+      const fallbackKey: ModelKey = forcedRetryFamily
+        ? MODEL_FAMILY_TO_MODE[forcedRetryFamily]
+        : requestedMode === "auto"
+          ? "mini"
+          : requestedMode;
+      routerResult = { modelKey: fallbackKey, titleSuggestion: null };
+    } else {
+      routerResult = await routeModel({
+        openai,
+        history: historyForModel,
+        userText: userTextForContext || userText,
+        requestedMode,
+        requestTitle: needsTitle && requestedMode === "auto",
+      });
+    }
 
     let routerTitlePromise: Promise<string | null> | null = null;
     if (needsTitle && routerResult.titleSuggestion) {
@@ -1276,6 +1312,11 @@ export async function POST(req: Request) {
         ? MODEL_KEY_TO_FAMILY[targetModelKey]
         : requestedModelFamily;
 
+    if (forcedRetryFamily) {
+      targetModelFamily = forcedRetryFamily;
+      targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
+    }
+
     if (requestedModelFamily !== "auto") {
       targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
     }
@@ -1299,7 +1340,7 @@ export async function POST(req: Request) {
       targetModelKey = MODEL_FAMILY_TO_MODE[targetModelFamily];
     }
 
-    if (requestedModelFamily === "auto") {
+    if (requestedModelFamily === "auto" && !isRetryRequest) {
       if (previewEffort === "medium" || previewEffort === "high") {
         const suggestedFamily = suggestSmallerModelForEffort(
           promptForRouting,
@@ -1317,7 +1358,9 @@ export async function POST(req: Request) {
       speedMode,
       promptForRouting
     );
-    const targetModel = modelConfig.model;
+    const targetModel = isRetryRequest
+      ? MODEL_MAP[targetModelKey]
+      : modelConfig.model;
 
     const encoder = new TextEncoder();
     const historyForTitle = isRetryRequest
@@ -1402,16 +1445,14 @@ export async function POST(req: Request) {
         let fullAssistantMessage = "";
         let responseMetadata: ResponseMetadata | null = null;
         const streamedWebSearchCallIds = new Set<string>();
-        const streamWebSearchMetadata = (item: unknown) => {
-          if (!allowWebSearch || !isWebSearchCall(item)) {
-            return;
-          }
-          const results = extractWebSearchResults(item);
-          if (!results.length) {
+        const emitWebSearchResults = (
+          callId: string | null,
+          results: RankedSource[]
+        ) => {
+          if (!allowWebSearch || !results.length) {
             return;
           }
           noteDomainsFromResults(results);
-          const callId = typeof item.id === "string" ? item.id : null;
           if (callId && streamedWebSearchCallIds.has(callId)) {
             return;
           }
@@ -1427,6 +1468,38 @@ export async function POST(req: Request) {
                 },
               ],
             },
+          });
+        };
+        const streamWebSearchMetadata = (item: unknown) => {
+          if (!allowWebSearch || !isWebSearchCall(item)) {
+            return;
+          }
+          const results = extractWebSearchResults(item);
+          const callId = typeof item.id === "string" ? item.id : null;
+          emitWebSearchResults(callId, results);
+        };
+        const streamWebSearchMetadataFromChunk = (metadata: unknown) => {
+          if (!allowWebSearch || !metadata || typeof metadata !== "object") {
+            return;
+          }
+          const entries = Array.isArray(
+            (metadata as { web_search?: unknown }).web_search
+          )
+            ? ((metadata as { web_search?: unknown[] }).web_search ?? [])
+            : [];
+          if (!entries.length) {
+            return;
+          }
+          entries.forEach((entry) => {
+            if (!entry || typeof entry !== "object") {
+              return;
+            }
+            const callId =
+              typeof (entry as { id?: unknown }).id === "string"
+                ? (entry as { id: string }).id
+                : null;
+            const results = extractWebSearchResults(entry as WebSearchCall);
+            emitWebSearchResults(callId, results);
           });
         };
 
@@ -1460,6 +1533,13 @@ export async function POST(req: Request) {
           });
 
           for await (const event of responseStream) {
+            const chunkMetadata =
+              event && typeof event === "object"
+                ? (event as { metadata?: unknown }).metadata
+                : null;
+            if (chunkMetadata) {
+              streamWebSearchMetadataFromChunk(chunkMetadata);
+            }
             if (event.type === "response.output_text.delta") {
               const token = event.delta;
               if (token) {

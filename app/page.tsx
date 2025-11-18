@@ -2132,6 +2132,11 @@ type RetryOptions = {
                         vectorStoreIds:
                           meta.vectorStoreIds ??
                           msg.metadata?.vectorStoreIds,
+                        searchedSiteLabel:
+                          typeof meta.searchedSiteLabel === "string" &&
+                          meta.searchedSiteLabel.trim().length > 0
+                            ? meta.searchedSiteLabel.trim()
+                            : msg.metadata?.searchedSiteLabel,
                         thinkingDurationMs: incomingThinkingMs,
                         thoughtDurationSeconds:
                           typeof incomingThinkingSeconds === "number"
@@ -2143,7 +2148,17 @@ type RetryOptions = {
                             ? msg.thoughtDurationLabel
                             : undefined,
                       };
+                      const sanitizedMetaDomains = Array.isArray(
+                        meta.searchedDomains
+                      )
+                        ? meta.searchedDomains
+                            .map((label) =>
+                              typeof label === "string" ? label.trim() : ""
+                            )
+                            .filter((label) => label.length > 0)
+                        : [];
                       const domainAdditions = [
+                        ...sanitizedMetaDomains,
                         ...collectDomainsFromSearchRecords(
                           mergedMetadata.searchRecords
                         ),
@@ -4417,7 +4432,7 @@ type RetryOptions = {
                             </>
                           ) : (
                             <>
-                              <div className="relative mr-1 shrink-0">
+                              <div className="relative mr-1 flex shrink-0 items-center self-stretch">
                                 <button
                                   type="button"
                                   aria-label="Composer options"
@@ -4534,7 +4549,7 @@ type RetryOptions = {
                                 )}
                               </div>
 
-                              <div className="flex flex-1 items-center">
+                              <div className="flex flex-1 items-center self-stretch">
                                 <textarea
                                   ref={textareaRef}
                                   className="block w-full resize-none border-none bg-transparent py-1.5 text-[15px] leading-[1.5] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-0"
@@ -4566,7 +4581,7 @@ type RetryOptions = {
                                 />
                               </div>
 
-                              <div className="flex items-center gap-2 pl-2">
+                              <div className="flex items-center gap-2 self-stretch pl-2">
                                 <button
                                   type="button"
                                   onClick={() => {
