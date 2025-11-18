@@ -4432,7 +4432,7 @@ type RetryOptions = {
                             </>
                           ) : (
                             <>
-                              <div className="relative mr-1 flex shrink-0 items-center self-stretch">
+                              <div className="relative mr-1 flex shrink-0 items-center self-end">
                                 <button
                                   type="button"
                                   aria-label="Composer options"
@@ -4581,7 +4581,7 @@ type RetryOptions = {
                                 />
                               </div>
 
-                              <div className="flex items-center gap-2 self-stretch pl-2">
+                              <div className="flex items-center gap-2 self-end pl-2">
                                 <button
                                   type="button"
                                   onClick={() => {
