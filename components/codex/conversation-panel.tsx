@@ -68,18 +68,18 @@ export default function ConversationPanel({
   };
 
   const renderEmptyState = () => (
-    <div className="mx-auto max-w-md rounded-2xl border border-dashed border-white/15 bg-[#13131a] p-6 text-center">
+    <div className="mx-auto max-w-md rounded-2xl border border-dashed border-[#2f2f32] bg-[#1b1b21] p-6 text-center">
       <h3 className="text-lg font-semibold text-white">Give Codex a task</h3>
       <p className="mt-2 text-sm text-zinc-400">
         Describe what you want changed in your codebase.
       </p>
-      <div className="mt-6 space-y-2 text-left text-sm text-zinc-400">
+      <div className="mt-6 space-y-2 text-left text-sm text-zinc-300">
         {EXAMPLE_PROMPTS.map((prompt) => (
           <button
             key={prompt}
             type="button"
             onClick={() => onPromptInsert(prompt)}
-            className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-zinc-200 transition hover:border-white/20"
+            className="w-full rounded-lg border border-[#2f2f32] bg-[#212126] px-3 py-2 text-left text-white transition hover:bg-[#27272f]"
           >
             {prompt}
           </button>
@@ -106,8 +106,8 @@ export default function ConversationPanel({
           key={message.id}
           className={`max-w-3xl rounded-2xl border px-4 py-3 text-sm leading-relaxed ${
             isUser
-              ? "ml-auto border-white/20 bg-white/10 text-white"
-              : "mr-auto border-white/10 bg-[#11111a] text-zinc-100"
+              ? "ml-auto border-[#2f2f32] bg-[#2a2a30] text-white"
+              : "mr-auto border-[#2a2a32] bg-[#1b1b21] text-zinc-100"
           }`}
         >
           <div className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
@@ -126,15 +126,15 @@ export default function ConversationPanel({
 
   const diffPanel = (
     <div className="flex h-full flex-col px-6 py-6">
-      <div className="rounded-2xl border border-dashed border-white/15 bg-white/5 p-6 text-center text-sm text-zinc-400">
+      <div className="rounded-2xl border border-dashed border-[#2f2f32] bg-[#1b1b21] p-6 text-center text-sm text-zinc-400">
         No changes to show yet. Diff previews will appear here once Codex proposes edits.
       </div>
     </div>
   );
 
   return (
-    <div className="flex flex-1 flex-col bg-[#09090f]">
-      <div className="border-b border-white/10 px-6 py-3">
+    <div className="flex flex-1 flex-col bg-[#212121]">
+      <div className="border-b border-[#2a2a2a] px-6 py-3">
         <div className="flex items-center gap-4 text-sm">
           {(["conversation", "diff"] as const).map((tab) => (
             <button
@@ -161,13 +161,13 @@ export default function ConversationPanel({
           <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
             {renderMessages()}
           </div>
-          <div className="border-t border-white/10 bg-[#09090f] px-6 py-4">
+          <div className="border-t border-[#2a2a2a] bg-[#1c1c21] px-6 py-4">
             {error && (
               <div className="mb-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
                 {error}
               </div>
             )}
-            <div className="rounded-2xl border border-white/10 bg-[#11111a] p-4">
+            <div className="rounded-2xl border border-[#2f2f32] bg-[#181818] p-4">
               <textarea
                 value={inputValue}
                 onChange={(event) => onInputChange(event.target.value)}

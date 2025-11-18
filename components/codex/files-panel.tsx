@@ -17,12 +17,12 @@ export default function FilesPanel() {
   ];
 
   return (
-    <aside className="hidden w-80 flex-col border-l border-white/10 bg-[#08080e] p-4 text-sm text-zinc-300 lg:flex">
+    <aside className="hidden w-80 flex-col border-l border-[#202123] bg-[#181818] p-4 text-sm text-zinc-200 lg:flex">
       <div className="space-y-4">
         {sections.map((section) => (
           <section
             key={section.title}
-            className="rounded-xl border border-white/10 bg-white/5 p-4"
+            className="rounded-xl border border-[#2f2f32] bg-[#212126] p-4"
           >
             <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
               {section.title}

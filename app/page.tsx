@@ -21,6 +21,11 @@ import {
   createConversationRecord,
   type ConversationMeta,
 } from "@/lib/conversations";
+import {
+  DEFAULT_AGENT_ID,
+  agentIdFromMetadata,
+  type AgentId,
+} from "@/lib/agents";
 import type {
   FileAttachment,
   ImageAttachment,
@@ -732,6 +737,17 @@ export function MainApp({
     []
   );
 
+  const getConversationAgentId = useCallback(
+    (conversationId: string | null) => {
+      if (!conversationId) {
+        return DEFAULT_AGENT_ID;
+      }
+      const target = conversations.find((c) => c.id === conversationId);
+      return agentIdFromMetadata(target?.metadata) ?? DEFAULT_AGENT_ID;
+    },
+    [conversations]
+  );
+
   const cleanupWaveformVisualizer = useCallback(() => {
     if (waveformAnimationRef.current) {
       cancelAnimationFrame(waveformAnimationRef.current);
@@ -889,7 +905,7 @@ export function MainApp({
 
       const { data: convData } = await supabase
         .from("conversations")
-        .select("id, title, project_id, created_at")
+        .select("id, title, project_id, created_at, metadata")
         .eq("user_id", TEST_USER_ID);
 
       setProjects((projData || []) as Project[]);
@@ -1745,7 +1761,7 @@ export function MainApp({
   const refreshConversations = useCallback(async () => {
     const { data } = await supabase
       .from("conversations")
-      .select("id, title, project_id, created_at")
+      .select("id, title, project_id, created_at, metadata")
       .eq("user_id", TEST_USER_ID);
 
     if (Array.isArray(data)) {
@@ -1783,15 +1799,26 @@ export function MainApp({
   // ------------------------------------------------------------
   // CREATE CONVERSATION
   // ------------------------------------------------------------
+  type CreateConversationOptions = {
+    metadata?: Record<string, unknown> | null;
+    agentId?: AgentId;
+  };
+
   async function createConversation(
     initialTitle: string,
     projectId: string | null,
-    metadata?: Record<string, unknown> | null
+    options?: CreateConversationOptions
   ) {
+    const resolvedAgentId = options?.agentId ?? DEFAULT_AGENT_ID;
+    const metadata: Record<string, unknown> = {
+      ...(options?.metadata ?? {}),
+      agentId: resolvedAgentId,
+    };
+
     const record = await createConversationRecord({
       title: initialTitle,
       projectId,
-      metadata: metadata ?? null,
+      metadata,
     });
     setConversations((prev) => [record, ...prev]);
     return record;
@@ -1834,6 +1861,7 @@ type RetryOptions = {
     if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
+    let activeAgentId = getConversationAgentId(conversationId);
     let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
@@ -1888,6 +1916,7 @@ type RetryOptions = {
       if (!conversationId) {
         const conv = await createConversation("New chat", selectedProjectId);
         conversationId = conv.id;
+        activeAgentId = agentIdFromMetadata(conv.metadata) ?? DEFAULT_AGENT_ID;
         setSelectedConversationId(conv.id);
         setSelectedProjectId(conv.project_id ?? selectedProjectId ?? null);
         setViewMode("chat");
@@ -1998,6 +2027,7 @@ type RetryOptions = {
         modelFamily: chosenFamily,
         speedMode: chosenSpeed,
         forceWebSearch: shouldForceWebSearch,
+        agentId: activeAgentId,
       };
       if (attachmentCopies.length > 0) {
         requestBody.images = attachmentCopies.map((attachment) => ({

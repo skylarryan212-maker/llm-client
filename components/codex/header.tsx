@@ -1,39 +1,24 @@
 "use client";
 
-const actionButtonClass =
-  "flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-zinc-300 transition hover:text-white";
-
 export default function Header() {
   return (
-    <header className="border-b border-white/10 bg-[#0f0f15] px-6 py-4">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <header className="border-b border-[#2a2a2a] bg-[#212121] px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold text-white">Codex</h1>
-          <p className="text-sm text-zinc-400">
-            Code assistant for debugging, refactors, and repo-wide changes.
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+            Agent
           </p>
+          <div className="flex flex-col gap-1">
+            <h1 className="text-lg font-semibold text-white">Codex</h1>
+            <p className="text-sm text-zinc-400">
+              Purpose-built for repo-wide refactors, debugging, and diffs.
+            </p>
+          </div>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <button type="button" className={actionButtonClass}>
-            Archive
-          </button>
-          <button type="button" className={actionButtonClass}>
-            Share
-          </button>
-          <button type="button" className={`${actionButtonClass} pr-2`}>
-            View PR
-            <span aria-hidden className="text-lg leading-none text-zinc-500">
-              ▾
-            </span>
-          </button>
-          <button
-            type="button"
-            aria-label="Notifications"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 text-zinc-400 transition hover:text-white"
-          >
-            •
-          </button>
+        <div className="flex items-center gap-2 text-xs text-zinc-400">
+          <span className="rounded-full border border-white/10 px-3 py-1 text-white/80">
+            Preview
+          </span>
         </div>
       </div>
     </header>
