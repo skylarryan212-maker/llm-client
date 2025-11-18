@@ -16,6 +16,11 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
+import { TEST_USER_ID } from "@/lib/appConfig";
+import {
+  createConversationRecord,
+  type ConversationMeta,
+} from "@/lib/conversations";
 import type {
   FileAttachment,
   ImageAttachment,
@@ -116,19 +121,10 @@ type Project = {
   created_at?: string;
 };
 
-type ConversationMeta = {
-  id: string;
-  title: string | null;
-  project_id: string | null;
-  created_at?: string;
-};
-
 type ViewMode = "chat" | "project";
 type PrimaryView = "chat" | "agents";
 
 type ModelMode = "auto" | "nano" | "mini" | "full";
-
-const TEST_USER_ID = "test-user-1";
 
 const SPEED_OPTIONS: { value: SpeedMode; label: string; hint: string }[] = [
   { value: "auto", label: "Auto", hint: "Balanced" },
@@ -1789,22 +1785,16 @@ export function MainApp({
   // ------------------------------------------------------------
   async function createConversation(
     initialTitle: string,
-    projectId: string | null
+    projectId: string | null,
+    metadata?: Record<string, unknown> | null
   ) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .insert({
-        user_id: TEST_USER_ID,
-        title: initialTitle,
-        project_id: projectId,
-      })
-      .select("id, title, project_id, created_at")
-      .single();
-
-    if (error || !data) throw error || new Error("Conversation not created");
-
-    setConversations((prev) => [data, ...prev]);
-    return data;
+    const record = await createConversationRecord({
+      title: initialTitle,
+      projectId,
+      metadata: metadata ?? null,
+    });
+    setConversations((prev) => [record, ...prev]);
+    return record;
   }
 
 type RetryOptions = {

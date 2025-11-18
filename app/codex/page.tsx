@@ -1,49 +1,91 @@
 "use client";
 
 import { useState } from "react";
-import Header from "@/components/codex/header";
-import Sidebar from "@/components/codex/sidebar";
-import TaskPanel from "@/components/codex/task-panel";
+import { useRouter } from "next/navigation";
+
 import ConversationPanel from "@/components/codex/conversation-panel";
 import FilesPanel from "@/components/codex/files-panel";
+import Header from "@/components/codex/header";
+import Sidebar from "@/components/codex/sidebar";
+import { useCodexChat } from "@/hooks/useCodexChat";
 
 export default function CodexPage() {
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [diffOpen, setDiffOpen] = useState(false);
-  const [filesOpen, setFilesOpen] = useState(true);
+  const router = useRouter();
+  const [inputValue, setInputValue] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const {
+    conversations,
+    selectedConversationId,
+    selectConversation,
+    createNewConversation,
+    messages,
+    isLoadingMessages,
+    isStreaming,
+    streamingConversationId,
+    sendMessage,
+    error,
+    setError,
+  } = useCodexChat();
+
+  const activeConversation = conversations.find(
+    (conversation) => conversation.id === selectedConversationId
+  );
+
+  const handleSend = async () => {
+    const trimmed = inputValue.trim();
+    if (!trimmed) return;
+    await sendMessage(trimmed);
+    setInputValue("");
+  };
+
+  const handleCreateConversation = async () => {
+    setIsCreating(true);
+    try {
+      await createNewConversation();
+      setInputValue("");
+      setError(null);
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleInputChange = (value: string) => {
+    if (error) {
+      setError(null);
+    }
+    setInputValue(value);
+  };
+
+  const handlePromptInsert = (prompt: string) => {
+    setInputValue(prompt);
+    setError(null);
+  };
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#050509] text-zinc-100">
+    <div className="flex h-screen flex-col bg-[#06060c] text-white">
       <Header />
       <div className="flex flex-1 overflow-hidden">
-        {leftOpen && !diffOpen && (
-          <Sidebar isOpen={leftOpen} onToggle={() => setLeftOpen(false)} condensed={diffOpen} />
-        )}
-
-        {!leftOpen && !diffOpen && (
-          <button
-            onClick={() => setLeftOpen(true)}
-            className="flex h-full w-12 items-center justify-center border-r border-white/5 bg-[#09090d] text-zinc-400 transition hover:bg-[#0f0f15] hover:text-white"
-            aria-label="Open sidebar"
-          >
-            ☰
-          </button>
-        )}
-
-        <div className="flex flex-1 overflow-hidden bg-[#050509]">
-          {!diffOpen && <TaskPanel />}
-          <ConversationPanel diffOpen={diffOpen} onDiffOpen={() => setDiffOpen(true)} onDiffClose={() => setDiffOpen(false)} />
-          {!diffOpen && filesOpen && <FilesPanel isOpen={filesOpen} onToggle={() => setFilesOpen(false)} />}
-
-          {!diffOpen && !filesOpen && (
-            <button
-              onClick={() => setFilesOpen(true)}
-              className="hidden w-10 items-center justify-center border-l border-white/5 bg-[#09090d] text-xs uppercase tracking-wide text-zinc-400 transition hover:bg-[#0f0f15] hover:text-white lg:flex"
-            >
-              Show
-            </button>
-          )}
-        </div>
+        <Sidebar
+          conversations={conversations}
+          selectedConversationId={selectedConversationId}
+          onSelect={selectConversation}
+          onCreate={handleCreateConversation}
+          onAgentsClick={() => router.push("/agents")}
+          isCreating={isCreating}
+          streamingConversationId={streamingConversationId}
+        />
+        <ConversationPanel
+          messages={messages}
+          isLoading={isLoadingMessages}
+          isStreaming={isStreaming}
+          inputValue={inputValue}
+          onInputChange={handleInputChange}
+          onSend={handleSend}
+          onPromptInsert={handlePromptInsert}
+          error={error}
+          activeConversation={activeConversation}
+        />
+        <FilesPanel />
       </div>
     </div>
   );

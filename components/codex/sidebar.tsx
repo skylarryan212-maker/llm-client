@@ -1,121 +1,103 @@
 "use client";
 
+import type { ConversationMeta } from "@/lib/conversations";
+
 interface SidebarProps {
-  isOpen: boolean;
-  onToggle: () => void;
-  condensed?: boolean;
+  conversations: ConversationMeta[];
+  selectedConversationId: string | null;
+  onSelect: (id: string) => void;
+  onCreate: () => void;
+  onAgentsClick: () => void;
+  isCreating?: boolean;
+  streamingConversationId?: string | null;
 }
 
-const chats = [
-  { id: 1, title: "Refactor Agents Catalog", active: true },
-  { id: 2, title: "Fix Auth Flow", active: false },
-  { id: 3, title: "Database Migration", active: false },
-];
-
-function AgentsMiniIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-4 w-4"
-    >
-      <rect x="3.5" y="3.5" width="9" height="9" rx="2" />
-      <path d="M11 11L20 20" />
-      <path d="M15.5 20H20V15.5" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-4 w-4"
-    >
-      <path d="M6 6l12 12" />
-      <path d="M18 6l-12 12" />
-    </svg>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-3.5 w-3.5"
-    >
-      <path d="M12 5v14" />
-      <path d="M5 12h14" />
-    </svg>
-  );
-}
-
-export default function Sidebar({ isOpen, onToggle, condensed }: SidebarProps) {
-  if (!isOpen) {
-    return null;
+function formatTimestamp(value?: string | null) {
+  if (!value) return "Recently";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Recently";
   }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
 
+export default function Sidebar({
+  conversations,
+  selectedConversationId,
+  onSelect,
+  onCreate,
+  onAgentsClick,
+  isCreating,
+  streamingConversationId,
+}: SidebarProps) {
   return (
-    <aside
-      className={`${condensed ? "w-48" : "w-64"} flex flex-col overflow-hidden border-r border-white/5 bg-[#0b0b10] transition-all`}
-    >
-      <div className="flex items-center gap-2 border-b border-white/5 px-4 py-4">
-        <button className="flex flex-1 items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-sm text-zinc-100 hover:bg-white/10">
-          <AgentsMiniIcon />
-          {!condensed && <span>Agents</span>}
+    <aside className="flex w-72 flex-col border-r border-white/10 bg-[#0a0a10] text-sm">
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <button
+          type="button"
+          onClick={onAgentsClick}
+          className="flex flex-1 items-center gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-left text-white transition hover:border-white/20"
+        >
+          <span className="text-xs uppercase tracking-wide text-zinc-400">
+            Agents
+          </span>
         </button>
-        {!condensed && (
-          <button
-            onClick={onToggle}
-            className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 transition hover:bg-white/10 hover:text-white"
-            aria-label="Close sidebar"
-          >
-            <CloseIcon />
-          </button>
-        )}
+        <button
+          type="button"
+          aria-label="New Codex chat"
+          onClick={onCreate}
+          disabled={isCreating}
+          className="ml-3 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 text-lg text-zinc-400 transition hover:text-white disabled:opacity-50"
+        >
+          +
+        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4">
-        <div className="mb-4 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          {!condensed && <span>Current Chats</span>}
-          {!condensed && (
-            <button className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-300 transition hover:bg-white/10 hover:text-white">
-              <PlusIcon />
-            </button>
-          )}
-        </div>
+      <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        Current chats
+      </div>
 
-        <div className="space-y-2">
-          {chats.map((chat) => (
-            <div
-              key={chat.id}
-              className={`rounded-xl border px-3 py-3 text-sm transition ${
-                chat.active
-                  ? "border-white/20 bg-white/5 text-white"
-                  : "border-white/5 bg-[#0f0f15] text-zinc-300 hover:bg-white/5"
+      <div className="flex-1 space-y-2 overflow-y-auto px-4 pb-4">
+        {conversations.length === 0 && (
+          <div className="rounded-lg border border-dashed border-white/10 bg-white/5 p-4 text-xs text-zinc-400">
+            No Codex chats yet. Start one to keep it pinned here.
+          </div>
+        )}
+        {conversations.map((conversation) => {
+          const isActive = conversation.id === selectedConversationId;
+          const isStreaming =
+            streamingConversationId &&
+            streamingConversationId === conversation.id;
+          return (
+            <button
+              key={conversation.id}
+              type="button"
+              onClick={() => onSelect(conversation.id)}
+              className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                isActive
+                  ? "border-white/15 bg-white/10 text-white"
+                  : "border-white/10 bg-transparent text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              <p className={`${condensed ? "text-xs" : "text-sm"} truncate`}>{chat.title}</p>
-            </div>
-          ))}
-        </div>
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="truncate">
+                  {conversation.title?.trim() || "Untitled Codex chat"}
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {formatTimestamp(conversation.created_at)}
+                </span>
+              </div>
+              {isStreaming && (
+                <div className="mt-1 text-xs text-white">
+                  Working...
+                </div>
+              )}
+            </button>
+          );
+        })}
       </div>
     </aside>
   );
