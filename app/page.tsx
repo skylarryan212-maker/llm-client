@@ -17,10 +17,10 @@ import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
 import { supabase } from "../lib/supabaseClient";
 import { TEST_USER_ID } from "@/lib/appConfig";
+import { useConversationsStore } from "@/components/providers/ConversationsProvider";
 import {
   createConversationRecord,
   type ConversationMeta,
-  normalizeConversationMeta,
 } from "@/lib/conversations";
 import {
   CODEX_AGENT_ID,
@@ -41,6 +41,7 @@ import {
   type ReasoningEffort,
   type SpeedMode,
 } from "@/lib/modelConfig";
+import type { Project } from "@/lib/projects";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AgentsCatalog } from "@/components/agents/AgentsCatalog";
 
@@ -120,12 +121,6 @@ type GeneratedImageResult = {
   dataUrl: string;
   model: ImageModelKey;
   prompt?: string;
-};
-
-type Project = {
-  id: string;
-  name: string;
-  created_at?: string;
 };
 
 type ViewMode = "chat" | "project";
@@ -763,9 +758,13 @@ export function MainApp({
   const [streamingConversationId, setStreamingConversationId] =
     useState<string | null>(null);
 
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [allConversations, setAllConversations] = useState<ConversationMeta[]>([]);
-  const [conversations, setConversations] = useState<ConversationMeta[]>([]);
+  const {
+    projects,
+    setProjects,
+    conversations: storedConversations,
+    setConversations: setStoredConversations,
+    refreshConversations: refreshStoredConversations,
+  } = useConversationsStore();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null
   );
@@ -812,9 +811,14 @@ export function MainApp({
   const audioContextRef = useRef<AudioContext | null>(null);
   const router = useRouter();
   const debugPush = useCallback(
-    (url: string) => {
-      console.log("[ROUTER PUSH]", url);
-      router.push(url);
+    (url: string, options?: { replace?: boolean }) => {
+      const actionLabel = options?.replace ? "[ROUTER REPLACE]" : "[ROUTER PUSH]";
+      console.log(actionLabel, url);
+      if (options?.replace) {
+        router.replace(url);
+      } else {
+        router.push(url);
+      }
     },
     [router]
   );
@@ -909,6 +913,11 @@ export function MainApp({
     [isCodexMode]
   );
 
+  const conversations = useMemo(
+    () => filterConversationsForMode(storedConversations),
+    [filterConversationsForMode, storedConversations]
+  );
+
   type ConversationStateUpdater =
     | ConversationMeta[]
     | ((prev: ConversationMeta[]) => ConversationMeta[]);
@@ -921,7 +930,7 @@ export function MainApp({
         nextFiltered: ConversationMeta[]
       ) => void
     ) => {
-      setAllConversations((prevAll) => {
+      setStoredConversations((prevAll) => {
         const nextAll =
           typeof updater === "function"
             ? (updater as (prev: ConversationMeta[]) => ConversationMeta[])(
@@ -929,59 +938,14 @@ export function MainApp({
               )
             : updater;
         const nextFiltered = filterConversationsForMode(nextAll);
-        setConversations(nextFiltered);
         if (afterUpdate) {
           afterUpdate(nextAll, nextFiltered);
         }
         return nextAll;
       });
     },
-    [filterConversationsForMode]
+    [filterConversationsForMode, setStoredConversations]
   );
-
-  const previousModeRef = useRef(isCodexMode);
-  useEffect(() => {
-    if (previousModeRef.current !== isCodexMode) {
-      previousModeRef.current = isCodexMode;
-      setConversations(filterConversationsForMode(allConversations));
-    }
-  }, [allConversations, filterConversationsForMode, isCodexMode]);
-
-  const loadConversationsForUser = useCallback(async (userId: string) => {
-    if (!userId) {
-      return [] as ConversationMeta[];
-    }
-    try {
-      const response = await fetch(
-        `/api/conversations?userId=${encodeURIComponent(userId)}`,
-        {
-          cache: "no-store",
-        }
-      );
-
-      if (!response.ok) {
-        console.warn("Failed to load conversations", {
-          status: response.status,
-          statusText: response.statusText,
-        });
-        return [] as ConversationMeta[];
-      }
-
-      const payload = (await response.json()) as {
-        conversations?: ConversationMeta[];
-      };
-      const rows = Array.isArray(payload.conversations)
-        ? payload.conversations
-        : [];
-      const normalized = rows
-        .map((row) => normalizeConversationMeta(row))
-        .filter((row): row is ConversationMeta => Boolean(row));
-      return normalized;
-    } catch (error) {
-      console.warn("Failed to load conversations", error);
-      return [] as ConversationMeta[];
-    }
-  }, []);
 
   const getConversationAgentId = useCallback(
     (conversationId: string | null) => {
@@ -1157,10 +1121,12 @@ export function MainApp({
   }, [isCodexMode]);
 
   const navigateToConversation = useCallback(
-    (conversationId: string) => {
+    (conversationId: string, opts?: { replace?: boolean }) => {
       console.log("[NAVIGATE] navigateToConversation(", conversationId, ")");
       if (isAgentsView) {
-        debugPush(`/c/${encodeURIComponent(conversationId)}`);
+        debugPush(`/c/${encodeURIComponent(conversationId)}`, {
+          replace: opts?.replace || rawRouteConversationId === NEW_CHAT_DRAFT_ID,
+        });
         return;
       }
       if (!isMainChatExperience) {
@@ -1169,7 +1135,11 @@ export function MainApp({
       if (rawRouteConversationId === conversationId) {
         return;
       }
-      debugPush(`/c/${encodeURIComponent(conversationId)}`);
+      const shouldReplace =
+        opts?.replace || rawRouteConversationId === NEW_CHAT_DRAFT_ID;
+      debugPush(`/c/${encodeURIComponent(conversationId)}`, {
+        replace: shouldReplace,
+      });
     },
     [debugPush, isAgentsView, isMainChatExperience, rawRouteConversationId]
   );
@@ -1183,48 +1153,6 @@ export function MainApp({
     }
     debugPush("/");
   }, [debugPush, isMainChatExperience, rawRouteConversationId]);
-
-  // ------------------------------------------------------------
-  // INITIAL LOAD: projects + conversations
-  // ------------------------------------------------------------
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      try {
-        if (allowProjectSections) {
-          const { data: projData } = await supabase
-            .from("projects")
-            .select("id, name, created_at")
-            .eq("user_id", TEST_USER_ID);
-          if (!cancelled) {
-            setProjects((projData || []) as Project[]);
-          }
-        } else if (!cancelled) {
-          setProjects([]);
-          setSelectedProjectId(null);
-        }
-
-        const loadedConversations = await loadConversationsForUser(TEST_USER_ID);
-        if (cancelled) {
-          return;
-        }
-        applyConversationState(loadedConversations);
-      } catch (error) {
-        if (!cancelled) {
-          console.error("Failed to load conversations", error);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    allowProjectSections,
-    applyConversationState,
-    loadConversationsForUser,
-  ]);
 
   useEffect(() => {
     if (!conversationIdFromRoute) {
@@ -3238,9 +3166,8 @@ export function MainApp({
   };
 
   const refreshConversations = useCallback(async () => {
-    const loaded = await loadConversationsForUser(TEST_USER_ID);
-    applyConversationState(loaded);
-  }, [applyConversationState, loadConversationsForUser]);
+    await refreshStoredConversations();
+  }, [refreshStoredConversations]);
 
   const persistMessageMetadata = useCallback(
     async (messageId: string, metadata: MessageMetadata) => {
