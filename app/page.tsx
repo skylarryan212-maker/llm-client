@@ -1287,7 +1287,6 @@ export function MainApp({
       setSelectedProjectId(targetProjectId);
     }
     setViewMode("chat");
-    navigateToConversation(newest.id);
   }, [
     allowProjectSections,
     conversationIdFromRoute,
@@ -1295,7 +1294,6 @@ export function MainApp({
     conversations,
     isCodexMode,
     isMainChatExperience,
-    navigateToConversation,
     pendingNewChat,
     selectedConversationId,
     selectedProjectId,
