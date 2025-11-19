@@ -123,6 +123,8 @@ type GeneratedImageResult = {
   prompt?: string;
 };
 
+const conversationMessageCache = new Map<string, ChatMessage[]>();
+
 type ViewMode = "chat" | "project";
 type PrimaryView = "chat" | "agents";
 type ExperienceMode = "default" | "codex";
@@ -1023,7 +1025,9 @@ export function MainApp({
           typeof entry[0] === "string" &&
           Array.isArray(entry[1])
         ) {
-          hydrated.set(entry[0], entry[1] as ChatMessage[]);
+          const messagesForConversation = entry[1] as ChatMessage[];
+          hydrated.set(entry[0], messagesForConversation);
+          conversationMessageCache.set(entry[0], messagesForConversation);
         }
       });
       conversationHistoryRef.current = hydrated;
@@ -1075,6 +1079,7 @@ export function MainApp({
     (conversationId: string) => {
       if (!conversationHistoryRef.current.has(conversationId)) return;
       conversationHistoryRef.current.delete(conversationId);
+      conversationMessageCache.delete(conversationId);
       persistConversationHistory();
     },
     [persistConversationHistory]
@@ -1444,11 +1449,15 @@ export function MainApp({
       return;
     }
 
-    const cachedMessages = conversationHistoryRef.current.get(
-      selectedConversationId
-    );
+    const cachedMessages =
+      conversationHistoryRef.current.get(selectedConversationId) ??
+      conversationMessageCache.get(selectedConversationId);
     if (cachedMessages) {
       setMessages(cachedMessages);
+      if (conversationMessageCache.has(selectedConversationId)) {
+        setIsLoadingMessages(false);
+        return;
+      }
     } else {
       setMessages([]);
     }
@@ -1483,6 +1492,7 @@ export function MainApp({
 
   useEffect(() => {
     if (!selectedConversationId) return;
+    conversationMessageCache.set(selectedConversationId, messages);
     conversationHistoryRef.current.set(selectedConversationId, messages);
     persistConversationHistory();
   }, [messages, selectedConversationId, persistConversationHistory]);
