@@ -1105,16 +1105,12 @@ export function MainApp({
     if (!isNewConversationRoute) {
       return;
     }
-    if (!pendingNewChat) {
-      setPendingNewChat(true);
-    }
-    if (selectedConversationId !== null) {
-      setSelectedConversationId(null);
-    }
+    setPendingNewChat(true);
+    setSelectedConversationId(null);
     setMessages((prev) => (prev.length === 0 ? prev : []));
     setIsLoadingMessages((prev) => (prev ? false : prev));
     setViewMode((prev) => (prev === "chat" ? prev : "chat"));
-  }, [isNewConversationRoute, pendingNewChat, selectedConversationId]);
+  }, [isNewConversationRoute]);
 
   useEffect(() => {
     console.log("[AUTO-OPEN] effect fired, mode:", mode);
@@ -1337,7 +1333,7 @@ export function MainApp({
   );
 
   useEffect(() => {
-    if (!conversationIdFromRoute) {
+    if (!conversationIdFromRoute || conversationIdFromRoute === NEW_CHAT_DRAFT_ID) {
       return;
     }
     if (selectedConversationId !== conversationIdFromRoute) {
