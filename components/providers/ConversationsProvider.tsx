@@ -20,6 +20,8 @@ import type { ChatMessage } from "@/lib/chatTypes";
 
 type MessagesByConversationId = Record<string, ChatMessage[]>;
 
+const DEFAULT_CONVERSATION_TITLE = "New chat";
+
 type ConversationsContextValue = {
   conversations: ConversationMeta[];
   setConversations: Dispatch<SetStateAction<ConversationMeta[]>>;
@@ -109,12 +111,32 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
           return conv;
         }
 
-        const hasIncomingTitle = typeof conv.title === "string" && conv.title.trim().length > 0;
-        const resolvedTitle = hasIncomingTitle ? conv.title : current.title ?? null;
-        const resolvedProjectId =
-          typeof conv.project_id === "string" || conv.project_id === null
+        const incomingTitle =
+          typeof conv.title === "string" ? conv.title.trim() : "";
+        const currentTitle =
+          typeof current.title === "string" ? current.title.trim() : "";
+        const resolvedTitle = (() => {
+          if (incomingTitle && incomingTitle !== DEFAULT_CONVERSATION_TITLE) {
+            return incomingTitle;
+          }
+          if (currentTitle && (!incomingTitle || incomingTitle === DEFAULT_CONVERSATION_TITLE)) {
+            return currentTitle;
+          }
+          if (incomingTitle) return incomingTitle;
+          if (currentTitle) return currentTitle;
+          return null;
+        })();
+
+        const incomingProjectId =
+          typeof conv.project_id === "string"
             ? conv.project_id
-            : current.project_id ?? null;
+            : conv.project_id === null
+              ? null
+              : undefined;
+        const resolvedProjectId =
+          incomingProjectId === undefined
+            ? current.project_id ?? null
+            : incomingProjectId ?? current.project_id ?? null;
         const resolvedMetadata = conv.metadata ?? current.metadata;
 
         return {
