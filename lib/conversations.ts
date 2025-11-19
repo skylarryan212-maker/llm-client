@@ -9,7 +9,7 @@ export type ConversationMeta = {
   metadata?: Record<string, unknown> | null;
 };
 
-type ConversationRow = {
+export type ConversationRow = {
   id?: unknown;
   title?: unknown;
   project_id?: unknown;
@@ -63,32 +63,6 @@ type CreateConversationArgs = {
   metadata?: Record<string, unknown> | null;
 };
 
-const LOCAL_ONLY_FLAG_KEY = "_localOnly";
-
-const buildLocalConversationRecord = (
-  title: string,
-  projectId: string | null,
-  metadata?: Record<string, unknown> | null
-): ConversationMeta => {
-  const fallbackId =
-    typeof globalThis !== "undefined" &&
-    globalThis.crypto &&
-    typeof globalThis.crypto.randomUUID === "function"
-      ? globalThis.crypto.randomUUID()
-      : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const metadataWithFlag: Record<string, unknown> = {
-    ...(metadata ?? {}),
-    [LOCAL_ONLY_FLAG_KEY]: true,
-  };
-  return {
-    id: fallbackId,
-    title,
-    project_id: projectId,
-    created_at: new Date().toISOString(),
-    metadata: metadataWithFlag,
-  };
-};
-
 export async function createConversationRecord({
   title,
   projectId,
@@ -137,6 +111,10 @@ export async function createConversationRecord({
     return normalized;
   } catch (error) {
     console.error("[CONVERSATION_CREATE] Failed to insert conversation", error);
-    return buildLocalConversationRecord(title, projectId, metadata);
+    const normalizedError =
+      error instanceof Error
+        ? error
+        : new Error("Conversation not created");
+    throw normalizedError;
   }
 }
