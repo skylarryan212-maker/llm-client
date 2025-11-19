@@ -765,6 +765,9 @@ export function MainApp({
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [pendingNewChat, setPendingNewChat] = useState(false);
+  const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
+    string | null
+  >(null);
   const [codexActiveTab, setCodexActiveTab] = useState<
     "tasks" | "code-reviews" | "archive"
   >("tasks");
@@ -3070,6 +3073,7 @@ export function MainApp({
       rememberCodexLandingScroll();
     }
     setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
       loadMessages(id, { force: true });
@@ -3091,6 +3095,7 @@ export function MainApp({
     }
     ensureChatRoute();
     setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
     setSelectedProjectId(id);
     setViewMode("project");
     setSidebarOpen(false);
@@ -3301,7 +3306,9 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? selectedProjectId ?? null
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -3324,6 +3331,7 @@ type RetryOptions = {
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
+        setPendingNewChatProjectId(null);
       }
 
       setStreamingConversationId(conversationId);
@@ -4091,7 +4099,9 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? selectedProjectId ?? null
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -4110,6 +4120,7 @@ type RetryOptions = {
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
+        setPendingNewChatProjectId(null);
       }
 
       if (!assistantMessageId) {
@@ -4446,7 +4457,7 @@ type RetryOptions = {
     }
   };
 
-  async function handleNewChat(global = false) {
+  function handleNewChat(global = false) {
     ensureChatRoute();
     if (pendingNewChat) {
       return;
@@ -4454,36 +4465,23 @@ type RetryOptions = {
     if (isCodexMode && !selectedConversationId) {
       rememberCodexLandingScroll();
     }
-    const resolvedProjectId = allowProjectSections
+    const targetProjectId = allowProjectSections
       ? global
         ? null
         : selectedProjectId ?? null
       : null;
     setPendingNewChat(true);
-    try {
-      const conv = await createConversation({
-        projectId: resolvedProjectId,
-        agentId: defaultAgentId,
-      });
-      setSelectedConversationId(conv.id);
-      if (allowProjectSections) {
-        setSelectedProjectId(conv.project_id ?? resolvedProjectId ?? null);
-      } else {
-        setSelectedProjectId(null);
-      }
-      setMessages([]);
-      setIsLoadingMessages(false);
-      setViewMode("chat");
-      setSidebarOpen(false);
-      skipAutoLoadRef.current = conv.id;
-    } catch (error) {
-      console.error("Failed to start new conversation", error);
-      setComposerError(
-        "We couldn’t create a conversation record. Check the console logs and Supabase schema."
-      );
-    } finally {
-      setPendingNewChat(false);
+    setPendingNewChatProjectId(targetProjectId);
+    setSelectedConversationId(null);
+    if (allowProjectSections) {
+      setSelectedProjectId(targetProjectId);
+    } else {
+      setSelectedProjectId(null);
     }
+    setMessages([]);
+    setIsLoadingMessages(false);
+    setViewMode("chat");
+    setSidebarOpen(false);
   }
 
   async function handleCreateProject() {
@@ -4975,12 +4973,13 @@ type RetryOptions = {
   );
 
   const renderCodexExperience = () => {
-    if (selectedConversationId) {
-      const title =
-        selectedConversationMeta?.title?.trim() || "Untitled task";
-      const dateLabel = formatConversationDateLabel(
-        selectedConversationMeta?.created_at
-      );
+    if (selectedConversationId || pendingNewChat) {
+      const title = selectedConversationId
+        ? selectedConversationMeta?.title?.trim() || "Untitled task"
+        : "New chat";
+      const dateLabel = selectedConversationId
+        ? formatConversationDateLabel(selectedConversationMeta?.created_at)
+        : "";
       return (
         <div className="flex h-screen min-h-0 flex-col bg-[#030308] text-white">
           <header className="flex items-center justify-between border-b border-white/10 px-6 py-4">
@@ -4990,6 +4989,7 @@ type RetryOptions = {
                 onClick={() => {
                   setSelectedConversationId(null);
                   setPendingNewChat(false);
+                  setPendingNewChatProjectId(null);
                   setMessages([]);
                   setIsLoadingMessages(false);
                   setViewMode("chat");
