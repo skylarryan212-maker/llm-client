@@ -743,7 +743,23 @@ export function MainApp({
   // STATE
   // ------------------------------------------------------------
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const {
+    projects,
+    setProjects,
+    conversations: storedConversations,
+    setConversations: setStoredConversations,
+    refreshConversations: refreshStoredConversations,
+    selectedProjectId,
+    setSelectedProjectId,
+    selectedConversationId,
+    setSelectedConversationId,
+    pendingNewChat,
+    setPendingNewChat,
+    pendingNewChatProjectId,
+    setPendingNewChatProjectId,
+    messages,
+    setMessages,
+  } = useConversationsStore();
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [modelFamily, setModelFamily] = useState<ModelFamily>("gpt-5.1");
@@ -760,16 +776,6 @@ export function MainApp({
   const [streamingConversationId, setStreamingConversationId] =
     useState<string | null>(null);
 
-  const {
-    projects,
-    setProjects,
-    conversations: storedConversations,
-    setConversations: setStoredConversations,
-    refreshConversations: refreshStoredConversations,
-  } = useConversationsStore();
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    null
-  );
   const pathname = usePathname();
   const routeConversationIdFromPath = useMemo(() => {
     if (!pathname) {
@@ -795,16 +801,8 @@ export function MainApp({
   const conversationIdFromRoute = isNewConversationRoute
     ? null
     : rawRouteConversationId;
-  const [selectedConversationId, setSelectedConversationId] = useState<
-    string | null
-  >(conversationIdFromRoute);
-
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
-  const [pendingNewChat, setPendingNewChat] = useState(isNewConversationRoute);
-  const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
-    string | null
-  >(null);
   const [codexActiveTab, setCodexActiveTab] = useState<
     "tasks" | "code-reviews" | "archive"
   >("tasks");
