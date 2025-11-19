@@ -18,6 +18,17 @@ import {
 import type { Project } from "@/lib/projects";
 import type { ChatMessage } from "@/lib/chatTypes";
 
+type ChatMessage = {
+  id?: string;
+  persistedId?: string;
+  role: "user" | "assistant";
+  content: string;
+  metadata?: Record<string, unknown>;
+  attachments?: unknown;
+  files?: unknown;
+  [key: string]: unknown;
+};
+
 type MessagesByConversationId = Record<string, ChatMessage[]>;
 
 type ConversationsContextValue = {
