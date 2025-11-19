@@ -1056,35 +1056,6 @@ export function MainApp({
   const conversationHistoryRef = useRef(new Map<string, ChatMessage[]>());
   const hasAutoOpenedMainChatRef = useRef(false);
 
-  useEffect(() => {
-    if (!isNewConversationRoute) {
-      return;
-    }
-    if (!pendingNewChat) {
-      setPendingNewChat(true);
-    }
-    if (selectedConversationId !== null) {
-      setSelectedConversationId(null);
-    }
-    if (!allowProjectSections && selectedProjectId !== null) {
-      setSelectedProjectId(null);
-    }
-    if (isMainChatExperience) {
-      hasAutoOpenedMainChatRef.current = true;
-    }
-    if (viewMode !== "chat") {
-      setViewMode("chat");
-    }
-  }, [
-    allowProjectSections,
-    isMainChatExperience,
-    isNewConversationRoute,
-    pendingNewChat,
-    selectedConversationId,
-    selectedProjectId,
-    viewMode,
-  ]);
-
   const persistConversationHistory = useCallback(() => {
     if (typeof window === "undefined") return;
     try {
