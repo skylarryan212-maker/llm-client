@@ -4018,36 +4018,44 @@ type RetryOptions = {
                   }
                 } else if (typeof payload.title === "string") {
                   const newTitle = payload.title.trim();
-                  if (newTitle && conversationId) {
-                    applyConversationState((prev) => {
-                      let found = false;
-                      const updated = prev.map((conv) => {
-                        if (conv.id !== conversationId) {
-                          return conv;
-                        }
-                        found = true;
-                        return { ...conv, title: newTitle };
-                      });
-                      if (found) {
-                        return updated;
-                      }
-                      const projectHint =
-                        allowProjectSections
-                          ? pendingNewChatProjectId ?? selectedProjectId ?? null
-                          : null;
-                      return [
-                        {
-                          id: conversationId,
-                          title: newTitle,
-                          project_id: projectHint,
-                          created_at: new Date().toISOString(),
-                          metadata: null,
-                        },
-                        ...updated,
-                      ];
-                    });
-                    void persistConversationTitle(conversationId, newTitle);
+                  if (!newTitle || !conversationId) {
+                    // Nothing to do if we don't have a title or a valid conversation id
+                    return;
                   }
+
+                  const id: string = conversationId; // explicit non-null, string-only id
+
+                  applyConversationState((prev) => {
+                    let found = false;
+
+                    const updated: ConversationMeta[] = prev.map((conv) => {
+                      if (conv.id !== id) {
+                        return conv;
+                      }
+                      found = true;
+                      return {
+                        ...conv,
+                        title: newTitle,
+                      };
+                    });
+
+                    if (!found) {
+                      const now = new Date().toISOString();
+
+                      const fallback: ConversationMeta = {
+                        id,
+                        title: newTitle,
+                        project_id: null,
+                        created_at: now,
+                        metadata: null,
+                      };
+
+                      return [...updated, fallback];
+                    }
+
+                    return updated;
+                  });
+                  void persistConversationTitle(conversationId, newTitle);
                 } else if (payload.done) {
                   markResponseFinished();
                   finished = true;
