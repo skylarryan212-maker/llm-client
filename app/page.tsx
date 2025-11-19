@@ -1336,6 +1336,11 @@ export function MainApp({
     if (!conversationIdFromRoute || conversationIdFromRoute === NEW_CHAT_DRAFT_ID) {
       return;
     }
+    if (skipAutoLoadRef.current === conversationIdFromRoute) {
+      skipAutoLoadRef.current = null;
+      setIsLoadingMessages(false);
+      return;
+    }
     if (selectedConversationId !== conversationIdFromRoute) {
       setSelectedConversationId(conversationIdFromRoute);
     }
@@ -3193,7 +3198,7 @@ export function MainApp({
       : "New chat";
     const resolvedProjectId =
       typeof options?.projectId === "undefined"
-        ? selectedProjectId ?? null
+        ? pendingNewChatProjectId ?? selectedProjectId ?? null
         : options.projectId ?? null;
     const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
