@@ -3227,11 +3227,15 @@ export function MainApp({
       console.error("[SEND_PIPELINE] createConversationRecord failed", error);
       throw error;
     }
+    const recordWithProject: ConversationMeta =
+      record.project_id === resolvedProjectId || !resolvedProjectId
+        ? record
+        : { ...record, project_id: resolvedProjectId };
     applyConversationState((prev) => {
       const withoutDuplicate = prev.filter((c) => c.id !== record.id);
-      return [record, ...withoutDuplicate];
+      return [recordWithProject, ...withoutDuplicate];
     });
-    return record;
+    return recordWithProject;
   }
 
 type RetryOptions = {

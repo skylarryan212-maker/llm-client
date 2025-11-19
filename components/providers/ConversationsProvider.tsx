@@ -93,6 +93,50 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const mergeConversationLists = useCallback(
+    (
+      existing: ConversationMeta[],
+      incoming: ConversationMeta[]
+    ): ConversationMeta[] => {
+      if (existing.length === 0) {
+        return incoming;
+      }
+
+      const existingMap = new Map(existing.map((conv) => [conv.id, conv]));
+      const merged = incoming.map((conv) => {
+        const current = existingMap.get(conv.id);
+        if (!current) {
+          return conv;
+        }
+
+        const hasIncomingTitle = typeof conv.title === "string" && conv.title.trim().length > 0;
+        const resolvedTitle = hasIncomingTitle ? conv.title : current.title ?? null;
+        const resolvedProjectId =
+          typeof conv.project_id === "string" || conv.project_id === null
+            ? conv.project_id
+            : current.project_id ?? null;
+        const resolvedMetadata = conv.metadata ?? current.metadata;
+
+        return {
+          ...current,
+          ...conv,
+          title: resolvedTitle,
+          project_id: resolvedProjectId,
+          metadata: resolvedMetadata,
+        };
+      });
+
+      existing.forEach((conv) => {
+        if (!incoming.find((next) => next.id === conv.id)) {
+          merged.push(conv);
+        }
+      });
+
+      return merged;
+    },
+    []
+  );
+
   const loadProjectsForUser = useCallback(async (userId: string) => {
     if (!userId) {
       return [] as Project[];
@@ -161,8 +205,8 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
 
   const refreshConversations = useCallback(async () => {
     const loadedConversations = await loadConversationsForUser(TEST_USER_ID);
-    setConversations(loadedConversations);
-  }, [loadConversationsForUser]);
+    setConversations((prev) => mergeConversationLists(prev, loadedConversations));
+  }, [loadConversationsForUser, mergeConversationLists]);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,7 +223,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
         }
 
         setProjects(loadedProjects);
-        setConversations(loadedConversations);
+        setConversations((prev) => mergeConversationLists(prev, loadedConversations));
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to bootstrap chat data", error);
