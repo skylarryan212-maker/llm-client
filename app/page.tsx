@@ -4019,33 +4019,32 @@ type RetryOptions = {
                 } else if (typeof payload.title === "string") {
                   const newTitle = payload.title.trim();
                   if (newTitle && conversationId) {
-                    const id = conversationId;
                     applyConversationState((prev) => {
                       let found = false;
                       const updated = prev.map((conv) => {
-                        if (conv.id !== id) {
+                        if (conv.id !== conversationId) {
                           return conv;
                         }
                         found = true;
                         return { ...conv, title: newTitle };
                       });
-                      if (!found) {
-                        const projectHint =
-                          allowProjectSections
-                            ? pendingNewChatProjectId ?? selectedProjectId ?? null
-                            : null;
-                        return [
-                          {
-                            id,
-                            title: newTitle,
-                            project_id: projectHint,
-                            created_at: new Date().toISOString(),
-                            metadata: null,
-                          },
-                          ...updated,
-                        ];
+                      if (found) {
+                        return updated;
                       }
-                      return updated;
+                      const projectHint =
+                        allowProjectSections
+                          ? pendingNewChatProjectId ?? selectedProjectId ?? null
+                          : null;
+                      return [
+                        {
+                          id: conversationId,
+                          title: newTitle,
+                          project_id: projectHint,
+                          created_at: new Date().toISOString(),
+                          metadata: null,
+                        },
+                        ...updated,
+                      ];
                     });
                     void persistConversationTitle(conversationId, newTitle);
                   }
