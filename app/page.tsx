@@ -1048,6 +1048,7 @@ export function MainApp({
   const longThinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
   const conversationHistoryRef = useRef(new Map<string, ChatMessage[]>());
+  const hasAutoOpenedMainChatRef = useRef(false);
 
   const persistConversationHistory = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1209,11 +1210,15 @@ export function MainApp({
     } else {
       setSelectedProjectId(null);
     }
+    if (isMainChatExperience) {
+      hasAutoOpenedMainChatRef.current = true;
+    }
     setViewMode("chat");
   }, [
     allowProjectSections,
     conversationIdFromRoute,
     conversations,
+    isMainChatExperience,
     selectedConversationId,
   ]);
 
@@ -1222,15 +1227,33 @@ export function MainApp({
       return;
     }
     if (pendingNewChat) {
+      if (!allowProjectSections && selectedProjectId !== null) {
+        setSelectedProjectId(null);
+      }
       return;
     }
     if (conversations.length === 0) {
       if (selectedConversationId !== null) {
         setSelectedConversationId(null);
       }
-      if (!allowProjectSections) {
+      if (!allowProjectSections && selectedProjectId !== null) {
         setSelectedProjectId(null);
       }
+      return;
+    }
+
+    if (isCodexMode) {
+      if (!allowProjectSections && selectedProjectId !== null) {
+        setSelectedProjectId(null);
+      }
+      return;
+    }
+
+    if (!isMainChatExperience) {
+      return;
+    }
+
+    if (hasAutoOpenedMainChatRef.current) {
       return;
     }
 
@@ -1244,22 +1267,28 @@ export function MainApp({
     if (!newest) {
       return;
     }
+
+    hasAutoOpenedMainChatRef.current = true;
     if (selectedConversationId !== newest.id) {
       setSelectedConversationId(newest.id);
     }
-    if (allowProjectSections) {
-      setSelectedProjectId(newest.project_id);
-    } else {
-      setSelectedProjectId(null);
+    const targetProjectId = allowProjectSections ? newest.project_id ?? null : null;
+    if (selectedProjectId !== targetProjectId) {
+      setSelectedProjectId(targetProjectId);
     }
     setViewMode("chat");
+    navigateToConversation(newest.id);
   }, [
     allowProjectSections,
     conversationIdFromRoute,
     conversationStorageKey,
     conversations,
+    isCodexMode,
+    isMainChatExperience,
+    navigateToConversation,
     pendingNewChat,
     selectedConversationId,
+    selectedProjectId,
   ]);
 
   // ------------------------------------------------------------
