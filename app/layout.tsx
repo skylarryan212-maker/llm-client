@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ConversationsProvider } from "@/components/providers/ConversationsProvider";
 
 export const metadata: Metadata = {
   title: "LLM Client",
@@ -28,7 +29,7 @@ export default function RootLayout({
         />
       </head>
       <body suppressHydrationWarning className={baseBodyClass}>
-        {children}
+        <ConversationsProvider>{children}</ConversationsProvider>
       </body>
     </html>
   );
