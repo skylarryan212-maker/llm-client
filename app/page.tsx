@@ -1242,6 +1242,11 @@ export function MainApp({
       }
       return;
     }
+    if (selectedConversationId !== null) {
+      // A user selection (or other state sync) already picked a conversation; avoid
+      // overriding it just because the URL currently lacks an ID.
+      return;
+    }
     if (conversations.length === 0) {
       if (selectedConversationId !== null) {
         setSelectedConversationId(null);
