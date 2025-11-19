@@ -727,9 +727,11 @@ function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
 export function MainApp({
   initialPrimaryView = "chat",
   mode = "default",
+  routeConversationId = null,
 }: {
   initialPrimaryView?: PrimaryView;
   mode?: ExperienceMode;
+  routeConversationId?: string | null;
 }) {
   // ------------------------------------------------------------
   // STATE
@@ -758,9 +760,13 @@ export function MainApp({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null
   );
+  const conversationIdFromRoute =
+    typeof routeConversationId === "string" && routeConversationId.trim().length > 0
+      ? routeConversationId.trim()
+      : null;
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | null
-  >(null);
+  >(conversationIdFromRoute);
 
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
@@ -796,6 +802,7 @@ export function MainApp({
   const codexLandingScrollPositionRef = useRef(0);
   const isAgentsView = initialPrimaryView === "agents";
   const isCodexMode = mode === "codex";
+  const isMainChatExperience = !isAgentsView && !isCodexMode;
   const allowProjectSections = !isCodexMode;
   const showAgentsCatalog = !isCodexMode && isAgentsView;
   const defaultAgentId = isCodexMode ? CODEX_AGENT_ID : DEFAULT_AGENT_ID;
@@ -911,11 +918,17 @@ export function MainApp({
     }
   }, [allConversations, filterConversationsForMode, isCodexMode]);
 
-  const loadConversationsFromSupabase = useCallback(async () => {
+  const loadConversationsForUser = useCallback(async (userId: string) => {
+    if (!userId) {
+      return [] as ConversationMeta[];
+    }
     try {
-      const response = await fetch("/api/conversations", {
-        cache: "no-store",
-      });
+      const response = await fetch(
+        `/api/conversations?userId=${encodeURIComponent(userId)}`,
+        {
+          cache: "no-store",
+        }
+      );
 
       if (!response.ok) {
         console.warn("Failed to load conversations", {
@@ -1114,6 +1127,29 @@ export function MainApp({
     }
   }, [isCodexMode]);
 
+  const navigateToConversation = useCallback(
+    (conversationId: string) => {
+      if (!isMainChatExperience) {
+        return;
+      }
+      if (conversationIdFromRoute === conversationId) {
+        return;
+      }
+      router.push(`/c/${encodeURIComponent(conversationId)}`);
+    },
+    [conversationIdFromRoute, isMainChatExperience, router]
+  );
+
+  const navigateToMainChatHome = useCallback(() => {
+    if (!isMainChatExperience) {
+      return;
+    }
+    if (!conversationIdFromRoute) {
+      return;
+    }
+    router.push("/");
+  }, [conversationIdFromRoute, isMainChatExperience, router]);
+
   // ------------------------------------------------------------
   // INITIAL LOAD: projects + conversations
   // ------------------------------------------------------------
@@ -1135,34 +1171,11 @@ export function MainApp({
           setSelectedProjectId(null);
         }
 
-        const loadedConversations = await loadConversationsFromSupabase();
+        const loadedConversations = await loadConversationsForUser(TEST_USER_ID);
         if (cancelled) {
           return;
         }
         applyConversationState(loadedConversations);
-        const filtered = filterConversationsForMode(loadedConversations);
-
-        const storedId =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem(conversationStorageKey)
-            : null;
-        const preferred =
-          storedId && filtered.find((conversation) => conversation.id === storedId);
-        const newest = preferred || getNewestConversation(filtered);
-        if (newest) {
-          setSelectedConversationId(newest.id);
-          if (allowProjectSections) {
-            setSelectedProjectId(newest.project_id);
-          } else {
-            setSelectedProjectId(null);
-          }
-          setViewMode("chat");
-        } else {
-          setSelectedConversationId(null);
-          if (!allowProjectSections) {
-            setSelectedProjectId(null);
-          }
-        }
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to load conversations", error);
@@ -1176,9 +1189,77 @@ export function MainApp({
   }, [
     allowProjectSections,
     applyConversationState,
+    loadConversationsForUser,
+  ]);
+
+  useEffect(() => {
+    if (!conversationIdFromRoute) {
+      return;
+    }
+    if (selectedConversationId !== conversationIdFromRoute) {
+      setSelectedConversationId(conversationIdFromRoute);
+    }
+    setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
+    if (allowProjectSections) {
+      const target = conversations.find(
+        (conversation) => conversation.id === conversationIdFromRoute
+      );
+      setSelectedProjectId(target?.project_id ?? null);
+    } else {
+      setSelectedProjectId(null);
+    }
+    setViewMode("chat");
+  }, [
+    allowProjectSections,
+    conversationIdFromRoute,
+    conversations,
+    selectedConversationId,
+  ]);
+
+  useEffect(() => {
+    if (conversationIdFromRoute) {
+      return;
+    }
+    if (pendingNewChat) {
+      return;
+    }
+    if (conversations.length === 0) {
+      if (selectedConversationId !== null) {
+        setSelectedConversationId(null);
+      }
+      if (!allowProjectSections) {
+        setSelectedProjectId(null);
+      }
+      return;
+    }
+
+    const storedId =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(conversationStorageKey)
+        : null;
+    const preferred =
+      storedId && conversations.find((conversation) => conversation.id === storedId);
+    const newest = preferred || getNewestConversation(conversations);
+    if (!newest) {
+      return;
+    }
+    if (selectedConversationId !== newest.id) {
+      setSelectedConversationId(newest.id);
+    }
+    if (allowProjectSections) {
+      setSelectedProjectId(newest.project_id);
+    } else {
+      setSelectedProjectId(null);
+    }
+    setViewMode("chat");
+  }, [
+    allowProjectSections,
+    conversationIdFromRoute,
     conversationStorageKey,
-    filterConversationsForMode,
-    loadConversationsFromSupabase,
+    conversations,
+    pendingNewChat,
+    selectedConversationId,
   ]);
 
   // ------------------------------------------------------------
@@ -1186,10 +1267,12 @@ export function MainApp({
   // ------------------------------------------------------------
   const loadMessages = useCallback(
     async (
+      userId: string,
       conversationId: string,
       opts: { silent?: boolean; force?: boolean } = {}
     ) => {
       if (!conversationId) return;
+      if (!userId) return;
       if (!opts.silent) setIsLoadingMessages(true);
 
       type ApiMessageRow = {
@@ -1202,7 +1285,9 @@ export function MainApp({
       let rows: ApiMessageRow[] = [];
       try {
         const response = await fetch(
-          `/api/messages?conversationId=${encodeURIComponent(conversationId)}`,
+          `/api/messages?conversationId=${encodeURIComponent(
+            conversationId
+          )}&userId=${encodeURIComponent(userId)}`,
           { cache: "no-store" }
         );
         if (!response.ok) {
@@ -1235,7 +1320,7 @@ export function MainApp({
       }
 
       console.log(
-        `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId}`
+        `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId} userId=${userId}`
       );
       const nextMessages = rows.map((m) => {
         const rawMetadata = (m.metadata || {}) as MessageMetadata;
@@ -1358,8 +1443,8 @@ export function MainApp({
       setMessages([]);
     }
 
-    loadMessages(selectedConversationId);
-  }, [selectedConversationId, loadMessages]);
+    loadMessages(TEST_USER_ID, selectedConversationId);
+  }, [loadMessages, selectedConversationId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3074,9 +3159,10 @@ export function MainApp({
     }
     setPendingNewChat(false);
     setPendingNewChatProjectId(null);
+    navigateToConversation(id);
     const convo = conversations.find((c) => c.id === id);
     if (id === selectedConversationId) {
-      loadMessages(id, { force: true });
+      loadMessages(TEST_USER_ID, id, { force: true });
     } else {
       setSelectedConversationId(id);
     }
@@ -3102,9 +3188,9 @@ export function MainApp({
   };
 
   const refreshConversations = useCallback(async () => {
-    const loaded = await loadConversationsFromSupabase();
+    const loaded = await loadConversationsForUser(TEST_USER_ID);
     applyConversationState(loaded);
-  }, [applyConversationState, loadConversationsFromSupabase]);
+  }, [applyConversationState, loadConversationsForUser]);
 
   const persistMessageMetadata = useCallback(
     async (messageId: string, metadata: MessageMetadata) => {
@@ -3323,6 +3409,7 @@ type RetryOptions = {
           rememberCodexLandingScroll();
         }
         setSelectedConversationId(conv.id);
+        navigateToConversation(conv.id);
         if (allowProjectSections) {
           setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
         } else {
@@ -4112,6 +4199,7 @@ type RetryOptions = {
           rememberCodexLandingScroll();
         }
         setSelectedConversationId(conv.id);
+        navigateToConversation(conv.id);
         if (allowProjectSections) {
           setSelectedProjectId(conv.project_id ?? projectTarget ?? null);
         } else {
@@ -4459,6 +4547,7 @@ type RetryOptions = {
 
   function handleNewChat(global = false) {
     ensureChatRoute();
+    navigateToMainChatHome();
     if (pendingNewChat) {
       return;
     }
@@ -4537,9 +4626,11 @@ type RetryOptions = {
             setSelectedConversationId(fallback.id);
             setSelectedProjectId(fallback.project_id);
             setViewMode("chat");
+            navigateToConversation(fallback.id);
           } else {
             setSelectedConversationId(null);
             setMessages([]);
+            navigateToMainChatHome();
           }
         }
       }
@@ -4655,9 +4746,11 @@ type RetryOptions = {
             setSelectedConversationId(fallback.id);
             setSelectedProjectId(fallback.project_id);
             setViewMode("chat");
+            navigateToConversation(fallback.id);
           } else {
             setSelectedConversationId(null);
             setMessages([]);
+            navigateToMainChatHome();
           }
         }
       }
