@@ -198,6 +198,10 @@ const OTHER_MODEL_GROUPS: Array<{
 ];
 
 const MAX_IMAGE_ATTACHMENTS = 4;
+
+function ensureArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
 const MAX_IMAGE_SIZE_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_ATTACHMENTS = 6;
 const MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024;
@@ -2008,9 +2012,9 @@ export function MainApp({
               {messages.map((m, i) => {
                 const messageId = m.id ?? `msg-${i}`;
                 const isAssistant = m.role === "assistant";
-                const rawCitations = m.metadata?.citations ?? [];
+                const rawCitations = ensureArray<Source>(m.metadata?.citations);
                 const displayableSources = rawCitations.filter((source) =>
-                  Boolean(source?.url)
+                  typeof source?.url === "string" && source.url.trim().length > 0
                 );
                 const usedWebSearchFlag = Boolean(
                   m.usedWebSearch || m.metadata?.usedWebSearch
@@ -2018,7 +2022,9 @@ export function MainApp({
                 const showSourcesButton =
                   isAssistant &&
                   (usedWebSearchFlag || displayableSources.length > 0);
-                const generatedImages = m.metadata?.generatedImages ?? [];
+                const generatedImages = ensureArray<GeneratedImageResult>(
+                  m.metadata?.generatedImages
+                );
                 const isImageMessage =
                   m.metadata?.generationType === "image" &&
                   generatedImages.length > 0;
@@ -2027,8 +2033,14 @@ export function MainApp({
                     ? IMAGE_MODEL_LABELS[m.usedModel as ImageModelKey] ||
                       m.usedModel
                     : null;
-                const sourceChips = (m.metadata?.sources ?? []).filter(
-                  (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
+                const sourceChips = ensureArray<SourceChip>(
+                  m.metadata?.sources
+                ).filter(
+                  (chip) =>
+                    typeof chip?.url === "string" &&
+                    chip.url.trim().length > 0 &&
+                    typeof chip?.domain === "string" &&
+                    chip.domain.trim().length > 0
                 );
                 const showSourceChips = sourceChips.length > 0;
                 const isStreamingAssistantMessage =
@@ -2057,6 +2069,12 @@ export function MainApp({
                   "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
                 const userWrapperClass =
                   "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
+                const assistantAttachments = ensureArray<ImageAttachment>(
+                  m.metadata?.attachments
+                );
+                const assistantFiles = ensureArray<FileAttachment>(
+                  m.metadata?.files
+                );
 
                 const assistantContentWrapperClass = isCodexMode
                   ? "space-y-4 text-[15px] leading-relaxed text-white/90"
@@ -2178,10 +2196,9 @@ export function MainApp({
                             </div>
                           )}
 
-                          {m.metadata?.attachments &&
-                            m.metadata.attachments.length > 0 && (
-                              <div className="grid grid-cols-2 gap-3">
-                                {m.metadata.attachments.map((attachment) => (
+                          {assistantAttachments.length > 0 && (
+                            <div className="grid grid-cols-2 gap-3">
+                              {assistantAttachments.map((attachment) => (
                                   <div
                                     key={`${attachment.id}-attached`}
                                     className="overflow-hidden rounded-xl border border-white/10"
@@ -2199,9 +2216,9 @@ export function MainApp({
                               </div>
                             )}
 
-                          {m.metadata?.files && m.metadata.files.length > 0 && (
+                          {assistantFiles.length > 0 && (
                             <div className="space-y-2">
-                              {m.metadata.files.map((file) => (
+                              {assistantFiles.map((file) => (
                                 <div
                                   key={`${file.id}-file-row`}
                                   className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
@@ -3465,14 +3482,21 @@ type RetryOptions = {
                           typeof meta.usedWebSearch === "boolean"
                             ? meta.usedWebSearch
                             : msg.metadata?.usedWebSearch,
-                        searchRecords:
-                          meta.searchRecords ??
-                          msg.metadata?.searchRecords ??
-                          [],
-                        sources:
-                          meta.sources ?? msg.metadata?.sources ?? [],
-                        citations:
-                          meta.citations ?? msg.metadata?.citations ?? [],
+                        searchRecords: Array.isArray(meta.searchRecords)
+                          ? meta.searchRecords
+                          : Array.isArray(msg.metadata?.searchRecords)
+                            ? msg.metadata?.searchRecords
+                            : [],
+                        sources: Array.isArray(meta.sources)
+                          ? meta.sources
+                          : Array.isArray(msg.metadata?.sources)
+                            ? msg.metadata?.sources
+                            : [],
+                        citations: Array.isArray(meta.citations)
+                          ? meta.citations
+                          : Array.isArray(msg.metadata?.citations)
+                            ? msg.metadata?.citations
+                            : [],
                         vectorStoreIds:
                           meta.vectorStoreIds ??
                           msg.metadata?.vectorStoreIds,
@@ -5489,9 +5513,13 @@ type RetryOptions = {
                   {messages.map((m, i) => {
                     const messageId = m.id ?? `msg-${i}`;
                     const isAssistant = m.role === "assistant";
-                    const rawCitations = m.metadata?.citations ?? [];
+                    const rawCitations = ensureArray<Source>(
+                      m.metadata?.citations
+                    );
                     const displayableSources = rawCitations.filter(
-                      (source) => Boolean(source?.url)
+                      (source) =>
+                        typeof source?.url === "string" &&
+                        source.url.trim().length > 0
                     );
                     const usedWebSearchFlag = Boolean(
                       m.usedWebSearch || m.metadata?.usedWebSearch
@@ -5499,7 +5527,9 @@ type RetryOptions = {
                     const showSourcesButton =
                       isAssistant &&
                       (usedWebSearchFlag || displayableSources.length > 0);
-                    const generatedImages = m.metadata?.generatedImages ?? [];
+                    const generatedImages = ensureArray<GeneratedImageResult>(
+                      m.metadata?.generatedImages
+                    );
                     const isImageMessage =
                       m.metadata?.generationType === "image" &&
                       generatedImages.length > 0;
@@ -5509,8 +5539,14 @@ type RetryOptions = {
                             m.usedModel as ImageModelKey
                           ] || m.usedModel
                         : null;
-                    const sourceChips = (m.metadata?.sources ?? []).filter(
-                      (chip) => Boolean(chip?.url) && Boolean(chip?.domain)
+                    const sourceChips = ensureArray<SourceChip>(
+                      m.metadata?.sources
+                    ).filter(
+                      (chip) =>
+                        typeof chip?.url === "string" &&
+                        chip.url.trim().length > 0 &&
+                        typeof chip?.domain === "string" &&
+                        chip.domain.trim().length > 0
                     );
                     const showSourceChips = sourceChips.length > 0;
                     const isStreamingAssistantMessage =
