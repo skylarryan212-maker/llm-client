@@ -29,8 +29,14 @@ import {
   type AgentId,
 } from "@/lib/agents";
 import type {
+  ChatMessage,
   FileAttachment,
+  GeneratedImageResult,
   ImageAttachment,
+  ImageModelKey,
+  MessageMetadata,
+  ModelMode,
+  SearchRecord,
   Source,
   SourceChip,
 } from "@/lib/chatTypes";
@@ -45,91 +51,11 @@ import type { Project } from "@/lib/projects";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AgentsCatalog } from "@/components/agents/AgentsCatalog";
 
-type SearchSource = {
-  title: string;
-  url: string;
-  domain: string;
-  snippet: string;
-  published?: string | null;
-  sourceType?: string;
-  confidenceScore?: number;
-};
-
-type SearchRecord = {
-  query: string;
-  summary: string;
-  rankedSources: SearchSource[];
-  rawResults?: SearchSource[];
-  fromCache?: boolean;
-};
-
-type MessageMetadata = {
-  usedModel?: string;
-  usedModelMode?: ModelMode;
-  usedModelFamily?: ModelFamily;
-  requestedModelMode?: ModelMode;
-  requestedModelFamily?: ModelFamily;
-  speedMode?: SpeedMode;
-  reasoningEffort?: ReasoningEffort;
-  usedWebSearch?: boolean;
-  searchRecords?: SearchRecord[];
-  searchedDomains?: string[];
-  thoughtDurationSeconds?: number;
-  thoughtDurationLabel?: string;
-  thinkingDurationMs?: number;
-  thinking?: {
-    effort?: ReasoningEffort | null;
-    durationSeconds?: number;
-    durationMs?: number;
-  };
-  sources?: SourceChip[];
-  citations?: Source[];
-  files?: FileAttachment[];
-  vectorStoreIds?: string[];
-  attachments?: ImageAttachment[];
-  generationType?: "text" | "image";
-  generatedImages?: GeneratedImageResult[];
-  imagePrompt?: string;
-  imageModelLabel?: string;
-  searchedSiteLabel?: string;
-};
-
-type ChatMessage = {
-  id?: string;
-  persistedId?: string;
-  role: "user" | "assistant";
-  content: string;
-  attachments?: ImageAttachment[];
-  files?: FileAttachment[];
-  usedModel?: string;
-  usedModelMode?: ModelMode;
-  usedModelFamily?: ModelFamily;
-  requestedModelFamily?: ModelFamily;
-  speedMode?: SpeedMode;
-  reasoningEffort?: ReasoningEffort;
-  usedWebSearch?: boolean;
-  searchRecords?: SearchRecord[];
-  metadata?: MessageMetadata;
-  thoughtDurationSeconds?: number;
-  thoughtDurationLabel?: string;
-};
-
-type ImageModelKey = "gpt-image-1" | "gpt-image-1-mini";
-
-type GeneratedImageResult = {
-  id: string;
-  dataUrl: string;
-  model: ImageModelKey;
-  prompt?: string;
-};
-
 const conversationMessageCache = new Map<string, ChatMessage[]>();
 
 type ViewMode = "chat" | "project";
 type PrimaryView = "chat" | "agents";
 type ExperienceMode = "default" | "codex";
-
-type ModelMode = "auto" | "nano" | "mini" | "full";
 
 const LAST_CONVERSATION_STORAGE_KEYS: Record<ExperienceMode, string> = {
   default: "chat:lastConversationId",
@@ -743,7 +669,23 @@ export function MainApp({
   // STATE
   // ------------------------------------------------------------
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const {
+    projects,
+    setProjects,
+    conversations: storedConversations,
+    setConversations: setStoredConversations,
+    refreshConversations: refreshStoredConversations,
+    selectedProjectId,
+    setSelectedProjectId,
+    selectedConversationId,
+    setSelectedConversationId,
+    pendingNewChat,
+    setPendingNewChat,
+    pendingNewChatProjectId,
+    setPendingNewChatProjectId,
+    messages,
+    setMessages,
+  } = useConversationsStore();
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [modelFamily, setModelFamily] = useState<ModelFamily>("gpt-5.1");
@@ -760,16 +702,6 @@ export function MainApp({
   const [streamingConversationId, setStreamingConversationId] =
     useState<string | null>(null);
 
-  const {
-    projects,
-    setProjects,
-    conversations: storedConversations,
-    setConversations: setStoredConversations,
-    refreshConversations: refreshStoredConversations,
-  } = useConversationsStore();
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    null
-  );
   const pathname = usePathname();
   const routeConversationIdFromPath = useMemo(() => {
     if (!pathname) {
@@ -795,16 +727,8 @@ export function MainApp({
   const conversationIdFromRoute = isNewConversationRoute
     ? null
     : rawRouteConversationId;
-  const [selectedConversationId, setSelectedConversationId] = useState<
-    string | null
-  >(conversationIdFromRoute);
-
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
-  const [pendingNewChat, setPendingNewChat] = useState(isNewConversationRoute);
-  const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
-    string | null
-  >(null);
   const [codexActiveTab, setCodexActiveTab] = useState<
     "tasks" | "code-reviews" | "archive"
   >("tasks");
@@ -1061,7 +985,7 @@ export function MainApp({
   });
   const longThinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
-  const conversationHistoryRef = useRef(new Map<string, ChatMessage[]>());
+  const conversationHistoryRef = useRef<Map<string, ChatMessage[]>>(new Map());
 
   const persistConversationHistory = useCallback(() => {
     if (typeof window === "undefined") return;

@@ -1,7 +1,14 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { TEST_USER_ID } from "@/lib/appConfig";
 import {
@@ -9,20 +16,52 @@ import {
   type ConversationMeta,
 } from "@/lib/conversations";
 import type { Project } from "@/lib/projects";
+import type { ChatMessage } from "@/lib/chatTypes";
 
-const ConversationsContext = createContext<ConversationsContextValue | null>(null);
+type MessagesByConversationId = Record<string, ChatMessage[]>;
 
 type ConversationsContextValue = {
   conversations: ConversationMeta[];
-  setConversations: React.Dispatch<React.SetStateAction<ConversationMeta[]>>;
+  setConversations: Dispatch<SetStateAction<ConversationMeta[]>>;
   projects: Project[];
-  setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
+  setProjects: Dispatch<SetStateAction<Project[]>>;
   refreshConversations: () => Promise<void>;
+  selectedConversationId: string | null;
+  setSelectedConversationId: Dispatch<SetStateAction<string | null>>;
+  selectedProjectId: string | null;
+  setSelectedProjectId: Dispatch<SetStateAction<string | null>>;
+  pendingNewChat: boolean;
+  setPendingNewChat: Dispatch<SetStateAction<boolean>>;
+  pendingNewChatProjectId: string | null;
+  setPendingNewChatProjectId: Dispatch<SetStateAction<string | null>>;
+  messages: ChatMessage[];
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
+  setMessagesForConversation: (
+    conversationId: string,
+    updater: SetStateAction<ChatMessage[]>
+  ) => void;
+  appendMessages: (conversationId: string, newMessages: ChatMessage[]) => void;
+  messagesByConversationId: MessagesByConversationId;
 };
+
+const ConversationsContext = createContext<ConversationsContextValue | null>(null);
+
 
 export function ConversationsProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(
+    null
+  );
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [pendingNewChat, setPendingNewChat] = useState(false);
+  const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
+    string | null
+  >(null);
+  const [messagesByConversationId, setMessagesByConversationId] = useState<
+    MessagesByConversationId
+  >({});
+  const [draftMessages, setDraftMessages] = useState<ChatMessage[]>([]);
 
   const loadConversationsForUser = useCallback(async (userId: string) => {
     if (!userId) {
@@ -77,6 +116,49 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const messages = useMemo<ChatMessage[]>(() => {
+    if (!selectedConversationId) {
+      return draftMessages;
+    }
+    return messagesByConversationId[selectedConversationId] ?? [];
+  }, [draftMessages, messagesByConversationId, selectedConversationId]);
+
+  const setMessagesForConversation = useCallback(
+    (conversationId: string, updater: React.SetStateAction<ChatMessage[]>) => {
+      setMessagesByConversationId((prev) => {
+        const current = prev[conversationId] ?? [];
+        const nextValue = typeof updater === "function" ? (updater as (value: ChatMessage[]) => ChatMessage[])(current) : updater;
+        if (nextValue === current) {
+          return prev;
+        }
+        return { ...prev, [conversationId]: nextValue };
+      });
+    },
+    []
+  );
+
+  const setMessages = useCallback<Dispatch<SetStateAction<ChatMessage[]>>>(
+    (updater) => {
+      if (selectedConversationId) {
+        setMessagesForConversation(selectedConversationId, updater);
+        return;
+      }
+      setDraftMessages((prev) =>
+        typeof updater === "function"
+          ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
+          : updater
+      );
+    },
+    [selectedConversationId, setMessagesForConversation]
+  );
+
+  const appendMessages = useCallback(
+    (conversationId: string, newMessages: ChatMessage[]) => {
+      setMessagesForConversation(conversationId, (prev) => [...prev, ...newMessages]);
+    },
+    [setMessagesForConversation]
+  );
+
   const refreshConversations = useCallback(async () => {
     const loadedConversations = await loadConversationsForUser(TEST_USER_ID);
     setConversations(loadedConversations);
@@ -112,6 +194,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     };
   }, [loadConversationsForUser, loadProjectsForUser]);
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const value = useMemo<ConversationsContextValue>(
     () => ({
       conversations,
@@ -119,8 +202,34 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
       projects,
       setProjects,
       refreshConversations,
+      selectedConversationId,
+      setSelectedConversationId,
+      selectedProjectId,
+      setSelectedProjectId,
+      pendingNewChat,
+      setPendingNewChat,
+      pendingNewChatProjectId,
+      setPendingNewChatProjectId,
+      messages,
+      setMessages,
+      setMessagesForConversation,
+      appendMessages,
+      messagesByConversationId,
     }),
-    [conversations, projects, refreshConversations]
+    [
+      appendMessages,
+      conversations,
+      messages,
+      messagesByConversationId,
+      pendingNewChat,
+      pendingNewChatProjectId,
+      projects,
+      refreshConversations,
+      selectedConversationId,
+      selectedProjectId,
+      setMessages,
+      setMessagesForConversation,
+    ]
   );
 
   return (
