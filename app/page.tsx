@@ -1102,33 +1102,6 @@ export function MainApp({
   }, [debugPush, isMainChatExperience, rawRouteConversationId]);
 
   useEffect(() => {
-    if (!conversationIdFromRoute) {
-      return;
-    }
-    if (selectedConversationId !== conversationIdFromRoute) {
-      setSelectedConversationId(conversationIdFromRoute);
-    }
-    setPendingNewChat(false);
-    setPendingNewChatProjectId(null);
-    if (allowProjectSections) {
-      const target = conversations.find(
-        (conversation) => conversation.id === conversationIdFromRoute
-      );
-      setSelectedProjectId(target?.project_id ?? null);
-    } else {
-      setSelectedProjectId(null);
-    }
-    setViewMode("chat");
-    loadMessages(TEST_USER_ID, conversationIdFromRoute, { force: true });
-  }, [
-    allowProjectSections,
-    conversationIdFromRoute,
-    conversations,
-    loadMessages,
-    selectedConversationId,
-  ]);
-
-  useEffect(() => {
     if (!isNewConversationRoute) {
       return;
     }
@@ -1362,6 +1335,33 @@ export function MainApp({
     },
     [selectedConversationId]
   );
+
+  useEffect(() => {
+    if (!conversationIdFromRoute) {
+      return;
+    }
+    if (selectedConversationId !== conversationIdFromRoute) {
+      setSelectedConversationId(conversationIdFromRoute);
+    }
+    setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
+    if (allowProjectSections) {
+      const target = conversations.find(
+        (conversation) => conversation.id === conversationIdFromRoute
+      );
+      setSelectedProjectId(target?.project_id ?? null);
+    } else {
+      setSelectedProjectId(null);
+    }
+    setViewMode("chat");
+    loadMessages(TEST_USER_ID, conversationIdFromRoute, { force: true });
+  }, [
+    allowProjectSections,
+    conversationIdFromRoute,
+    conversations,
+    loadMessages,
+    selectedConversationId,
+  ]);
 
   useEffect(() => {
     if (!selectedConversationId) {
