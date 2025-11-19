@@ -9,7 +9,7 @@ export type ConversationMeta = {
   metadata?: Record<string, unknown> | null;
 };
 
-type ConversationRow = {
+export type ConversationRow = {
   id?: unknown;
   title?: unknown;
   project_id?: unknown;
@@ -63,32 +63,6 @@ type CreateConversationArgs = {
   metadata?: Record<string, unknown> | null;
 };
 
-const LOCAL_ONLY_FLAG_KEY = "_localOnly";
-
-const buildLocalConversationRecord = (
-  title: string,
-  projectId: string | null,
-  metadata?: Record<string, unknown> | null
-): ConversationMeta => {
-  const fallbackId =
-    typeof globalThis !== "undefined" &&
-    globalThis.crypto &&
-    typeof globalThis.crypto.randomUUID === "function"
-      ? globalThis.crypto.randomUUID()
-      : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const metadataWithFlag: Record<string, unknown> = {
-    ...(metadata ?? {}),
-    [LOCAL_ONLY_FLAG_KEY]: true,
-  };
-  return {
-    id: fallbackId,
-    title,
-    project_id: projectId,
-    created_at: new Date().toISOString(),
-    metadata: metadataWithFlag,
-  };
-};
-
 export async function createConversationRecord({
   title,
   projectId,
@@ -104,25 +78,55 @@ export async function createConversationRecord({
     ? { ...basePayload, metadata }
     : basePayload;
   const selectColumns = "id, title, project_id, created_at, metadata";
+  const selectColumnsWithoutMetadata = "id, title, project_id, created_at";
 
-  const insertConversation = async (body: Record<string, unknown>) =>
-    supabase.from("conversations").insert(body).select(selectColumns).single();
+  const insertConversation = async (
+    body: Record<string, unknown>,
+    selectClause: string
+  ) =>
+    supabase.from("conversations").insert(body).select(selectClause).single();
+
+  const isMissingMetadataColumnError = (error: unknown) => {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+    const pgError = error as { code?: string; message?: string; details?: string };
+    if (pgError.code && pgError.code.toString() === "42703") {
+      return true;
+    }
+    const combined = `${pgError.message ?? ""} ${pgError.details ?? ""}`
+      .toLowerCase()
+      .trim();
+    return combined.includes("metadata") && combined.includes("column");
+  };
+  const mentionsMetadata = (error: unknown) => {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+    const pgError = error as { message?: string; details?: string };
+    const combined = `${pgError.message ?? ""} ${pgError.details ?? ""}`
+      .toLowerCase()
+      .trim();
+    return combined.includes("metadata");
+  };
 
   try {
-    let { data, error } = await insertConversation(payload);
+    let selectClause = selectColumns;
+    let { data, error } = await insertConversation(payload, selectClause);
 
-    if (error && hasMetadata) {
-      const message = String(error.message || "").toLowerCase();
-      const mentionsMetadata = message.includes("metadata");
-      if (mentionsMetadata) {
-        console.warn(
-          "Retrying conversation insert without metadata column support",
-          error
-        );
-        const fallback = await insertConversation(basePayload);
-        data = fallback.data;
-        error = fallback.error;
-      }
+    const shouldRetryWithoutMetadata =
+      isMissingMetadataColumnError(error) ||
+      (hasMetadata && mentionsMetadata(error));
+
+    if (error && shouldRetryWithoutMetadata) {
+      console.warn(
+        "Retrying conversation insert without metadata column support",
+        error
+      );
+      selectClause = selectColumnsWithoutMetadata;
+      const fallback = await insertConversation(basePayload, selectClause);
+      data = fallback.data;
+      error = fallback.error;
     }
 
     if (error || !data) {
@@ -137,6 +141,10 @@ export async function createConversationRecord({
     return normalized;
   } catch (error) {
     console.error("[CONVERSATION_CREATE] Failed to insert conversation", error);
-    return buildLocalConversationRecord(title, projectId, metadata);
+    const normalizedError =
+      error instanceof Error
+        ? error
+        : new Error("Conversation not created");
+    throw normalizedError;
   }
 }
