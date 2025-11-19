@@ -283,6 +283,7 @@ export default function Home() {
   const router = useRouter();
 
   useEffect(() => {
+    console.log("[HOME] redirecting / -> /c/new");
     router.replace(`/c/${NEW_CHAT_DRAFT_ID}`);
   }, [router]);
 
@@ -810,6 +811,13 @@ export function MainApp({
   const transcriptionAbortRef = useRef<AbortController | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const router = useRouter();
+  const debugPush = useCallback(
+    (url: string) => {
+      console.log("[ROUTER PUSH]", url);
+      router.push(url);
+    },
+    [router]
+  );
   const codexLandingScrollRef = useRef<HTMLDivElement | null>(null);
   const codexLandingScrollPositionRef = useRef(0);
   const isAgentsView = initialPrimaryView === "agents";
@@ -843,6 +851,15 @@ export function MainApp({
   const [headerModelMenuOpen, setHeaderModelMenuOpen] = useState(false);
   const [otherModelsMenuOpen, setOtherModelsMenuOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  useEffect(() => {
+    console.log("[ROUTE] conversationIdFromRoute:", conversationIdFromRoute);
+  }, [conversationIdFromRoute]);
+  useEffect(() => {
+    console.log(
+      "[STATE] selectedConversationId updated:",
+      selectedConversationId
+    );
+  }, [selectedConversationId]);
   const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus | null>(
     null
   );
@@ -1060,7 +1077,6 @@ export function MainApp({
   const longThinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMetadataPersistRef = useRef(new Map<string, MessageMetadata>());
   const conversationHistoryRef = useRef(new Map<string, ChatMessage[]>());
-  const hasAutoOpenedMainChatRef = useRef(false);
 
   const persistConversationHistory = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1142,8 +1158,9 @@ export function MainApp({
 
   const navigateToConversation = useCallback(
     (conversationId: string) => {
+      console.log("[NAVIGATE] navigateToConversation(", conversationId, ")");
       if (isAgentsView) {
-        router.push(`/c/${encodeURIComponent(conversationId)}`);
+        debugPush(`/c/${encodeURIComponent(conversationId)}`);
         return;
       }
       if (!isMainChatExperience) {
@@ -1152,9 +1169,9 @@ export function MainApp({
       if (rawRouteConversationId === conversationId) {
         return;
       }
-      router.push(`/c/${encodeURIComponent(conversationId)}`);
+      debugPush(`/c/${encodeURIComponent(conversationId)}`);
     },
-    [isAgentsView, isMainChatExperience, rawRouteConversationId, router]
+    [debugPush, isAgentsView, isMainChatExperience, rawRouteConversationId]
   );
 
   const navigateToMainChatHome = useCallback(() => {
@@ -1164,8 +1181,8 @@ export function MainApp({
     if (!rawRouteConversationId) {
       return;
     }
-    router.push("/");
-  }, [isMainChatExperience, rawRouteConversationId, router]);
+    debugPush("/");
+  }, [debugPush, isMainChatExperience, rawRouteConversationId]);
 
   // ------------------------------------------------------------
   // INITIAL LOAD: projects + conversations
@@ -1226,31 +1243,35 @@ export function MainApp({
     } else {
       setSelectedProjectId(null);
     }
-    if (isMainChatExperience) {
-      hasAutoOpenedMainChatRef.current = true;
-    }
     setViewMode("chat");
   }, [
     allowProjectSections,
     conversationIdFromRoute,
     conversations,
-    isMainChatExperience,
     selectedConversationId,
   ]);
 
   useEffect(() => {
+    console.log("[AUTO-OPEN] effect fired, mode:", mode);
+    const logSkip = (reason: string) => {
+      console.log("[AUTO-OPEN] skipped because:", reason);
+    };
+
     if (conversationIdFromRoute) {
+      logSkip("conversationId present in route");
       return;
     }
     if (pendingNewChat) {
       if (!allowProjectSections && selectedProjectId !== null) {
         setSelectedProjectId(null);
       }
+      logSkip("pending new chat already active");
       return;
     }
     if (selectedConversationId !== null) {
       // A user selection (or other state sync) already picked a conversation; avoid
       // overriding it just because the URL currently lacks an ID.
+      logSkip("selectedConversationId already chosen");
       return;
     }
     if (conversations.length === 0) {
@@ -1260,6 +1281,7 @@ export function MainApp({
       if (!allowProjectSections && selectedProjectId !== null) {
         setSelectedProjectId(null);
       }
+      logSkip("no conversations available");
       return;
     }
 
@@ -1267,44 +1289,24 @@ export function MainApp({
       if (!allowProjectSections && selectedProjectId !== null) {
         setSelectedProjectId(null);
       }
+      logSkip("codex mode handles routing separately");
       return;
     }
 
     if (!isMainChatExperience) {
+      logSkip("not in main chat experience");
       return;
     }
 
-    if (hasAutoOpenedMainChatRef.current) {
-      return;
-    }
-
-    const storedId =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem(conversationStorageKey)
-        : null;
-    const preferred =
-      storedId && conversations.find((conversation) => conversation.id === storedId);
-    const newest = preferred || getNewestConversation(conversations);
-    if (!newest) {
-      return;
-    }
-
-    hasAutoOpenedMainChatRef.current = true;
-    if (selectedConversationId !== newest.id) {
-      setSelectedConversationId(newest.id);
-    }
-    const targetProjectId = allowProjectSections ? newest.project_id ?? null : null;
-    if (selectedProjectId !== targetProjectId) {
-      setSelectedProjectId(targetProjectId);
-    }
-    setViewMode("chat");
+    console.warn("[BLOCKED] Attempted auto-route in main chat mode — blocked.");
+    logSkip("main chat auto-navigation disabled");
   }, [
     allowProjectSections,
-    conversationIdFromRoute,
-    conversationStorageKey,
     conversations,
+    conversationIdFromRoute,
     isCodexMode,
     isMainChatExperience,
+    mode,
     pendingNewChat,
     selectedConversationId,
     selectedProjectId,
@@ -4593,18 +4595,18 @@ type RetryOptions = {
         return;
       }
       if (targetPath) {
-        router.push(targetPath);
+        debugPush(targetPath);
         return;
       }
-      router.push("/");
+      debugPush("/");
     },
-    [isAgentsView, router]
+    [debugPush, isAgentsView]
   );
 
   function handleNewChat(global = false) {
     ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
     if (!isAgentsView && !isCodexMode && rawRouteConversationId !== NEW_CHAT_DRAFT_ID) {
-      router.push(`/c/${NEW_CHAT_DRAFT_ID}`);
+      debugPush(`/c/${NEW_CHAT_DRAFT_ID}`);
     }
     if (pendingNewChat) {
       return;
@@ -4859,7 +4861,7 @@ type RetryOptions = {
         <button
           onClick={() => {
             if (!showAgentsCatalog) {
-              router.push("/agents");
+              debugPush("/agents");
             }
           }}
           className={`mt-3 flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
@@ -5211,7 +5213,7 @@ type RetryOptions = {
         <aside className="hidden w-64 flex-col border-r border-white/5 bg-[#050509] p-4 lg:flex">
           <button
             type="button"
-            onClick={() => router.push("/agents")}
+            onClick={() => debugPush("/agents")}
             className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-white/80 transition hover:bg-white/10"
           >
             <span className="flex h-4 w-4 items-center justify-center">
@@ -5243,7 +5245,7 @@ type RetryOptions = {
             <div className="w-full lg:hidden">
               <button
                 type="button"
-                onClick={() => router.push("/agents")}
+                onClick={() => debugPush("/agents")}
                 className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 px-4 py-2 text-sm text-white/80 transition hover:text-white"
               >
                 <AgentsToolIcon className="h-4 w-4" />
@@ -5461,7 +5463,7 @@ type RetryOptions = {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => router.push("/agents")}
+                  onClick={() => debugPush("/agents")}
                   className="text-sm font-semibold text-white/80 transition hover:text-white"
                 >
                   Agents
