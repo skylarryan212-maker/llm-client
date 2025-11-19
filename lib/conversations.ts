@@ -9,6 +9,54 @@ export type ConversationMeta = {
   metadata?: Record<string, unknown> | null;
 };
 
+type ConversationRow = {
+  id?: unknown;
+  title?: unknown;
+  project_id?: unknown;
+  created_at?: unknown;
+  metadata?: unknown;
+};
+
+export function normalizeConversationMeta(
+  raw: ConversationRow | null | undefined
+): ConversationMeta | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const { id, title, project_id, created_at, metadata } = raw;
+  if (typeof id !== "string") {
+    return null;
+  }
+
+  const normalizedTitle =
+    typeof title === "string" ? title : title === null ? null : null;
+
+  const normalizedProjectId =
+    typeof project_id === "string"
+      ? project_id
+      : project_id === null
+        ? null
+        : null;
+
+  const normalizedMetadata =
+    metadata && typeof metadata === "object"
+      ? (metadata as Record<string, unknown>)
+      : metadata === null
+        ? null
+        : null;
+
+  const normalizedCreatedAt =
+    typeof created_at === "string" ? created_at : undefined;
+
+  return {
+    id,
+    title: normalizedTitle,
+    project_id: normalizedProjectId,
+    created_at: normalizedCreatedAt,
+    metadata: normalizedMetadata,
+  };
+}
+
 type CreateConversationArgs = {
   title: string;
   projectId: string | null;
@@ -81,10 +129,12 @@ export async function createConversationRecord({
       throw error || new Error("Conversation not created");
     }
 
-    return {
-      ...(data as ConversationMeta),
-      metadata: (data as ConversationMeta).metadata ?? null,
-    };
+    const normalized = normalizeConversationMeta(data as ConversationRow);
+    if (!normalized) {
+      throw new Error("Conversation not created");
+    }
+
+    return normalized;
   } catch (error) {
     console.error("[CONVERSATION_CREATE] Failed to insert conversation", error);
     return buildLocalConversationRecord(title, projectId, metadata);

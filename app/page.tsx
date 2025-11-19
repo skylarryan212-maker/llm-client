@@ -20,6 +20,7 @@ import { TEST_USER_ID } from "@/lib/appConfig";
 import {
   createConversationRecord,
   type ConversationMeta,
+  normalizeConversationMeta,
 } from "@/lib/conversations";
 import {
   CODEX_AGENT_ID,
@@ -870,6 +871,30 @@ export function MainApp({
     [isCodexMode]
   );
 
+  const loadConversationsFromSupabase = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("id, title, project_id, created_at, metadata")
+        .eq("user_id", TEST_USER_ID)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.warn("Failed to load conversations", error);
+        return [] as ConversationMeta[];
+      }
+
+      const rows = Array.isArray(data) ? data : [];
+      const normalized = rows
+        .map((row) => normalizeConversationMeta(row))
+        .filter((row): row is ConversationMeta => Boolean(row));
+      return normalized;
+    } catch (error) {
+      console.warn("Failed to load conversations", error);
+      return [] as ConversationMeta[];
+    }
+  }, []);
+
   const getConversationAgentId = useCallback(
     (conversationId: string | null) => {
       if (!conversationId) {
@@ -1047,6 +1072,8 @@ export function MainApp({
   // INITIAL LOAD: projects + conversations
   // ------------------------------------------------------------
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
       try {
         if (allowProjectSections) {
@@ -1054,20 +1081,19 @@ export function MainApp({
             .from("projects")
             .select("id, name, created_at")
             .eq("user_id", TEST_USER_ID);
-          setProjects((projData || []) as Project[]);
-        } else {
+          if (!cancelled) {
+            setProjects((projData || []) as Project[]);
+          }
+        } else if (!cancelled) {
           setProjects([]);
           setSelectedProjectId(null);
         }
 
-        const { data: convData } = await supabase
-          .from("conversations")
-          .select("id, title, project_id, created_at, metadata")
-          .eq("user_id", TEST_USER_ID);
-
-        const filtered = filterConversationsForMode(
-          (convData || []) as ConversationMeta[]
-        );
+        const loadedConversations = await loadConversationsFromSupabase();
+        if (cancelled) {
+          return;
+        }
+        const filtered = filterConversationsForMode(loadedConversations);
         setConversations(filtered);
 
         const storedId =
@@ -1092,13 +1118,20 @@ export function MainApp({
           }
         }
       } catch (error) {
-        console.error("Failed to load conversations", error);
+        if (!cancelled) {
+          console.error("Failed to load conversations", error);
+        }
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     allowProjectSections,
     conversationStorageKey,
     filterConversationsForMode,
+    loadConversationsFromSupabase,
   ]);
 
   // ------------------------------------------------------------
@@ -3020,17 +3053,9 @@ export function MainApp({
   };
 
   const refreshConversations = useCallback(async () => {
-    const { data } = await supabase
-      .from("conversations")
-      .select("id, title, project_id, created_at, metadata")
-      .eq("user_id", TEST_USER_ID);
-
-    if (Array.isArray(data)) {
-      setConversations(
-        filterConversationsForMode((data || []) as ConversationMeta[])
-      );
-    }
-  }, [filterConversationsForMode]);
+    const loaded = await loadConversationsFromSupabase();
+    setConversations(filterConversationsForMode(loaded));
+  }, [filterConversationsForMode, loadConversationsFromSupabase]);
 
   const persistMessageMetadata = useCallback(
     async (messageId: string, metadata: MessageMetadata) => {
@@ -3096,18 +3121,14 @@ export function MainApp({
     const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
       options?.metadata && Object.keys(options.metadata).length > 0;
-    const metadataOverrides = hasMetadataOverrides && options?.metadata
-      ? { ...options.metadata }
-      : null;
-    const mergedMetadata =
-      resolvedAgentId === DEFAULT_AGENT_ID && !metadataOverrides
-        ? null
-        : {
-            ...(metadataOverrides ?? {}),
-            ...(resolvedAgentId === DEFAULT_AGENT_ID
-              ? {}
-              : { agentId: resolvedAgentId }),
-          };
+    const metadataOverrides: Record<string, unknown> | undefined =
+      hasMetadataOverrides && options?.metadata
+        ? { ...options.metadata }
+        : undefined;
+    const mergedMetadata: Record<string, unknown> = {
+      ...(metadataOverrides ?? {}),
+      agentId: resolvedAgentId,
+    };
 
     console.log("[SEND_PIPELINE] Preparing to create conversation", {
       title: resolvedTitle,
@@ -3921,7 +3942,7 @@ type RetryOptions = {
         );
       }
 
-      refreshConversations();
+      void refreshConversations();
     } catch (error) {
       if ((error as Error).name === "AbortError") {
         console.warn("Chat request aborted");
@@ -4189,7 +4210,7 @@ type RetryOptions = {
           )
         );
       }
-      refreshConversations();
+      void refreshConversations();
     } catch (error) {
       if ((error as DOMException)?.name === "AbortError") {
         console.warn("Image request aborted");
