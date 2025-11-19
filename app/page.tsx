@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -768,10 +768,27 @@ export function MainApp({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null
   );
-  const rawRouteConversationId =
+  const pathname = usePathname();
+  const routeConversationIdFromPath = useMemo(() => {
+    if (!pathname) {
+      return null;
+    }
+    const segments = pathname.split("/").filter(Boolean);
+    if (segments.length < 2) {
+      return null;
+    }
+    if (segments[0] !== "c") {
+      return null;
+    }
+    const candidate = segments[1]?.trim();
+    return candidate && candidate.length > 0 ? candidate : null;
+  }, [pathname]);
+  const normalizedPropConversationId =
     typeof routeConversationId === "string" && routeConversationId.trim().length > 0
       ? routeConversationId.trim()
       : null;
+  const rawRouteConversationId =
+    routeConversationIdFromPath ?? normalizedPropConversationId;
   const isNewConversationRoute = rawRouteConversationId === NEW_CHAT_DRAFT_ID;
   const conversationIdFromRoute = isNewConversationRoute
     ? null
@@ -1178,6 +1195,21 @@ export function MainApp({
     conversations,
     selectedConversationId,
   ]);
+
+  useEffect(() => {
+    if (!isNewConversationRoute) {
+      return;
+    }
+    if (!pendingNewChat) {
+      setPendingNewChat(true);
+    }
+    if (selectedConversationId !== null) {
+      setSelectedConversationId(null);
+    }
+    setMessages((prev) => (prev.length === 0 ? prev : []));
+    setIsLoadingMessages((prev) => (prev ? false : prev));
+    setViewMode((prev) => (prev === "chat" ? prev : "chat"));
+  }, [isNewConversationRoute, pendingNewChat, selectedConversationId]);
 
   useEffect(() => {
     console.log("[AUTO-OPEN] effect fired, mode:", mode);
