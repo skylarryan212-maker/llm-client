@@ -1488,19 +1488,29 @@ export function MainApp({
     }
   })();
   const composerSize: "default" | "tall" = isCodexMode ? "tall" : "default";
-  const composerShapeClass = isMultilineInput
-    ? composerSize === "tall"
-      ? "rounded-[32px] py-3.5"
-      : "rounded-[24px] py-2.5"
-    : composerSize === "tall"
-      ? "rounded-full py-3"
-      : "rounded-full py-1.5";
+  const composerShapeClass = isCodexMode
+    ? "rounded-[28px] py-3.5"
+    : isMultilineInput
+      ? composerSize === "tall"
+        ? "rounded-[32px] py-3.5"
+        : "rounded-[24px] py-2.5"
+      : composerSize === "tall"
+        ? "rounded-full py-3"
+        : "rounded-full py-1.5";
   const composerPlaceholder = isTranscribing
     ? "Transcribing voice input…"
     : "Message the assistant…";
+  const composerGapClass = isCodexMode ? "gap-3" : "gap-2";
+  const composerPaddingX = isCodexMode ? "px-4" : "px-3";
+  const composerSurfaceClass = isCodexMode
+    ? "border border-white/12 bg-[#101014] shadow-[0_0_0_1px_rgba(0,0,0,0.65)]"
+    : "border border-white/10 bg-[#303030] shadow-[0_0_0_1px_rgba(0,0,0,0.35)]";
+  const recordingSurfaceClass = isCodexMode
+    ? "border border-red-500/40 bg-[#2b0e13] shadow-[0_0_0_1px_rgba(0,0,0,0.65)]"
+    : "border border-red-500/40 bg-[#1b0a0d]/90 shadow-[0_0_0_1px_rgba(0,0,0,0.35)]";
   const composerContainerClass = isRecording
-    ? "flex w-full items-center gap-3 border border-red-500/40 bg-[#1b0a0d]/90 px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition rounded-full py-1.5"
-    : `flex w-full items-center gap-2 border border-white/10 bg-[#303030] px-3 shadow-[0_0_0_1px_rgba(0,0,0,0.35)] transition ${composerShapeClass}`;
+    ? `flex w-full items-center ${composerGapClass} ${recordingSurfaceClass} ${composerPaddingX} transition ${composerShapeClass}`
+    : `flex w-full items-center ${composerGapClass} ${composerSurfaceClass} ${composerPaddingX} transition ${composerShapeClass}`;
   const recordingWaveformPath = useMemo(
     () => buildWaveformPath(waveformLevels),
     [waveformLevels]
@@ -1982,7 +1992,7 @@ export function MainApp({
                 </div>
               )}
 
-              {showInlineTitle && inlineTitle && (
+              {showInlineTitle && !isCodexMode && inlineTitle && (
                 <div className="text-center text-sm font-semibold text-white/80">
                   {inlineTitle}
                 </div>
@@ -2048,6 +2058,37 @@ export function MainApp({
                 const userWrapperClass =
                   "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
 
+                const assistantContentWrapperClass = isCodexMode
+                  ? "space-y-4 text-[15px] leading-relaxed text-white/90"
+                  : "rounded-2xl bg-[#1f1f28] px-4 py-3 shadow-lg";
+                const metadataRowClass = isCodexMode
+                  ? "mt-3 flex flex-wrap items-center gap-2 text-[11px] text-white/60"
+                  : "mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400";
+                const metadataButtonClass = isCodexMode
+                  ? "rounded-full border border-white/15 px-3 py-1 text-xs text-white/80 transition hover:border-white/40"
+                  : "rounded-full border border-[#3a3a3f] px-3 py-1 text-xs text-zinc-300 hover:border-[#5c5cf5]";
+                const metadataSeparatorClass = isCodexMode
+                  ? "h-4 w-px bg-white/10"
+                  : "h-4 w-px bg-[#38383d]";
+                const metadataMenuClass = isCodexMode
+                  ? "absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-white/10 bg-[#050509] p-2 text-left text-xs shadow-2xl"
+                  : "absolute right-0 z-20 mt-2 w-60 rounded-2xl border border-[#2d2d33] bg-[#101014] p-2 text-left text-xs shadow-2xl";
+                const metadataMenuOptionClass = isCodexMode
+                  ? "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-white/80 hover:bg-white/5"
+                  : "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[12px] text-zinc-200 hover:bg-[#1b1b21]";
+                const sourcesPanelClass = isCodexMode
+                  ? "mt-3 rounded-2xl border border-white/10 bg-[#050509] p-3 text-[13px] text-white/80"
+                  : "mt-3 rounded-2xl border border-[#2f2f36] bg-[#141417] p-3 text-[13px] text-zinc-200";
+                const sourceChipClass = isCodexMode
+                  ? "inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[12px] text-white/80"
+                  : "inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80";
+                const userBubbleClass = isCodexMode
+                  ? "rounded-2xl bg-[#2b6eea] px-4 py-2.5 text-left text-[15px] leading-relaxed text-white shadow-lg"
+                  : "rounded-2xl bg-[#2b6eea] px-4 py-3 text-left shadow-lg";
+                const userCopyButtonClass = isCodexMode
+                  ? "mt-2 inline-flex w-fit items-center rounded-full border border-white/15 px-3 py-1 text-xs text-white/80 transition hover:border-white/40"
+                  : "mt-2 text-xs text-white/70 hover:text-white";
+
                 return (
                   <div
                     key={messageId}
@@ -2057,7 +2098,9 @@ export function MainApp({
                   >
                     {isAssistant ? (
                       <div
-                        className={`${assistantWrapperClass} px-1 py-1 text-left text-[15px] leading-relaxed text-zinc-100 md:px-2`}
+                        className={`${assistantWrapperClass} px-1 py-1 text-left text-[15px] leading-relaxed ${
+                          isCodexMode ? "text-white" : "text-zinc-100"
+                        } md:px-2`}
                       >
                         {(() => {
                           const statusChips: ReactNode[] = [];
@@ -2099,7 +2142,7 @@ export function MainApp({
                           ) : null;
                         })()}
 
-                        <div className="rounded-2xl bg-[#1f1f28] px-4 py-3 shadow-lg">
+                        <div className={assistantContentWrapperClass}>
                           <ReactMarkdown
                             components={markdownComponents}
                             rehypePlugins={[rehypeRaw]}
@@ -2109,7 +2152,7 @@ export function MainApp({
                           </ReactMarkdown>
 
                           {isImageMessage && (
-                            <div className="mt-4 space-y-3">
+                            <div className="space-y-3">
                               <div className="flex flex-wrap gap-3">
                                 {generatedImages.map((image) => (
                                   <div
@@ -2137,7 +2180,7 @@ export function MainApp({
 
                           {m.metadata?.attachments &&
                             m.metadata.attachments.length > 0 && (
-                              <div className="mt-4 grid grid-cols-2 gap-3">
+                              <div className="grid grid-cols-2 gap-3">
                                 {m.metadata.attachments.map((attachment) => (
                                   <div
                                     key={`${attachment.id}-attached`}
@@ -2157,7 +2200,7 @@ export function MainApp({
                             )}
 
                           {m.metadata?.files && m.metadata.files.length > 0 && (
-                            <div className="mt-4 space-y-2">
+                            <div className="space-y-2">
                               {m.metadata.files.map((file) => (
                                 <div
                                   key={`${file.id}-file-row`}
@@ -2184,61 +2227,15 @@ export function MainApp({
                             </div>
                           )}
 
-                          {showSourcesButton && (
-                            <div className="mt-4">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setExpandedSourcesId((prev) =>
-                                    prev === messageId ? null : messageId
-                                  )
-                                }
-                                className="text-sm text-[#8ab4ff] hover:underline"
-                              >
-                                {expandedSourcesId === messageId
-                                  ? "Hide sources"
-                                  : "Show sources"}
-                              </button>
-                              {expandedSourcesId === messageId && (
-                                <div className="mt-3 space-y-2 text-sm text-white/70">
-                                      {displayableSources.map((source, index) => {
-                                        const sourceSnippet =
-                                          typeof (source as { snippet?: unknown }).snippet ===
-                                            "string"
-                                            ? (source as { snippet?: string }).snippet
-                                            : null;
-                                        return (
-                                          <div key={`${messageId}-source-${index}`}>
-                                            <a
-                                              href={source.url}
-                                              target="_blank"
-                                              rel="noreferrer"
-                                              className="text-[#8ab4ff] hover:underline"
-                                            >
-                                              {source.title || source.url}
-                                            </a>
-                                            {sourceSnippet && (
-                                              <p className="text-white/70">
-                                                {sourceSnippet}
-                                              </p>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
                           {showSourceChips && (
-                            <div className="mt-4 flex flex-wrap gap-2">
-                              {sourceChips.map((chip, index) => (
+                            <div className="flex flex-wrap gap-2">
+                              {sourceChips.map((chip) => (
                                 <a
-                                  key={`${messageId}-chip-${index}`}
+                                  key={`${messageId}-source-${chip.id}-${chip.domain}`}
                                   href={chip.url}
                                   target="_blank"
                                   rel="noreferrer"
-                                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80"
+                                  className={sourceChipClass}
                                 >
                                   <span className="h-2 w-2 rounded-full bg-[#6f8dff]" aria-hidden />
                                   <span>{chip.domain}</span>
@@ -2248,17 +2245,189 @@ export function MainApp({
                           )}
 
                           {showSearchChip && finalSearchLine && (
-                            <div className="mt-4 text-xs text-white/60">
+                            <div className="text-xs text-white/60">
                               {finalSearchLine}
                             </div>
                           )}
                         </div>
+
+                        {!isStreamingAssistantMessage && (
+                          <div className={metadataRowClass}>
+                            <button
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleCopyMessage(m, messageId);
+                              }}
+                              className={metadataButtonClass}
+                            >
+                              {copiedMessageId === messageId ? "Copied" : "Copy"}
+                            </button>
+
+                            {showSourcesButton && (
+                              <>
+                                <span className={metadataSeparatorClass} aria-hidden />
+                                <button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setExpandedSourcesId((prev) =>
+                                      prev === messageId ? null : messageId
+                                    );
+                                  }}
+                                  className={metadataButtonClass}
+                                  aria-expanded={expandedSourcesId === messageId}
+                                >
+                                  {expandedSourcesId === messageId
+                                    ? "Hide sources"
+                                    : "Sources"}
+                                </button>
+                              </>
+                            )}
+
+                            {m.usedModel && (
+                              <>
+                                <span className={metadataSeparatorClass} aria-hidden />
+                                <div className="relative">
+                                  <button
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setOpenModelMenuId((prev) =>
+                                        prev === messageId ? null : messageId
+                                      );
+                                    }}
+                                    className={`${metadataButtonClass} text-[11px]`}
+                                    aria-expanded={openModelMenuId === messageId}
+                                  >
+                                    {imageModelLabel
+                                      ? imageModelLabel
+                                      : m.usedModelFamily
+                                        ? describeModelFamily(m.usedModelFamily)
+                                        : m.usedModel}
+                                  </button>
+
+                                  {openModelMenuId === messageId && (
+                                    <div className={metadataMenuClass}>
+                                      {(isImageMessage
+                                        ? IMAGE_MODEL_OPTIONS
+                                        : MODEL_RETRY_OPTIONS
+                                      ).map((option) => {
+                                        if (isImageMessage) {
+                                          const imageOption =
+                                            option as (typeof IMAGE_MODEL_OPTIONS)[number];
+                                          const isCurrentImage =
+                                            m.usedModel === imageOption.value;
+                                          return (
+                                            <button
+                                              key={imageOption.value}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                handleRetryWithImageModel(
+                                                  imageOption.value,
+                                                  m
+                                                );
+                                              }}
+                                              className={metadataMenuOptionClass}
+                                            >
+                                              <span>
+                                                Retry with {imageOption.label}
+                                              </span>
+                                              {isCurrentImage && (
+                                                <span className="text-[10px] text-white/60">
+                                                  current
+                                                </span>
+                                              )}
+                                            </button>
+                                          );
+                                        }
+                                        const typedOption = option as (typeof MODEL_RETRY_OPTIONS)[number];
+                                        const legacyMode =
+                                          typedOption.value === "gpt-5-nano"
+                                            ? "nano"
+                                            : typedOption.value === "gpt-5-mini"
+                                              ? "mini"
+                                              : "full";
+                                        const isCurrent =
+                                          m.usedModelFamily === typedOption.value ||
+                                          (!m.usedModelFamily &&
+                                            m.usedModelMode === legacyMode);
+                                        return (
+                                          <button
+                                            key={typedOption.value}
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              handleRetryWithModel(
+                                                typedOption.value,
+                                                m
+                                              );
+                                            }}
+                                            className={metadataMenuOptionClass}
+                                          >
+                                            <span>
+                                              Retry with {typedOption.label}
+                                            </span>
+                                            {isCurrent && (
+                                              <span className="text-[10px] text-white/60">
+                                                current
+                                              </span>
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {showSourcesButton &&
+                          expandedSourcesId === messageId && (
+                            <div className={sourcesPanelClass}>
+                              {displayableSources.length > 0 ? (
+                                <div className="space-y-2">
+                                  {displayableSources.map((source, idx) => {
+                                    const domain =
+                                      (source as { domain?: string }).domain ||
+                                      extractDomainFromUrl(source.url);
+                                    const title =
+                                      ((source.title || domain || source.url) ?? "")
+                                        .toString()
+                                        .trim() || source.url;
+                                    return (
+                                      <a
+                                        key={`${source.url}-${idx}`}
+                                        href={source.url}
+                                        target="_blank"
+                                        rel="noreferrer noopener"
+                                        className="block rounded-xl border border-white/10 bg-white/5 p-3 transition hover:border-white/40"
+                                      >
+                                        <div className="text-[13px] font-semibold text-white">
+                                          {title}
+                                        </div>
+                                        {domain && (
+                                          <div className="text-[11px] text-white/60">
+                                            {domain}
+                                          </div>
+                                        )}
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <p className="text-[12px] text-white/60">
+                                  {isStreamingAssistantMessage
+                                    ? "Gathering live citations…"
+                                    : "No citations were shared for this response."}
+                                </p>
+                              )}
+                            </div>
+                          )}
                       </div>
                     ) : (
                       <div
                         className={`${userWrapperClass} items-end text-right text-[15px] text-white`}
                       >
-                        <div className="rounded-2xl bg-[#2b6eea] px-4 py-3 text-left shadow-lg">
+                        <div className={userBubbleClass}>
                           <ReactMarkdown
                             components={markdownComponents}
                             rehypePlugins={[rehypeRaw]}
@@ -2317,10 +2486,10 @@ export function MainApp({
                         </div>
                         <button
                           type="button"
-                          onClick={() => handleCopyMessage(m)}
-                          className="mt-2 text-xs text-white/70 hover:text-white"
+                          onClick={() => handleCopyMessage(m, messageId)}
+                          className={userCopyButtonClass}
                         >
-                          Copy
+                          {copiedMessageId === messageId ? "Copied" : "Copy"}
                         </button>
                       </div>
                     )}
@@ -2852,6 +3021,21 @@ export function MainApp({
     },
     []
   );
+
+  const persistConversationTitle = useCallback(async (id: string, title: string) => {
+    const trimmed = title.trim();
+    if (!id || !trimmed) {
+      return;
+    }
+    try {
+      await supabase
+        .from("conversations")
+        .update({ title: trimmed })
+        .eq("id", id);
+    } catch (error) {
+      console.warn("Failed to persist conversation title", error);
+    }
+  }, []);
 
   useEffect(() => {
     if (pendingMetadataPersistRef.current.size === 0) return;
@@ -3637,6 +3821,7 @@ type RetryOptions = {
                           : conv
                       )
                     );
+                    void persistConversationTitle(conversationId, newTitle);
                   }
                 } else if (payload.done) {
                   markResponseFinished();
@@ -4706,8 +4891,6 @@ type RetryOptions = {
       { id: "code-reviews", label: "Code reviews" },
       { id: "archive", label: "Archive" },
     ];
-    const newChatDisabled = !selectedConversationId && Boolean(pendingNewChat);
-
     return (
       <div className="flex h-screen min-h-0 bg-[#030308] text-white">
         <aside className="hidden w-64 flex-col border-r border-white/5 bg-[#050509] p-4 lg:flex">
@@ -4771,21 +4954,6 @@ type RetryOptions = {
               <h1 className="text-3xl font-semibold text-white">
                 What should we code next?
               </h1>
-              <div className="flex w-full max-w-3xl justify-end">
-                <button
-                  type="button"
-                  onClick={() => handleNewChat(true)}
-                  disabled={newChatDisabled}
-                  className={`inline-flex items-center gap-2 rounded-full border border-white/15 px-4 py-2 text-sm transition ${
-                    newChatDisabled
-                      ? "cursor-not-allowed opacity-40"
-                      : "hover:bg-white/10"
-                  }`}
-                >
-                  <span className="text-lg leading-none">＋</span>
-                  <span>New chat</span>
-                </button>
-              </div>
             </div>
 
             {renderComposerArea("codexTop")}

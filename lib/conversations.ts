@@ -26,21 +26,22 @@ export async function createConversationRecord({
     project_id: projectId,
   };
 
+  if (metadata && Object.keys(metadata).length > 0) {
+    payload.metadata = metadata;
+  }
+
   const { data, error } = await supabase
     .from("conversations")
     .insert(payload)
-    .select("id, title, project_id, created_at")
+    .select("id, title, project_id, created_at, metadata")
     .single();
 
   if (error || !data) {
     throw error || new Error("Conversation not created");
   }
 
-  const metadataPayload =
-    metadata && Object.keys(metadata).length > 0 ? { ...metadata } : null;
-
   return {
     ...(data as ConversationMeta),
-    metadata: metadataPayload,
+    metadata: (data as ConversationMeta).metadata ?? null,
   };
 }
