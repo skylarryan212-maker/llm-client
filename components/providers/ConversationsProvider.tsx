@@ -231,6 +231,10 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
   }, [loadConversationsForUser, mergeConversationLists]);
 
   useEffect(() => {
+    if (!TEST_USER_ID) {
+      return;
+    }
+
     let cancelled = false;
 
     async function bootstrap() {
@@ -258,7 +262,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [loadConversationsForUser, loadProjectsForUser]);
+  }, [loadConversationsForUser, loadProjectsForUser, TEST_USER_ID]);
 
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const value = useMemo<ConversationsContextValue>(

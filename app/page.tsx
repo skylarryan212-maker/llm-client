@@ -686,6 +686,7 @@ export function MainApp({
     messages,
     setMessages,
     setMessagesForConversation,
+    messagesByConversationId,
   } = useConversationsStore();
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -1377,6 +1378,13 @@ export function MainApp({
       return;
     }
 
+    const inMemoryMessages = messagesByConversationId[selectedConversationId];
+    if (inMemoryMessages && inMemoryMessages.length > 0) {
+      setMessages(inMemoryMessages);
+      setIsLoadingMessages(false);
+      return;
+    }
+
     const cachedMessages =
       conversationHistoryRef.current.get(selectedConversationId) ??
       conversationMessageCache.get(selectedConversationId);
@@ -1391,7 +1399,11 @@ export function MainApp({
     }
 
     loadMessages(TEST_USER_ID, selectedConversationId);
-  }, [loadMessages, selectedConversationId]);
+  }, [
+    loadMessages,
+    messagesByConversationId,
+    selectedConversationId,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3127,7 +3139,7 @@ export function MainApp({
     if (!allowProjectSections) {
       return;
     }
-    ensureChatRoute();
+    ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
     setPendingNewChat(false);
     setPendingNewChatProjectId(null);
     setSelectedProjectId(id);
@@ -3352,9 +3364,7 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChat
-            ? pendingNewChatProjectId ?? null
-            : selectedProjectId ?? null
+          ? pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -4009,13 +4019,34 @@ type RetryOptions = {
                 } else if (typeof payload.title === "string") {
                   const newTitle = payload.title.trim();
                   if (newTitle && conversationId) {
-                    applyConversationState((prev) =>
-                      prev.map((conv) =>
-                        conv.id === conversationId
-                          ? { ...conv, title: newTitle }
-                          : conv
-                      )
-                    );
+                    const id = conversationId;
+                    applyConversationState((prev) => {
+                      let found = false;
+                      const updated = prev.map((conv) => {
+                        if (conv.id !== id) {
+                          return conv;
+                        }
+                        found = true;
+                        return { ...conv, title: newTitle };
+                      });
+                      if (!found) {
+                        const projectHint =
+                          allowProjectSections
+                            ? pendingNewChatProjectId ?? selectedProjectId ?? null
+                            : null;
+                        return [
+                          {
+                            id,
+                            title: newTitle,
+                            project_id: projectHint,
+                            created_at: new Date().toISOString(),
+                            metadata: null,
+                          },
+                          ...updated,
+                        ];
+                      }
+                      return updated;
+                    });
                     void persistConversationTitle(conversationId, newTitle);
                   }
                 } else if (payload.done) {
@@ -4157,9 +4188,7 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChat
-            ? pendingNewChatProjectId ?? null
-            : selectedProjectId ?? null
+          ? pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -4524,7 +4553,7 @@ type RetryOptions = {
     [debugPush, isAgentsView]
   );
 
-  function handleNewChat(global = false) {
+  function handleNewChat(options?: { global?: boolean; projectId?: string | null }) {
     ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
     if (!isAgentsView && !isCodexMode && rawRouteConversationId !== NEW_CHAT_DRAFT_ID) {
       debugPush(`/c/${NEW_CHAT_DRAFT_ID}`);
@@ -4535,10 +4564,14 @@ type RetryOptions = {
     if (isCodexMode && !selectedConversationId) {
       rememberCodexLandingScroll();
     }
+    const explicitProject =
+      allowProjectSections && typeof options?.projectId !== "undefined"
+        ? options.projectId
+        : null;
     const targetProjectId = allowProjectSections
-      ? global
+      ? options?.global
         ? null
-        : selectedProjectId ?? null
+        : explicitProject ?? selectedProjectId ?? null
       : null;
     setPendingNewChat(true);
     setPendingNewChatProjectId(targetProjectId);
@@ -4773,7 +4806,7 @@ type RetryOptions = {
     <>
       <div className="px-3 py-3">
         <button
-          onClick={() => void handleNewChat(true)}
+          onClick={() => void handleNewChat({ global: true })}
           className="flex w-full items-center gap-2 rounded-md bg-[#202123] px-3 py-2 text-sm text-zinc-100 hover:bg-[#26272b]"
         >
           <span className="text-lg leading-none">＋</span>
@@ -5595,7 +5628,7 @@ type RetryOptions = {
               </h1>
 
               <button
-                onClick={() => void handleNewChat(false)}
+                onClick={() => void handleNewChat({ projectId: currentProject.id })}
                 className="mb-6 w-full rounded-2xl bg-[#181818] px-4 py-3 text-sm text-zinc-300 hover:bg-[#202123]"
               >
                 ＋ New chat in {currentProject.name}
