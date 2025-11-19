@@ -865,7 +865,7 @@ export function MainApp({
         if (isCodexMode) {
           return agentId === CODEX_AGENT_ID;
         }
-        return agentId !== CODEX_AGENT_ID;
+        return !agentId || agentId === DEFAULT_AGENT_ID;
       }),
     [isCodexMode]
   );
@@ -910,18 +910,24 @@ export function MainApp({
 
   const loadConversationsFromSupabase = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from("conversations")
-        .select("id, title, project_id, created_at, metadata")
-        .eq("user_id", TEST_USER_ID)
-        .order("created_at", { ascending: false });
+      const response = await fetch("/api/conversations", {
+        cache: "no-store",
+      });
 
-      if (error) {
-        console.warn("Failed to load conversations", error);
+      if (!response.ok) {
+        console.warn("Failed to load conversations", {
+          status: response.status,
+          statusText: response.statusText,
+        });
         return [] as ConversationMeta[];
       }
 
-      const rows = Array.isArray(data) ? data : [];
+      const payload = (await response.json()) as {
+        conversations?: ConversationMeta[];
+      };
+      const rows = Array.isArray(payload.conversations)
+        ? payload.conversations
+        : [];
       const normalized = rows
         .map((row) => normalizeConversationMeta(row))
         .filter((row): row is ConversationMeta => Boolean(row));
