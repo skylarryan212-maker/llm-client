@@ -20,21 +20,35 @@ export async function createConversationRecord({
   projectId,
   metadata,
 }: CreateConversationArgs): Promise<ConversationMeta> {
-  const payload: Record<string, unknown> = {
+  const basePayload: Record<string, unknown> = {
     user_id: TEST_USER_ID,
     title,
     project_id: projectId,
   };
+  const hasMetadata = !!(metadata && Object.keys(metadata).length > 0);
+  const payload = hasMetadata
+    ? { ...basePayload, metadata }
+    : basePayload;
+  const selectColumns = "id, title, project_id, created_at, metadata";
 
-  if (metadata && Object.keys(metadata).length > 0) {
-    payload.metadata = metadata;
+  const insertConversation = async (body: Record<string, unknown>) =>
+    supabase.from("conversations").insert(body).select(selectColumns).single();
+
+  let { data, error } = await insertConversation(payload);
+
+  if (error && hasMetadata) {
+    const message = String(error.message || "").toLowerCase();
+    const mentionsMetadata = message.includes("metadata");
+    if (mentionsMetadata) {
+      console.warn(
+        "Retrying conversation insert without metadata column support",
+        error
+      );
+      const fallback = await insertConversation(basePayload);
+      data = fallback.data;
+      error = fallback.error;
+    }
   }
-
-  const { data, error } = await supabase
-    .from("conversations")
-    .insert(payload)
-    .select("id, title, project_id, created_at, metadata")
-    .single();
 
   if (error || !data) {
     throw error || new Error("Conversation not created");
