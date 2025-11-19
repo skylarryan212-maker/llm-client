@@ -15,6 +15,32 @@ type CreateConversationArgs = {
   metadata?: Record<string, unknown> | null;
 };
 
+const LOCAL_ONLY_FLAG_KEY = "_localOnly";
+
+const buildLocalConversationRecord = (
+  title: string,
+  projectId: string | null,
+  metadata?: Record<string, unknown> | null
+): ConversationMeta => {
+  const fallbackId =
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const metadataWithFlag: Record<string, unknown> = {
+    ...(metadata ?? {}),
+    [LOCAL_ONLY_FLAG_KEY]: true,
+  };
+  return {
+    id: fallbackId,
+    title,
+    project_id: projectId,
+    created_at: new Date().toISOString(),
+    metadata: metadataWithFlag,
+  };
+};
+
 export async function createConversationRecord({
   title,
   projectId,
@@ -34,28 +60,33 @@ export async function createConversationRecord({
   const insertConversation = async (body: Record<string, unknown>) =>
     supabase.from("conversations").insert(body).select(selectColumns).single();
 
-  let { data, error } = await insertConversation(payload);
+  try {
+    let { data, error } = await insertConversation(payload);
 
-  if (error && hasMetadata) {
-    const message = String(error.message || "").toLowerCase();
-    const mentionsMetadata = message.includes("metadata");
-    if (mentionsMetadata) {
-      console.warn(
-        "Retrying conversation insert without metadata column support",
-        error
-      );
-      const fallback = await insertConversation(basePayload);
-      data = fallback.data;
-      error = fallback.error;
+    if (error && hasMetadata) {
+      const message = String(error.message || "").toLowerCase();
+      const mentionsMetadata = message.includes("metadata");
+      if (mentionsMetadata) {
+        console.warn(
+          "Retrying conversation insert without metadata column support",
+          error
+        );
+        const fallback = await insertConversation(basePayload);
+        data = fallback.data;
+        error = fallback.error;
+      }
     }
-  }
 
-  if (error || !data) {
-    throw error || new Error("Conversation not created");
-  }
+    if (error || !data) {
+      throw error || new Error("Conversation not created");
+    }
 
-  return {
-    ...(data as ConversationMeta),
-    metadata: (data as ConversationMeta).metadata ?? null,
-  };
+    return {
+      ...(data as ConversationMeta),
+      metadata: (data as ConversationMeta).metadata ?? null,
+    };
+  } catch (error) {
+    console.error("[CONVERSATION_CREATE] Failed to insert conversation", error);
+    return buildLocalConversationRecord(title, projectId, metadata);
+  }
 }

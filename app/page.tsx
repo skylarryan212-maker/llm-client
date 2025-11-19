@@ -1523,7 +1523,15 @@ export function MainApp({
   const renderPrimaryButton = () => (
     <button
       type="button"
-      onClick={handlePrimaryAction}
+      onClick={() => {
+        console.log("[SEND_BUTTON] click", {
+          primaryActionMode,
+          canSendMessage,
+          isStreaming,
+          createImageArmed,
+        });
+        handlePrimaryAction();
+      }}
       disabled={primaryButtonDisabled}
       className={`flex h-10 w-10 items-center justify-center rounded-full bg-[#2b6eea] text-white shadow-lg transition focus:outline-none ${
         primaryActionMode === "stop"
@@ -3101,11 +3109,26 @@ export function MainApp({
               : { agentId: resolvedAgentId }),
           };
 
-    const record = await createConversationRecord({
+    console.log("[SEND_PIPELINE] Preparing to create conversation", {
       title: resolvedTitle,
       projectId: resolvedProjectId,
       metadata: mergedMetadata,
     });
+    let record: ConversationMeta;
+    try {
+      record = await createConversationRecord({
+        title: resolvedTitle,
+        projectId: resolvedProjectId,
+        metadata: mergedMetadata,
+      });
+      console.log("[SEND_PIPELINE] Conversation record created", {
+        id: record.id,
+        metadata: record.metadata,
+      });
+    } catch (error) {
+      console.error("[SEND_PIPELINE] createConversationRecord failed", error);
+      throw error;
+    }
     setConversations((prev) => [record, ...prev.filter((c) => c.id !== record.id)]);
     return record;
   }
@@ -3136,6 +3159,13 @@ type RetryOptions = {
   // SEND MESSAGE — STREAMING
   // ------------------------------------------------------------
   async function sendTextMessage(options?: SendTextMessageOptions) {
+    console.log("[SEND_PIPELINE] sendTextMessage invoked", {
+      selectedConversationId,
+      pendingNewChat,
+      isCodexMode,
+      canSendMessage,
+      isSending: isStreaming,
+    });
     if (isStreaming) return;
     const sourceText = options?.messageOverride ?? input;
     const activeAttachments =
@@ -3364,6 +3394,12 @@ type RetryOptions = {
           options.retry.userMessagePersistedId;
       }
 
+      console.log("[SEND_PIPELINE] Calling /api/chat", {
+        conversationId,
+        hasImages: attachmentCopies.length > 0,
+        hasFiles: fileAttachmentCopies.length > 0,
+        textLength: text.length,
+      });
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3371,7 +3407,17 @@ type RetryOptions = {
         signal: abortController.signal,
       });
 
-      if (!res.ok || !res.body) throw new Error("Stream failed");
+      if (!res.ok || !res.body) {
+        console.error("[SEND_PIPELINE] /api/chat returned invalid response", {
+          status: res.status,
+          ok: res.ok,
+        });
+        throw new Error("Stream failed");
+      }
+
+      console.log("[SEND_PIPELINE] /api/chat stream established", {
+        status: res.status,
+      });
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -3880,8 +3926,12 @@ type RetryOptions = {
       if ((error as Error).name === "AbortError") {
         console.warn("Chat request aborted");
       } else {
-        console.error(error);
-        if (assistantMessageId) {
+        console.error("[SEND_PIPELINE] sendTextMessage error", error);
+        if (!conversationId) {
+          setComposerError(
+            "We couldn’t create a conversation record. Check the console logs and Supabase schema."
+          );
+        } else if (assistantMessageId) {
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId
@@ -3889,6 +3939,8 @@ type RetryOptions = {
                 : msg
             )
           );
+        } else {
+          setComposerError("Error contacting GPT. Try again.");
         }
       }
       resetThinkingIndicator();
