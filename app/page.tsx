@@ -685,6 +685,7 @@ export function MainApp({
     setPendingNewChatProjectId,
     messages,
     setMessages,
+    setMessagesForConversation,
   } = useConversationsStore();
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -1118,10 +1119,12 @@ export function MainApp({
       setSelectedProjectId(null);
     }
     setViewMode("chat");
+    loadMessages(TEST_USER_ID, conversationIdFromRoute, { force: true });
   }, [
     allowProjectSections,
     conversationIdFromRoute,
     conversations,
+    loadMessages,
     selectedConversationId,
   ]);
 
@@ -1352,7 +1355,7 @@ export function MainApp({
           conversationId
         );
       } else {
-        setMessages(nextMessages);
+        setMessagesForConversation(conversationId, nextMessages);
       }
 
       if (!opts.silent) setIsLoadingMessages(false);
@@ -3301,6 +3304,15 @@ type RetryOptions = {
     console.log(
       `[reasoningDebug] model=${previewModelConfig.model} effort=${previewModelConfig.reasoning?.effort ?? "none"} speed=${chosenSpeed}`
     );
+
+    const applyMessageUpdate = (
+      updater: React.SetStateAction<ChatMessage[]>
+    ) => {
+      if (!conversationId) {
+        return;
+      }
+      setMessagesForConversation(conversationId, updater);
+    };
     if (!options?.messageOverride) {
       setInput("");
       if (!options?.attachmentsOverride) {
@@ -3364,7 +3376,9 @@ type RetryOptions = {
         setPendingNewChatProjectId(null);
       }
 
-      setStreamingConversationId(conversationId);
+      const targetConversationId = conversationId;
+
+      setStreamingConversationId(targetConversationId);
 
       const resolvedAgentId: AgentId = activeAgentId ?? DEFAULT_AGENT_ID;
 
@@ -3381,7 +3395,7 @@ type RetryOptions = {
       ...file,
     }));
 
-    if (!isRetry) {
+      if (!isRetry) {
       const newUserMessageId = createLocalId();
       userMessageId = newUserMessageId;
       const activeAssistantId = assistantMessageId!;
@@ -3396,7 +3410,7 @@ type RetryOptions = {
                 : {}),
             }
           : undefined;
-      setMessages((prev) => [
+      applyMessageUpdate((prev) => [
         ...prev,
         {
           id: newUserMessageId,
@@ -3423,10 +3437,10 @@ type RetryOptions = {
         },
       ]);
     } else {
-        if (assistantMessageId) {
-          pendingMetadataPersistRef.current.delete(assistantMessageId);
-        }
-      setMessages((prev) =>
+      if (assistantMessageId) {
+        pendingMetadataPersistRef.current.delete(assistantMessageId);
+      }
+      applyMessageUpdate((prev) =>
         prev.map((msg) => {
           if (msg.id !== assistantMessageId) return msg;
           return {
@@ -3452,10 +3466,10 @@ type RetryOptions = {
           };
         })
       );
-        setExpandedSourcesId((prev) =>
-          prev === assistantMessageId ? null : prev
-        );
-      }
+      setExpandedSourcesId((prev) =>
+        prev === assistantMessageId ? null : prev
+      );
+    }
 
       const shouldForceWebSearch = forceWebSearch;
       setForceWebSearch(false);
@@ -3573,17 +3587,17 @@ type RetryOptions = {
                   ) {
                     showThinkingIndicator(meta.reasoningEffort);
                   }
-                  if (userRowId && userMessageId) {
-                    setMessages((prev) =>
-                      prev.map((msg) =>
-                        msg.id === userMessageId
-                          ? { ...msg, persistedId: userRowId }
-                          : msg
-                      )
-                    );
-                  }
-                  setMessages((prev) =>
-                    prev.map((msg) => {
+                    if (userRowId && userMessageId) {
+                      applyMessageUpdate((prev) =>
+                        prev.map((msg) =>
+                          msg.id === userMessageId
+                            ? { ...msg, persistedId: userRowId }
+                            : msg
+                        )
+                      );
+                    }
+                    applyMessageUpdate((prev) =>
+                      prev.map((msg) => {
                       if (msg.id !== assistantMessageId) return msg;
                       const resolvedRequestedFamily =
                         meta.requestedModelFamily ??
@@ -3832,7 +3846,7 @@ type RetryOptions = {
                       const formatted = formatThoughtDurationLabel(seconds);
                       let persistedIdForTiming: string | undefined;
                       let updatedMetadata: MessageMetadata | null = null;
-                      setMessages((prev) =>
+                      applyMessageUpdate((prev) =>
                         prev.map((msg) => {
                           if (msg.id !== targetMessageId) return msg;
                           persistedIdForTiming = msg.persistedId;
@@ -3884,11 +3898,11 @@ type RetryOptions = {
                       }
                     }
                   }
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessageId
-                        ? { ...msg, content: msg.content + token }
-                        : msg
+                    applyMessageUpdate((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessageId
+                          ? { ...msg, content: msg.content + token }
+                          : msg
                     )
                   );
                 } else if (payload.status) {
@@ -3934,8 +3948,8 @@ type RetryOptions = {
                   let metadataForPersist: MessageMetadata | null = null;
                   let localMessageId: string | null = null;
                   let resolvedPersistedId: string | null = null;
-                  setMessages((prev) =>
-                    prev.map((msg) => {
+                    applyMessageUpdate((prev) =>
+                      prev.map((msg) => {
                       const matchesPersisted =
                         msg.persistedId === sourcesEvent.messageId;
                       const matchesActive =
@@ -4037,15 +4051,15 @@ type RetryOptions = {
           setComposerError(
             "We couldn’t create a conversation record. Check the console logs and Supabase schema."
           );
-        } else if (assistantMessageId) {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, content: "Error contacting GPT. Try again." }
-                : msg
-            )
-          );
-        } else {
+          } else if (assistantMessageId) {
+            applyMessageUpdate((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, content: "Error contacting GPT. Try again." }
+                  : msg
+              )
+            );
+          } else {
           setComposerError("Error contacting GPT. Try again.");
         }
       }
@@ -4123,6 +4137,15 @@ type RetryOptions = {
     setLiveSearchDomains([]);
     setThinkingStatus({ variant: "thinking", label: "Generating image…" });
 
+    const applyImageMessageUpdate = (
+      updater: React.SetStateAction<ChatMessage[]>
+    ) => {
+      if (!conversationId) {
+        return;
+      }
+      setMessagesForConversation(conversationId, updater);
+    };
+
     try {
       if (!conversationId && isRetry) {
         throw new Error("Cannot retry without a conversation");
@@ -4167,34 +4190,34 @@ type RetryOptions = {
 
       if (!isRetry) {
         const newUserMessageId = createLocalId();
-        userMessageId = newUserMessageId;
-        const placeholderAssistantId = assistantMessageId!;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: newUserMessageId,
-            role: "user",
-            content: prompt,
-          },
-          {
-            id: placeholderAssistantId,
-            role: "assistant",
-            content: "",
-            metadata: {
-              generationType: "image",
-              imagePrompt: prompt,
+          userMessageId = newUserMessageId;
+          const placeholderAssistantId = assistantMessageId!;
+          applyImageMessageUpdate((prev) => [
+            ...prev,
+            {
+              id: newUserMessageId,
+              role: "user",
+              content: prompt,
             },
-          },
-        ]);
-      } else {
-        if (assistantMessageId) {
-          pendingMetadataPersistRef.current.delete(assistantMessageId);
-        }
-        const promptCopy = prompt;
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMessageId
-              ? {
+            {
+              id: placeholderAssistantId,
+              role: "assistant",
+              content: "",
+              metadata: {
+                generationType: "image",
+                imagePrompt: prompt,
+              },
+            },
+          ]);
+        } else {
+          if (assistantMessageId) {
+            pendingMetadataPersistRef.current.delete(assistantMessageId);
+          }
+          const promptCopy = prompt;
+          applyImageMessageUpdate((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
                   ...msg,
                   content: "",
                   usedModel: undefined,
@@ -4268,10 +4291,10 @@ type RetryOptions = {
           ? "Created the requested images."
           : "Created the requested image.");
 
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id !== assistantMessageId) return msg;
-          return {
+        applyImageMessageUpdate((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== assistantMessageId) return msg;
+            return {
             ...msg,
             content: assistantContent,
             metadata: resolvedMetadata,
@@ -4290,33 +4313,33 @@ type RetryOptions = {
         );
       }
 
-      if (payload.userMessageId && userMessageId) {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === userMessageId
-              ? { ...msg, persistedId: payload.userMessageId ?? msg.persistedId }
-              : msg
-          )
-        );
-      }
+        if (payload.userMessageId && userMessageId) {
+          applyImageMessageUpdate((prev) =>
+            prev.map((msg) =>
+              msg.id === userMessageId
+                ? { ...msg, persistedId: payload.userMessageId ?? msg.persistedId }
+                : msg
+            )
+          );
+        }
       void refreshConversations();
     } catch (error) {
       if ((error as DOMException)?.name === "AbortError") {
         console.warn("Image request aborted");
       } else {
         console.error(error);
-        if (assistantMessageId) {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? {
-                    ...msg,
-                    content: "Unable to create the image. Try again.",
-                  }
-                : msg
-            )
-          );
-        } else {
+          if (assistantMessageId) {
+            applyImageMessageUpdate((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMessageId
+                  ? {
+                      ...msg,
+                      content: "Unable to create the image. Try again.",
+                    }
+                  : msg
+              )
+            );
+          } else {
           setComposerError("Unable to create the image. Try again.");
         }
       }
