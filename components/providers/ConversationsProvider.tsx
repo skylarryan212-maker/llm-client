@@ -16,6 +16,7 @@ import {
   type ConversationMeta,
 } from "@/lib/conversations";
 import type { Project } from "@/lib/projects";
+import type { ChatMessage } from "@/lib/chatTypes";
 
 type ChatMessage = {
   id?: string;
@@ -204,6 +205,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     };
   }, [loadConversationsForUser, loadProjectsForUser]);
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const value = useMemo<ConversationsContextValue>(
     () => ({
       conversations,
