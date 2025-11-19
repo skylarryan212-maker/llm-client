@@ -139,6 +139,8 @@ const LAST_CONVERSATION_STORAGE_KEYS: Record<ExperienceMode, string> = {
   codex: "codex:lastConversationId",
 };
 
+const NEW_CHAT_DRAFT_ID = "new";
+
 const SPEED_OPTIONS: { value: SpeedMode; label: string; hint: string }[] = [
   { value: "auto", label: "Auto", hint: "Balanced" },
   { value: "instant", label: "Instant", hint: "Fast replies" },
@@ -760,17 +762,21 @@ export function MainApp({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null
   );
-  const conversationIdFromRoute =
+  const rawRouteConversationId =
     typeof routeConversationId === "string" && routeConversationId.trim().length > 0
       ? routeConversationId.trim()
       : null;
+  const isNewConversationRoute = rawRouteConversationId === NEW_CHAT_DRAFT_ID;
+  const conversationIdFromRoute = isNewConversationRoute
+    ? null
+    : rawRouteConversationId;
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | null
   >(conversationIdFromRoute);
 
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
-  const [pendingNewChat, setPendingNewChat] = useState(false);
+  const [pendingNewChat, setPendingNewChat] = useState(isNewConversationRoute);
   const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
     string | null
   >(null);
@@ -1130,26 +1136,30 @@ export function MainApp({
 
   const navigateToConversation = useCallback(
     (conversationId: string) => {
+      if (isAgentsView) {
+        router.push(`/c/${encodeURIComponent(conversationId)}`);
+        return;
+      }
       if (!isMainChatExperience) {
         return;
       }
-      if (conversationIdFromRoute === conversationId) {
+      if (rawRouteConversationId === conversationId) {
         return;
       }
       router.push(`/c/${encodeURIComponent(conversationId)}`);
     },
-    [conversationIdFromRoute, isMainChatExperience, router]
+    [isAgentsView, isMainChatExperience, rawRouteConversationId, router]
   );
 
   const navigateToMainChatHome = useCallback(() => {
     if (!isMainChatExperience) {
       return;
     }
-    if (!conversationIdFromRoute) {
+    if (!rawRouteConversationId) {
       return;
     }
     router.push("/");
-  }, [conversationIdFromRoute, isMainChatExperience, router]);
+  }, [isMainChatExperience, rawRouteConversationId, router]);
 
   // ------------------------------------------------------------
   // INITIAL LOAD: projects + conversations
@@ -3182,7 +3192,7 @@ export function MainApp({
   }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
-    ensureChatRoute();
+    ensureChatRoute(`/c/${encodeURIComponent(id)}`);
     if (isCodexMode && !selectedConversationId) {
       rememberCodexLandingScroll();
     }
@@ -4568,15 +4578,25 @@ type RetryOptions = {
   // ------------------------------------------------------------
   // PROJECTS + CHAT MGMT
   // ------------------------------------------------------------
-  const ensureChatRoute = () => {
-    if (isAgentsView) {
+  const ensureChatRoute = useCallback(
+    (targetPath?: string) => {
+      if (!isAgentsView) {
+        return;
+      }
+      if (targetPath) {
+        router.push(targetPath);
+        return;
+      }
       router.push("/");
-    }
-  };
+    },
+    [isAgentsView, router]
+  );
 
   function handleNewChat(global = false) {
-    ensureChatRoute();
-    navigateToMainChatHome();
+    ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
+    if (!isAgentsView && !isCodexMode && rawRouteConversationId !== NEW_CHAT_DRAFT_ID) {
+      router.push(`/c/${NEW_CHAT_DRAFT_ID}`);
+    }
     if (pendingNewChat) {
       return;
     }
