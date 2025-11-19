@@ -2315,14 +2315,19 @@ async function ensureChatTitle({
     .from("conversations")
     .select("title")
     .eq("id", conversationId)
-    .single();
+    .maybeSingle();
 
   if (error) {
     console.warn("Unable to load conversation for title", error);
     return;
   }
 
-  const existingTitle = (conversation?.title || "").trim();
+  if (!conversation) {
+    console.warn("Unable to find conversation for title", { conversationId });
+    return;
+  }
+
+  const existingTitle = (conversation.title || "").trim();
   if (existingTitle && existingTitle !== "New chat" && existingTitle !== "Untitled chat") {
     return;
   }
@@ -2520,14 +2525,21 @@ async function applyTitleSuggestion({
       .from("conversations")
       .select("title")
       .eq("id", conversationId)
-      .single();
+      .maybeSingle();
 
     if (error) {
       console.warn("Unable to load conversation for title update", error);
       return null;
     }
 
-    if (!isPlaceholderTitle(data?.title)) {
+    if (!data) {
+      console.warn("Unable to find conversation for title update", {
+        conversationId,
+      });
+      return null;
+    }
+
+    if (!isPlaceholderTitle(data.title)) {
       return null;
     }
 
