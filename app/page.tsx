@@ -280,7 +280,13 @@ function StatusBubble({
 }
 
 export default function Home() {
-  return <MainApp initialPrimaryView="chat" />;
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace(`/c/${NEW_CHAT_DRAFT_ID}`);
+  }, [router]);
+
+  return null;
 }
 
 function CheckmarkIcon({ className = "" }: { className?: string }) {
