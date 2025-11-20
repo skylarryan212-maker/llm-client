@@ -991,6 +991,38 @@ export function MainApp({
     setWaveformLevels(createEmptyWaveform());
   }, []);
 
+  const cancelActiveStream = useCallback(
+    (reason?: string) => {
+      const hadAbortController = Boolean(abortControllerRef.current);
+      const hadStreamingState =
+        isStreaming || hadAbortController || activeAssistantMessageId;
+      if (!hadStreamingState) {
+        // Even when nothing is actively streaming, ensure global indicators reset.
+        setThinkingStatus(null);
+        setSearchIndicator(null);
+        setFileReadingIndicator(null);
+        setLiveSearchDomains([]);
+        return;
+      }
+      console.log("[STREAM] cancelling active stream", reason || "user-navigation");
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setIsStreaming(false);
+      setStreamingConversationId(null);
+      setActiveAssistantMessageId(null);
+      setThinkingStatus(null);
+      setSearchIndicator(null);
+      setFileReadingIndicator(null);
+      setLiveSearchDomains([]);
+      responseTimingRef.current = {
+        start: null,
+        firstToken: null,
+        assistantMessageId: null,
+      };
+    },
+    [activeAssistantMessageId, isStreaming]
+  );
+
   useEffect(() => {
     if (!headerModelMenuOpen) {
       setOtherModelsMenuOpen(false);
@@ -1146,38 +1178,6 @@ export function MainApp({
       transcriptionAbortRef.current = null;
     }
   }, [cancelActiveStream, pathname]);
-
-  const cancelActiveStream = useCallback(
-    (reason?: string) => {
-      const hadAbortController = Boolean(abortControllerRef.current);
-      const hadStreamingState =
-        isStreaming || hadAbortController || activeAssistantMessageId;
-      if (!hadStreamingState) {
-        // Even when nothing is actively streaming, ensure global indicators reset.
-        setThinkingStatus(null);
-        setSearchIndicator(null);
-        setFileReadingIndicator(null);
-        setLiveSearchDomains([]);
-        return;
-      }
-      console.log("[STREAM] cancelling active stream", reason || "user-navigation");
-      abortControllerRef.current?.abort();
-      abortControllerRef.current = null;
-      setIsStreaming(false);
-      setStreamingConversationId(null);
-      setActiveAssistantMessageId(null);
-      setThinkingStatus(null);
-      setSearchIndicator(null);
-      setFileReadingIndicator(null);
-      setLiveSearchDomains([]);
-      responseTimingRef.current = {
-        start: null,
-        firstToken: null,
-        assistantMessageId: null,
-      };
-    },
-    [activeAssistantMessageId, isStreaming]
-  );
 
   const rememberCodexLandingScroll = useCallback(() => {
     if (!isCodexMode) return;
