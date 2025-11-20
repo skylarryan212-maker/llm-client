@@ -4470,20 +4470,24 @@ type RetryOptions = {
 
     hasInitializedFromProjectRoute.current = true;
 
-    ensureChatRoute();
     setPendingNewChat(false);
     setPendingNewChatProjectId(null);
     setSelectedProjectId(routeProjectId);
+    setSelectedConversationId(null);
+    setMessages([]);
+    setIsLoadingMessages(false);
     setViewMode("project");
     setSidebarOpen(false);
   }, [
     allowProjectSections,
     routeProjectId,
     projects,
-    ensureChatRoute,
     setPendingNewChat,
     setPendingNewChatProjectId,
     setSelectedProjectId,
+    setSelectedConversationId,
+    setMessages,
+    setIsLoadingMessages,
     setViewMode,
     setSidebarOpen,
   ]);
