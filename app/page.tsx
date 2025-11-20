@@ -928,14 +928,9 @@ export function MainApp({
     (list: ConversationMeta[]) =>
       list.filter((conversation) => {
         const agentId = agentIdFromMetadata(conversation.metadata);
-
         if (isCodexMode) {
-          // In Codex mode, ONLY show Codex conversations
           return agentId === CODEX_AGENT_ID;
         }
-
-        // In main chat mode, show default/null agent conversations
-        // (exclude Codex and other specialized agents)
         return !agentId || agentId === DEFAULT_AGENT_ID;
       }),
     [isCodexMode]
@@ -1009,13 +1004,17 @@ export function MainApp({
       const hadAbortController = Boolean(abortControllerRef.current);
       const hadStreamingState =
         isStreaming || hadAbortController || activeAssistantMessageId;
-
-      // ALWAYS reset indicators, even if nothing was streaming
+      if (!hadStreamingState) {
+        // Even when nothing is actively streaming, ensure global indicators reset.
+        setThinkingStatus(null);
+        setSearchIndicator(null);
+        setFileReadingIndicator(null);
+        setLiveSearchDomains([]);
+        return;
+      }
       console.log("[STREAM] cancelling active stream", reason || "user-navigation");
-
       abortControllerRef.current?.abort();
       abortControllerRef.current = null;
-
       setIsStreaming(false);
       setStreamingConversationId(null);
       setActiveAssistantMessageId(null);
@@ -1023,7 +1022,6 @@ export function MainApp({
       setSearchIndicator(null);
       setFileReadingIndicator(null);
       setLiveSearchDomains([]);
-
       responseTimingRef.current = {
         start: null,
         firstToken: null,
@@ -1363,7 +1361,6 @@ export function MainApp({
     ) => {
       if (!conversationId) return;
       if (!userId) return;
-
       const manageLoading = !opts.silent;
       if (manageLoading) setIsLoadingMessages(true);
 
@@ -1376,7 +1373,6 @@ export function MainApp({
 
       try {
         let rows: ApiMessageRow[] = [];
-
         try {
           const response = await fetch(
             `/api/messages?conversationId=${encodeURIComponent(
@@ -1384,49 +1380,37 @@ export function MainApp({
             )}&userId=${encodeURIComponent(userId)}`,
             { cache: "no-store" }
           );
-
           if (!response.ok) {
             throw new Error(
               `Failed to load messages (${response.status} ${response.statusText})`
             );
           }
-
           const payload = (await response.json()) as {
             messages?: ApiMessageRow[];
           };
           rows = Array.isArray(payload.messages) ? payload.messages : [];
         } catch (error) {
           console.error("Load messages error", error);
-
-          // CRITICAL: On error, show cached messages if available, then clear loading state
-          const cached = conversationHistoryRef.current.get(conversationId);
-          if (cached && cached.length > 0) {
-            setMessages(cached);
-          } else {
+          if (
+            !(conversationHistoryRef.current.get(conversationId)?.length ?? 0)
+          ) {
             setMessages([]);
-          }
-
-          // ALWAYS clear loading state on error to prevent UI freeze
-          if (manageLoading) {
-            setIsLoadingMessages(false);
           }
           return;
         }
 
         if (!opts.force && selectedConversationId !== conversationId) {
-          // Different conversation selected, abort
-          if (manageLoading) {
-            setIsLoadingMessages(false);
-          }
+          return;
+        }
+
+        if (!opts.force && skipAutoLoadRef.current === conversationId) {
+          skipAutoLoadRef.current = null;
           return;
         }
 
         console.log(
-          `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId}`
+          `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId} userId=${userId}`
         );
-
-        // Transform rows into ChatMessage[] using existing logic.
-        // Keep your existing transformation body here:
         const nextMessages = rows.map((m) => {
           const rawMetadata = (m.metadata || {}) as MessageMetadata;
           const sanitizedMetadata: MessageMetadata = {
@@ -1524,13 +1508,7 @@ export function MainApp({
         }
       } catch (error) {
         console.error("Failed to process loaded messages", error);
-
-        // CRITICAL: Clear loading state even on catastrophic error
-        if (manageLoading) {
-          setIsLoadingMessages(false);
-        }
       } finally {
-        // CRITICAL: ALWAYS clear loading state in finally block
         if (manageLoading) {
           setIsLoadingMessages(false);
         }
@@ -1543,17 +1521,17 @@ export function MainApp({
     if (!conversationIdFromRoute || conversationIdFromRoute === NEW_CHAT_DRAFT_ID) {
       return;
     }
-
-    // REMOVED: skipAutoLoadRef logic that blocks updates
-
+    if (skipAutoLoadRef.current === conversationIdFromRoute) {
+      skipAutoLoadRef.current = null;
+      setIsLoadingMessages(false);
+      return;
+    }
     if (selectedConversationId !== conversationIdFromRoute) {
       setSelectedConversationId(conversationIdFromRoute);
     }
-
     setPendingNewChat(false);
     setPendingNewChatIsGlobal(false);
     setPendingNewChatProjectId(null);
-
     if (allowProjectSections) {
       const target = conversations.find(
         (conversation) => conversation.id === conversationIdFromRoute
@@ -1562,18 +1540,13 @@ export function MainApp({
     } else {
       setSelectedProjectId(null);
     }
-
     setViewMode("chat");
-
-    // Only skip loading if actively streaming to THIS conversation
     if (
       isStreaming &&
       (!streamingConversationId || streamingConversationId === conversationIdFromRoute)
     ) {
       return;
     }
-
-    // Load messages normally - no skipAutoLoadRef blocking
     loadMessages(TEST_USER_ID, conversationIdFromRoute, { force: true });
   }, [
     allowProjectSections,
@@ -1651,6 +1624,12 @@ export function MainApp({
       return;
     }
 
+    if (skipAutoLoadRef.current === selectedConversationId) {
+      skipAutoLoadRef.current = null;
+      setIsLoadingMessages(false);
+      return;
+    }
+
     const inMemoryMessages = messagesByConversationId[selectedConversationId];
     if (inMemoryMessages && inMemoryMessages.length > 0) {
       setMessages(inMemoryMessages);
@@ -1661,7 +1640,6 @@ export function MainApp({
     const cachedMessages =
       conversationHistoryRef.current.get(selectedConversationId) ??
       conversationMessageCache.get(selectedConversationId);
-
     if (cachedMessages) {
       setMessages(cachedMessages);
       if (conversationMessageCache.has(selectedConversationId)) {
@@ -1672,13 +1650,7 @@ export function MainApp({
       setMessages([]);
     }
 
-    // Wrap in try-catch to prevent errors from freezing UI
-    try {
-      loadMessages(TEST_USER_ID, selectedConversationId);
-    } catch (error) {
-      console.error("Failed to initiate message loading", error);
-      setIsLoadingMessages(false);
-    }
+    loadMessages(TEST_USER_ID, selectedConversationId);
   }, [
     loadMessages,
     messagesByConversationId,
@@ -3411,46 +3383,31 @@ export function MainApp({
   }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
-    try {
-      globalNewChatRef.current = false;
-
-      if (isStreaming && streamingConversationId !== id) {
-        cancelActiveStream("conversation-switch");
-      }
-
-      ensureChatRoute(`/c/${encodeURIComponent(id)}`);
-
-      if (isCodexMode && !selectedConversationId) {
-        rememberCodexLandingScroll();
-      }
-
-      setPendingNewChat(false);
-      setPendingNewChatIsGlobal(false);
-      setPendingNewChatProjectId(null);
-      navigateToConversation(id);
-
-      const convo = conversations.find((c) => c.id === id);
-
-      if (id === selectedConversationId) {
-        loadMessages(TEST_USER_ID, id, { force: true });
-      } else {
-        setSelectedConversationId(id);
-      }
-
-      if (allowProjectSections) {
-        setSelectedProjectId(convo?.project_id ?? null);
-      } else {
-        setSelectedProjectId(null);
-      }
-
-      setViewMode("chat");
-      setSidebarOpen(false);
-    } catch (error) {
-      console.error("Failed to select conversation", error);
-      // On error, ensure UI remains interactive
-      setIsLoadingMessages(false);
-      setSidebarOpen(false);
+    globalNewChatRef.current = false;
+    if (isStreaming && streamingConversationId !== id) {
+      cancelActiveStream("conversation-switch");
     }
+    ensureChatRoute(`/c/${encodeURIComponent(id)}`);
+    if (isCodexMode && !selectedConversationId) {
+      rememberCodexLandingScroll();
+    }
+    setPendingNewChat(false);
+    setPendingNewChatIsGlobal(false);
+    setPendingNewChatProjectId(null);
+    navigateToConversation(id);
+    const convo = conversations.find((c) => c.id === id);
+    if (id === selectedConversationId) {
+      loadMessages(TEST_USER_ID, id, { force: true });
+    } else {
+      setSelectedConversationId(id);
+    }
+    if (allowProjectSections) {
+      setSelectedProjectId(convo?.project_id ?? null);
+    } else {
+      setSelectedProjectId(null);
+    }
+    setViewMode("chat");
+    setSidebarOpen(false);
   };
 
   const handleProjectSelect = (id: string) => {
@@ -3620,7 +3577,6 @@ type RetryOptions = {
       isSending: isStreaming,
     });
     if (isStreaming) return;
-
     const sourceText = options?.messageOverride ?? input;
     const activeAttachments =
       options?.attachmentsOverride ?? imageAttachments;
@@ -3629,31 +3585,11 @@ type RetryOptions = {
     const text = sourceText.trim();
     const hasAttachments =
       activeAttachments.length > 0 || activeFiles.length > 0;
-
     if (!text && !hasAttachments) return;
 
     let conversationId = selectedConversationId;
-
-    // CRITICAL: Determine agent ID based on mode AND conversation metadata
-    let activeAgentId: AgentId;
-
-    if (options?.agentId) {
-      // Explicit override from options
-      activeAgentId = options.agentId;
-    } else if (isCodexMode) {
-      // In Codex mode, ALWAYS use CODEX_AGENT_ID
-      activeAgentId = CODEX_AGENT_ID;
-    } else if (conversationId) {
-      // Use conversation's agent ID, or default
-      activeAgentId = getConversationAgentId(conversationId);
-    } else {
-      // New conversation in main chat
-      activeAgentId = defaultAgentId;
-    }
-
-    console.log("[SEND_PIPELINE] Active agent ID:", activeAgentId);
-
-    // ... keep the rest of sendTextMessage implementation below this comment
+    let activeAgentId: AgentId =
+      options?.agentId ?? getConversationAgentId(conversationId);
     let assistantMessageId: string | null = options?.retry?.assistantMessageId ?? null;
     let userMessageId: string | null = null;
     const isRetry = Boolean(options?.retry);
@@ -3742,6 +3678,7 @@ type RetryOptions = {
           setSelectedProjectId(null);
         }
         setViewMode("chat");
+        skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
         setPendingNewChatIsGlobal(false);
         setPendingNewChatProjectId(null);
@@ -4930,51 +4867,38 @@ type RetryOptions = {
   );
 
   function handleNewChat(options?: { global?: boolean; projectId?: string | null }) {
-    // CRITICAL: Set globalNewChatRef based on the explicit global flag
     globalNewChatRef.current = !!options?.global;
-
     if (isStreaming) {
       cancelActiveStream("new-chat");
     }
-
     ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
-
     if (!isAgentsView && !isCodexMode && rawRouteConversationId !== NEW_CHAT_DRAFT_ID) {
       debugPush(`/c/${NEW_CHAT_DRAFT_ID}`);
     }
-
     if (pendingNewChat) {
       return;
     }
-
     if (isCodexMode && !selectedConversationId) {
       rememberCodexLandingScroll();
     }
-
-    // CRITICAL: If options.global is true, force projectId to null
-    // If options.global is false/undefined, use explicit projectId or fallback to selected
     const explicitProject =
       allowProjectSections && typeof options?.projectId !== "undefined"
         ? options.projectId
         : null;
-
     const targetProjectId = allowProjectSections
       ? options?.global
-        ? null // ALWAYS null when global=true
+        ? null
         : explicitProject ?? selectedProjectId ?? null
       : null;
-
     setPendingNewChat(true);
     setPendingNewChatIsGlobal(!!options?.global);
     setPendingNewChatProjectId(targetProjectId);
     setSelectedConversationId(null);
-
     if (allowProjectSections) {
       setSelectedProjectId(options?.global ? null : targetProjectId);
     } else {
       setSelectedProjectId(null);
     }
-
     setMessages([]);
     setIsLoadingMessages(false);
     setViewMode("chat");
