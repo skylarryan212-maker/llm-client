@@ -3486,7 +3486,7 @@ export function MainApp({
       ? rawTitle.trim()
       : "New chat";
     const resolvedProjectId = allowProjectSections
-      ? globalNewChatRef.current || pendingNewChatIsGlobal
+      ? globalNewChatRef.current
         ? null
         : typeof options?.projectId === "undefined"
           ? pendingNewChat
