@@ -165,9 +165,9 @@ type ResponseMetadata = {
 };
 
 const MODEL_MAP: Record<ModelKey, string> = {
-  nano: "gpt-5-nano-2025-08-07",
-  mini: "gpt-5-mini-2025-08-07",
-  full: "gpt-5.1-2025-11-13",
+  nano: "gpt-5-nano",
+  mini: "gpt-5-mini",
+  full: "gpt-5.1",
   "codex-mini": "gpt-5.1-codex-mini",
   "codex-full": "gpt-5.1-codex",
 };
