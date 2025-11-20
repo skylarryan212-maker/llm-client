@@ -3104,34 +3104,6 @@ export function MainApp({
     setSidebarOpen(false);
   };
 
-  useEffect(() => {
-    if (!allowProjectSections) return;
-    if (!routeProjectId) return;
-    if (hasInitializedFromProjectRoute.current) return;
-
-    const projectExists = projects.some((p) => p.id === routeProjectId);
-    if (!projectExists) return;
-
-    hasInitializedFromProjectRoute.current = true;
-
-    ensureChatRoute();
-    setPendingNewChat(false);
-    setPendingNewChatProjectId(null);
-    setSelectedProjectId(routeProjectId);
-    setViewMode("project");
-    setSidebarOpen(false);
-  }, [
-    allowProjectSections,
-    routeProjectId,
-    projects,
-    ensureChatRoute,
-    setPendingNewChat,
-    setPendingNewChatProjectId,
-    setSelectedProjectId,
-    setViewMode,
-    setSidebarOpen,
-  ]);
-
   const refreshConversations = useCallback(async () => {
     const loaded = await loadConversationsFromSupabase();
     applyConversationState(loaded);
@@ -4487,6 +4459,34 @@ type RetryOptions = {
       router.push("/");
     }
   };
+
+  useEffect(() => {
+    if (!allowProjectSections) return;
+    if (!routeProjectId) return;
+    if (hasInitializedFromProjectRoute.current) return;
+
+    const projectExists = projects.some((p) => p.id === routeProjectId);
+    if (!projectExists) return;
+
+    hasInitializedFromProjectRoute.current = true;
+
+    ensureChatRoute();
+    setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
+    setSelectedProjectId(routeProjectId);
+    setViewMode("project");
+    setSidebarOpen(false);
+  }, [
+    allowProjectSections,
+    routeProjectId,
+    projects,
+    ensureChatRoute,
+    setPendingNewChat,
+    setPendingNewChatProjectId,
+    setSelectedProjectId,
+    setViewMode,
+    setSidebarOpen,
+  ]);
 
   function handleNewChat(global = false) {
     ensureChatRoute();
