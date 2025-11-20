@@ -1309,6 +1309,22 @@ export function MainApp({
     selectedProjectId,
   ]);
 
+  const applyMessagesForConversation = useCallback(
+    (conversationId: string, updater: React.SetStateAction<ChatMessage[]>) => {
+      setMessagesForConversation(conversationId, (prev) => {
+        const nextMessages =
+          typeof updater === "function"
+            ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
+            : updater;
+        if (conversationId === selectedConversationId) {
+          setMessages(nextMessages);
+        }
+        return nextMessages;
+      });
+    },
+    [selectedConversationId, setMessages, setMessagesForConversation]
+  );
+
   // ------------------------------------------------------------
   // LOAD MESSAGES
   // ------------------------------------------------------------
@@ -3393,22 +3409,6 @@ export function MainApp({
       }
     },
     []
-  );
-
-  const applyMessagesForConversation = useCallback(
-    (conversationId: string, updater: React.SetStateAction<ChatMessage[]>) => {
-      setMessagesForConversation(conversationId, (prev) => {
-        const nextMessages =
-          typeof updater === "function"
-            ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
-            : updater;
-        if (conversationId === selectedConversationId) {
-          setMessages(nextMessages);
-        }
-        return nextMessages;
-      });
-    },
-    [selectedConversationId, setMessages, setMessagesForConversation]
   );
 
   const persistConversationTitle = useCallback(async (id: string, title: string) => {
