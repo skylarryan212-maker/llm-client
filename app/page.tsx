@@ -1125,13 +1125,15 @@ export function MainApp({
 
     (async () => {
       try {
+        let loadedProjects: Project[] = [];
         if (allowProjectSections) {
           const { data: projData } = await supabase
             .from("projects")
             .select("id, name, created_at")
             .eq("user_id", TEST_USER_ID);
           if (!cancelled) {
-            setProjects((projData || []) as Project[]);
+            loadedProjects = (projData || []) as Project[];
+            setProjects(loadedProjects);
           }
         } else if (!cancelled) {
           setProjects([]);
@@ -1145,25 +1147,33 @@ export function MainApp({
         applyConversationState(loadedConversations);
         const filtered = filterConversationsForMode(loadedConversations);
 
-        const storedId =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem(conversationStorageKey)
-            : null;
-        const preferred =
-          storedId && filtered.find((conversation) => conversation.id === storedId);
-        const newest = preferred || getNewestConversation(filtered);
-        if (newest) {
-          setSelectedConversationId(newest.id);
-          if (allowProjectSections) {
-            setSelectedProjectId(newest.project_id);
+        const hasValidRouteProject =
+          allowProjectSections &&
+          !!routeProjectId &&
+          loadedProjects.some((project) => project.id === routeProjectId);
+
+        if (!hasValidRouteProject) {
+          const storedId =
+            typeof window !== "undefined"
+              ? window.localStorage.getItem(conversationStorageKey)
+              : null;
+          const preferred =
+            storedId &&
+            filtered.find((conversation) => conversation.id === storedId);
+          const newest = preferred || getNewestConversation(filtered);
+          if (newest) {
+            setSelectedConversationId(newest.id);
+            if (allowProjectSections) {
+              setSelectedProjectId(newest.project_id);
+            } else {
+              setSelectedProjectId(null);
+            }
+            setViewMode("chat");
           } else {
-            setSelectedProjectId(null);
-          }
-          setViewMode("chat");
-        } else {
-          setSelectedConversationId(null);
-          if (!allowProjectSections) {
-            setSelectedProjectId(null);
+            setSelectedConversationId(null);
+            if (!allowProjectSections) {
+              setSelectedProjectId(null);
+            }
           }
         }
       } catch (error) {
@@ -1182,6 +1192,7 @@ export function MainApp({
     conversationStorageKey,
     filterConversationsForMode,
     loadConversationsFromSupabase,
+    routeProjectId,
   ]);
 
   // ------------------------------------------------------------
@@ -4490,6 +4501,7 @@ type RetryOptions = {
     setIsLoadingMessages,
     setViewMode,
     setSidebarOpen,
+    hasInitializedFromProjectRoute,
   ]);
 
   function handleNewChat(global = false) {
