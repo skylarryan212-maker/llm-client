@@ -709,6 +709,8 @@ export function MainApp({
     setSelectedConversationId,
     pendingNewChat,
     setPendingNewChat,
+    pendingNewChatIsGlobal,
+    setPendingNewChatIsGlobal,
     pendingNewChatProjectId,
     setPendingNewChatProjectId,
     messages,
@@ -1240,11 +1242,20 @@ export function MainApp({
       return;
     }
     setPendingNewChat(true);
+    setPendingNewChatIsGlobal(globalNewChatRef.current);
     setSelectedConversationId(null);
     setMessages((prev) => (prev.length === 0 ? prev : []));
     setIsLoadingMessages((prev) => (prev ? false : prev));
     setViewMode((prev) => (prev === "chat" ? prev : "chat"));
-  }, [isNewConversationRoute]);
+  }, [
+    isNewConversationRoute,
+    setIsLoadingMessages,
+    setMessages,
+    setPendingNewChat,
+    setPendingNewChatIsGlobal,
+    setSelectedConversationId,
+    setViewMode,
+  ]);
 
   const globalNewChatRef = useRef(false);
 
@@ -1307,6 +1318,8 @@ export function MainApp({
     pendingNewChat,
     selectedConversationId,
     selectedProjectId,
+    setSelectedConversationId,
+    setSelectedProjectId,
   ]);
 
   const applyMessagesForConversation = useCallback(
@@ -1316,13 +1329,19 @@ export function MainApp({
           typeof updater === "function"
             ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
             : updater;
-        if (conversationId === selectedConversationId) {
+
+        const isActiveConversation =
+          conversationId === selectedConversationId ||
+          conversationId === streamingConversationId;
+
+        if (isActiveConversation) {
           setMessages(nextMessages);
         }
+
         return nextMessages;
       });
     },
-    [selectedConversationId, setMessages, setMessagesForConversation]
+    [selectedConversationId, setMessages, setMessagesForConversation, streamingConversationId]
   );
 
   // ------------------------------------------------------------
@@ -1505,6 +1524,7 @@ export function MainApp({
       setSelectedConversationId(conversationIdFromRoute);
     }
     setPendingNewChat(false);
+    setPendingNewChatIsGlobal(false);
     setPendingNewChatProjectId(null);
     if (allowProjectSections) {
       const target = conversations.find(
@@ -1530,6 +1550,12 @@ export function MainApp({
     loadMessages,
     streamingConversationId,
     selectedConversationId,
+    setPendingNewChat,
+    setPendingNewChatIsGlobal,
+    setPendingNewChatProjectId,
+    setSelectedConversationId,
+    setSelectedProjectId,
+    setViewMode,
   ]);
 
   useEffect(() => {
@@ -1554,6 +1580,7 @@ export function MainApp({
 
     setViewMode("project");
     setPendingNewChat(false);
+    setPendingNewChatIsGlobal(false);
     setPendingNewChatProjectId(resolvedProjectId);
     if (selectedConversationId !== null) {
       setSelectedConversationId(null);
@@ -1571,6 +1598,7 @@ export function MainApp({
     setMessages,
     setPendingNewChat,
     setPendingNewChatProjectId,
+    setPendingNewChatIsGlobal,
     setSelectedConversationId,
     setSelectedProjectId,
     setViewMode,
@@ -1623,6 +1651,8 @@ export function MainApp({
     isStreaming,
     streamingConversationId,
     selectedConversationId,
+    setIsLoadingMessages,
+    setMessages,
   ]);
 
   useEffect(() => {
@@ -3356,6 +3386,7 @@ export function MainApp({
       rememberCodexLandingScroll();
     }
     setPendingNewChat(false);
+    setPendingNewChatIsGlobal(false);
     setPendingNewChatProjectId(null);
     navigateToConversation(id);
     const convo = conversations.find((c) => c.id === id);
@@ -3383,6 +3414,7 @@ export function MainApp({
     }
     navigateToProject(id);
     setPendingNewChat(false);
+    setPendingNewChatIsGlobal(false);
     setPendingNewChatProjectId(id);
     setSelectedConversationId(null);
     setSelectedProjectId(id);
@@ -3453,12 +3485,15 @@ export function MainApp({
     const resolvedTitle = rawTitle && rawTitle.trim()
       ? rawTitle.trim()
       : "New chat";
-    const resolvedProjectId =
-      typeof options?.projectId === "undefined"
-        ? pendingNewChat
-          ? pendingNewChatProjectId ?? null
-          : pendingNewChatProjectId ?? selectedProjectId ?? null
-        : options.projectId ?? null;
+    const resolvedProjectId = allowProjectSections
+      ? globalNewChatRef.current || pendingNewChatIsGlobal
+        ? null
+        : typeof options?.projectId === "undefined"
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : pendingNewChatProjectId ?? selectedProjectId ?? null
+          : options.projectId ?? null
+      : null;
     const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
       options?.metadata && Object.keys(options.metadata).length > 0;
@@ -3611,7 +3646,7 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? globalNewChatRef.current
+          ? globalNewChatRef.current || pendingNewChatIsGlobal
             ? null
             : pendingNewChat
               ? pendingNewChatProjectId ?? selectedProjectId ?? null
@@ -3639,6 +3674,7 @@ type RetryOptions = {
         setViewMode("chat");
         skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
+        setPendingNewChatIsGlobal(false);
         setPendingNewChatProjectId(null);
         globalNewChatRef.current = false;
       }
@@ -4847,10 +4883,11 @@ type RetryOptions = {
         : explicitProject ?? selectedProjectId ?? null
       : null;
     setPendingNewChat(true);
+    setPendingNewChatIsGlobal(!!options?.global);
     setPendingNewChatProjectId(targetProjectId);
     setSelectedConversationId(null);
     if (allowProjectSections) {
-      setSelectedProjectId(targetProjectId);
+      setSelectedProjectId(options?.global ? null : targetProjectId);
     } else {
       setSelectedProjectId(null);
     }
