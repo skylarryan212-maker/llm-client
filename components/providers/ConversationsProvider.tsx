@@ -34,6 +34,8 @@ type ConversationsContextValue = {
   setSelectedProjectId: Dispatch<SetStateAction<string | null>>;
   pendingNewChat: boolean;
   setPendingNewChat: Dispatch<SetStateAction<boolean>>;
+  pendingNewChatIsGlobal: boolean;
+  setPendingNewChatIsGlobal: Dispatch<SetStateAction<boolean>>;
   pendingNewChatProjectId: string | null;
   setPendingNewChatProjectId: Dispatch<SetStateAction<string | null>>;
   messages: ChatMessage[];
@@ -57,6 +59,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [pendingNewChat, setPendingNewChat] = useState(false);
+  const [pendingNewChatIsGlobal, setPendingNewChatIsGlobal] = useState(false);
   const [pendingNewChatProjectId, setPendingNewChatProjectId] = useState<
     string | null
   >(null);
@@ -262,7 +265,11 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [loadConversationsForUser, loadProjectsForUser, TEST_USER_ID]);
+  }, [
+    loadConversationsForUser,
+    loadProjectsForUser,
+    mergeConversationLists,
+  ]);
 
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const value = useMemo<ConversationsContextValue>(
@@ -278,6 +285,8 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
       setSelectedProjectId,
       pendingNewChat,
       setPendingNewChat,
+      pendingNewChatIsGlobal,
+      setPendingNewChatIsGlobal,
       pendingNewChatProjectId,
       setPendingNewChatProjectId,
       messages,
@@ -292,6 +301,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
       messages,
       messagesByConversationId,
       pendingNewChat,
+      pendingNewChatIsGlobal,
       pendingNewChatProjectId,
       projects,
       refreshConversations,
