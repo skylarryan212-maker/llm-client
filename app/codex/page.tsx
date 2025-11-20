@@ -3,5 +3,7 @@
 import { MainApp } from "../page";
 
 export default function CodexPage() {
-  return <MainApp initialPrimaryView="chat" mode="codex" />;
+  // Codex is controlled via mode = "codex"
+  // Primary view can stay "chat" (default)
+  return <MainApp mode="codex" />;
 }
