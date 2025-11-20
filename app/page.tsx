@@ -3492,7 +3492,7 @@ export function MainApp({
       ? rawTitle.trim()
       : "New chat";
     const resolvedProjectId = allowProjectSections
-      ? globalNewChatRef.current
+      ? globalNewChatRef.current || pendingNewChatIsGlobal
         ? null
         : typeof options?.projectId === "undefined"
           ? pendingNewChat
@@ -4491,7 +4491,7 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? globalNewChatRef.current
+          ? globalNewChatRef.current || pendingNewChatIsGlobal
             ? null
             : pendingNewChat
               ? pendingNewChatProjectId ?? selectedProjectId ?? null
