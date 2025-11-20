@@ -1316,13 +1316,19 @@ export function MainApp({
           typeof updater === "function"
             ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
             : updater;
-        if (conversationId === selectedConversationId) {
+
+        const isActiveConversation =
+          conversationId === selectedConversationId ||
+          conversationId === streamingConversationId;
+
+        if (isActiveConversation) {
           setMessages(nextMessages);
         }
+
         return nextMessages;
       });
     },
-    [selectedConversationId, setMessages, setMessagesForConversation]
+    [selectedConversationId, setMessages, setMessagesForConversation, streamingConversationId]
   );
 
   // ------------------------------------------------------------
@@ -3453,12 +3459,15 @@ export function MainApp({
     const resolvedTitle = rawTitle && rawTitle.trim()
       ? rawTitle.trim()
       : "New chat";
-    const resolvedProjectId =
-      typeof options?.projectId === "undefined"
-        ? pendingNewChat
-          ? pendingNewChatProjectId ?? null
-          : pendingNewChatProjectId ?? selectedProjectId ?? null
-        : options.projectId ?? null;
+    const resolvedProjectId = allowProjectSections
+      ? globalNewChatRef.current
+        ? null
+        : typeof options?.projectId === "undefined"
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : pendingNewChatProjectId ?? selectedProjectId ?? null
+          : options.projectId ?? null
+      : null;
     const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
       options?.metadata && Object.keys(options.metadata).length > 0;
@@ -4850,7 +4859,7 @@ type RetryOptions = {
     setPendingNewChatProjectId(targetProjectId);
     setSelectedConversationId(null);
     if (allowProjectSections) {
-      setSelectedProjectId(targetProjectId);
+      setSelectedProjectId(options?.global ? null : targetProjectId);
     } else {
       setSelectedProjectId(null);
     }
