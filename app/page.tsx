@@ -1142,27 +1142,9 @@ export function MainApp({
         applyConversationState(loadedConversations);
         const filtered = filterConversationsForMode(loadedConversations);
 
-        const storedId =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem(conversationStorageKey)
-            : null;
-        const preferred =
-          storedId && filtered.find((conversation) => conversation.id === storedId);
-        const newest = preferred || getNewestConversation(filtered);
-        if (newest) {
-          setSelectedConversationId(newest.id);
-          if (allowProjectSections) {
-            setSelectedProjectId(newest.project_id);
-          } else {
-            setSelectedProjectId(null);
-          }
-          setViewMode("chat");
-        } else {
-          setSelectedConversationId(null);
-          if (!allowProjectSections) {
-            setSelectedProjectId(null);
-          }
-        }
+        setSelectedConversationId(null);
+        setSelectedProjectId(null);
+        setViewMode("chat");
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to load conversations", error);
