@@ -1437,16 +1437,10 @@ export function MainApp({
             attachments,
             files,
             usedModel:
-              sanitizedMetadata.usedModel ??
-              (typeof sanitizedMetadata.model === "string"
-                ? sanitizedMetadata.model
-                : undefined),
+              sanitizedMetadata.usedModel,
             usedModelMode: sanitizedMetadata.usedModelMode,
             usedModelFamily:
-              sanitizedMetadata.usedModelFamily ??
-              (typeof sanitizedMetadata.modelFamily === "string"
-                ? sanitizedMetadata.modelFamily
-                : undefined),
+              sanitizedMetadata.usedModelFamily,
             requestedModelFamily: sanitizedMetadata.requestedModelFamily,
             speedMode: sanitizedMetadata.speedMode,
             reasoningEffort: sanitizedMetadata.reasoningEffort,
@@ -2365,9 +2359,7 @@ export function MainApp({
                   m.usedModel ??
                   (typeof m.metadata?.usedModel === "string"
                     ? m.metadata.usedModel
-                    : typeof m.metadata?.model === "string"
-                      ? m.metadata.model
-                      : undefined);
+                    : undefined);
                 const imageModelLabel =
                   isImageMessage && typeof resolvedUsedModel === "string"
                     ? IMAGE_MODEL_LABELS[
