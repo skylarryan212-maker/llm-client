@@ -727,12 +727,10 @@ function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
 export function MainApp({
   initialPrimaryView = "chat",
   mode = "default",
-  routeConversationId = null,
   routeProjectId = null,
 }: {
   initialPrimaryView?: PrimaryView;
   mode?: ExperienceMode;
-  routeConversationId?: string | null;
   routeProjectId?: string | null;
 }) {
   // ------------------------------------------------------------
@@ -801,25 +799,13 @@ export function MainApp({
   const isAgentsView = initialPrimaryView === "agents";
   const isCodexMode = mode === "codex";
   const allowProjectSections = !isCodexMode;
-  const basePath = useMemo(() => (isCodexMode ? "/codex" : ""), [isCodexMode]);
-  const homePath = basePath || "/";
   const hasInitializedFromProjectRoute = useRef(false);
-  const hasInitializedFromConversationRoute = useRef(false);
   const showAgentsCatalog = !isCodexMode && isAgentsView;
   const defaultAgentId = isCodexMode ? CODEX_AGENT_ID : DEFAULT_AGENT_ID;
   const conversationStorageKey = LAST_CONVERSATION_STORAGE_KEYS[mode];
   const resolvedMinInputHeight = isCodexMode
     ? CODEX_MIN_INPUT_HEIGHT
     : MIN_INPUT_HEIGHT;
-  const getConversationPath = useCallback(
-    (conversationId: string) =>
-      `${basePath}/c/${encodeURIComponent(conversationId)}`,
-    [basePath]
-  );
-  const getProjectPath = useCallback(
-    (projectId: string) => `${basePath}/p/${encodeURIComponent(projectId)}`,
-    [basePath]
-  );
   const codexHeaderActions = [
     { label: "Archive", Icon: ArchiveIcon },
     { label: "Share", Icon: ShareIcon },
@@ -1161,27 +1147,12 @@ export function MainApp({
         applyConversationState(loadedConversations);
         const filtered = filterConversationsForMode(loadedConversations);
 
-        const conversationFromRoute =
-          routeConversationId &&
-          filtered.find(
-            (conversation) => conversation.id === routeConversationId
-          );
-
         const hasValidRouteProject =
           allowProjectSections &&
           !!routeProjectId &&
           loadedProjects.some((project) => project.id === routeProjectId);
 
-        if (conversationFromRoute) {
-          hasInitializedFromConversationRoute.current = true;
-          setSelectedConversationId(conversationFromRoute.id);
-          if (allowProjectSections) {
-            setSelectedProjectId(conversationFromRoute.project_id);
-          } else {
-            setSelectedProjectId(null);
-          }
-          setViewMode("chat");
-        } else if (!hasValidRouteProject) {
+        if (!hasValidRouteProject) {
           const storedId =
             typeof window !== "undefined"
               ? window.localStorage.getItem(conversationStorageKey)
@@ -1220,7 +1191,6 @@ export function MainApp({
     applyConversationState,
     conversationStorageKey,
     filterConversationsForMode,
-    routeConversationId,
     loadConversationsFromSupabase,
     routeProjectId,
   ]);
@@ -3129,7 +3099,6 @@ export function MainApp({
     } else {
       setSelectedProjectId(null);
     }
-    router.push(getConversationPath(id));
     setViewMode("chat");
     setSidebarOpen(false);
   };
@@ -3142,7 +3111,6 @@ export function MainApp({
     setPendingNewChat(false);
     setPendingNewChatProjectId(null);
     setSelectedProjectId(id);
-    router.push(getProjectPath(id));
     setViewMode("project");
     setSidebarOpen(false);
   };
@@ -4499,34 +4467,9 @@ type RetryOptions = {
   // ------------------------------------------------------------
   const ensureChatRoute = () => {
     if (isAgentsView) {
-      router.push(homePath);
+      router.push("/");
     }
   };
-
-  useEffect(() => {
-    if (isAgentsView) return;
-
-    if (selectedConversationId) {
-      router.replace(getConversationPath(selectedConversationId));
-      return;
-    }
-
-    if (allowProjectSections && selectedProjectId) {
-      router.replace(getProjectPath(selectedProjectId));
-      return;
-    }
-
-    router.replace(homePath);
-  }, [
-    allowProjectSections,
-    getConversationPath,
-    getProjectPath,
-    homePath,
-    isAgentsView,
-    router,
-    selectedConversationId,
-    selectedProjectId,
-  ]);
 
   useEffect(() => {
     if (!allowProjectSections) return;
@@ -4581,11 +4524,6 @@ type RetryOptions = {
       setSelectedProjectId(targetProjectId);
     } else {
       setSelectedProjectId(null);
-    }
-    if (allowProjectSections && targetProjectId) {
-      router.push(getProjectPath(targetProjectId));
-    } else {
-      router.push(homePath);
     }
     setMessages([]);
     setIsLoadingMessages(false);
