@@ -733,6 +733,7 @@ export function MainApp({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [streamingConversationId, setStreamingConversationId] =
     useState<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
 
   const pathname = usePathname();
   const routeConversationIdFromPath = useMemo(() => {
@@ -875,6 +876,11 @@ export function MainApp({
   useEffect(() => {
     console.log("[ROUTE] conversationIdFromRoute:", conversationIdFromRoute);
   }, [conversationIdFromRoute]);
+
+  useEffect(() => {
+    activeConversationIdRef.current =
+      selectedConversationId ?? streamingConversationId ?? null;
+  }, [selectedConversationId, streamingConversationId]);
   useEffect(() => {
     console.log(
       "[STATE] selectedConversationId updated:",
@@ -3680,6 +3686,8 @@ type RetryOptions = {
       }
 
       const targetConversationId = conversationId;
+
+      activeConversationIdRef.current = targetConversationId;
 
       setStreamingConversationId(targetConversationId);
 
