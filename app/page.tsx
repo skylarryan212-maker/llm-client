@@ -1499,8 +1499,7 @@ export function MainApp({
     setViewMode("chat");
     if (
       isStreaming &&
-      streamingConversationId &&
-      streamingConversationId === conversationIdFromRoute
+      (!streamingConversationId || streamingConversationId === conversationIdFromRoute)
     ) {
       return;
     }
@@ -1566,6 +1565,13 @@ export function MainApp({
       return;
     }
 
+    if (
+      isStreaming &&
+      (!streamingConversationId || streamingConversationId === selectedConversationId)
+    ) {
+      return;
+    }
+
     if (skipAutoLoadRef.current === selectedConversationId) {
       skipAutoLoadRef.current = null;
       setIsLoadingMessages(false);
@@ -1596,6 +1602,8 @@ export function MainApp({
   }, [
     loadMessages,
     messagesByConversationId,
+    isStreaming,
+    streamingConversationId,
     selectedConversationId,
   ]);
 
@@ -3427,7 +3435,9 @@ export function MainApp({
       : "New chat";
     const resolvedProjectId =
       typeof options?.projectId === "undefined"
-        ? pendingNewChatProjectId ?? selectedProjectId ?? null
+        ? pendingNewChat
+          ? pendingNewChatProjectId ?? null
+          : pendingNewChatProjectId ?? selectedProjectId ?? null
         : options.projectId ?? null;
     const resolvedAgentId: AgentId = options?.agentId ?? defaultAgentId;
     const hasMetadataOverrides =
@@ -3581,7 +3591,9 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChatProjectId ?? selectedProjectId ?? null
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -4412,7 +4424,9 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChatProjectId ?? selectedProjectId ?? null
+          ? pendingNewChat
+            ? pendingNewChatProjectId ?? null
+            : pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
