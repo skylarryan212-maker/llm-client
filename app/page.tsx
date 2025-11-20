@@ -727,9 +727,11 @@ function getLatestSearchedDomainLabel(metadata?: MessageMetadata | null) {
 export function MainApp({
   initialPrimaryView = "chat",
   mode = "default",
+  routeProjectId = null,
 }: {
   initialPrimaryView?: PrimaryView;
   mode?: ExperienceMode;
+  routeProjectId?: string | null;
 }) {
   // ------------------------------------------------------------
   // STATE
@@ -797,6 +799,7 @@ export function MainApp({
   const isAgentsView = initialPrimaryView === "agents";
   const isCodexMode = mode === "codex";
   const allowProjectSections = !isCodexMode;
+  const hasInitializedFromProjectRoute = useRef(false);
   const showAgentsCatalog = !isCodexMode && isAgentsView;
   const defaultAgentId = isCodexMode ? CODEX_AGENT_ID : DEFAULT_AGENT_ID;
   const conversationStorageKey = LAST_CONVERSATION_STORAGE_KEYS[mode];
@@ -3100,6 +3103,34 @@ export function MainApp({
     setViewMode("project");
     setSidebarOpen(false);
   };
+
+  useEffect(() => {
+    if (!allowProjectSections) return;
+    if (!routeProjectId) return;
+    if (hasInitializedFromProjectRoute.current) return;
+
+    const projectExists = projects.some((p) => p.id === routeProjectId);
+    if (!projectExists) return;
+
+    hasInitializedFromProjectRoute.current = true;
+
+    ensureChatRoute();
+    setPendingNewChat(false);
+    setPendingNewChatProjectId(null);
+    setSelectedProjectId(routeProjectId);
+    setViewMode("project");
+    setSidebarOpen(false);
+  }, [
+    allowProjectSections,
+    routeProjectId,
+    projects,
+    ensureChatRoute,
+    setPendingNewChat,
+    setPendingNewChatProjectId,
+    setSelectedProjectId,
+    setViewMode,
+    setSidebarOpen,
+  ]);
 
   const refreshConversations = useCallback(async () => {
     const loaded = await loadConversationsFromSupabase();
