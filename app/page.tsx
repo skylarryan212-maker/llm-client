@@ -125,6 +125,32 @@ const OTHER_MODEL_GROUPS: Array<{
 
 const MAX_IMAGE_ATTACHMENTS = 4;
 
+function slugifyProjectName(name: string) {
+  const base = name.trim().toLowerCase();
+  const slug = base
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)+/g, "")
+    .slice(0, 64);
+  return slug || "project";
+}
+
+function buildProjectSlug(project: Pick<Project, "id" | "name">) {
+  const suffix = slugifyProjectName(project.name || "project");
+  return `${project.id}--${suffix}`;
+}
+
+function extractProjectIdFromSlug(slug: string | null | undefined) {
+  if (!slug) {
+    return null;
+  }
+  const separatorIndex = slug.indexOf("--");
+  if (separatorIndex === -1) {
+    return slug.trim() || null;
+  }
+  const candidate = slug.slice(0, separatorIndex).trim();
+  return candidate || null;
+}
+
 function ensureArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
@@ -660,10 +686,12 @@ export function MainApp({
   initialPrimaryView = "chat",
   mode = "default",
   routeConversationId = null,
+  routeProjectSlug = null,
 }: {
   initialPrimaryView?: PrimaryView;
   mode?: ExperienceMode;
   routeConversationId?: string | null;
+  routeProjectSlug?: string | null;
 }) {
   // ------------------------------------------------------------
   // STATE
@@ -719,16 +747,40 @@ export function MainApp({
     const candidate = segments[1]?.trim();
     return candidate && candidate.length > 0 ? candidate : null;
   }, [pathname]);
+  const routeProjectSlugFromPath = useMemo(() => {
+    if (!pathname) {
+      return null;
+    }
+    const segments = pathname.split("/").filter(Boolean);
+    if (segments.length < 2) {
+      return null;
+    }
+    if (segments[0] !== "p") {
+      return null;
+    }
+    const candidate = segments[1]?.trim();
+    return candidate && candidate.length > 0 ? candidate : null;
+  }, [pathname]);
   const normalizedPropConversationId =
     typeof routeConversationId === "string" && routeConversationId.trim().length > 0
       ? routeConversationId.trim()
       : null;
+  const normalizedPropProjectSlug =
+    typeof routeProjectSlug === "string" && routeProjectSlug.trim().length > 0
+      ? routeProjectSlug.trim()
+      : null;
   const rawRouteConversationId =
     routeConversationIdFromPath ?? normalizedPropConversationId;
+  const rawRouteProjectSlug =
+    routeProjectSlugFromPath ?? normalizedPropProjectSlug;
   const isNewConversationRoute = rawRouteConversationId === NEW_CHAT_DRAFT_ID;
   const conversationIdFromRoute = isNewConversationRoute
     ? null
     : rawRouteConversationId;
+  const projectIdFromRoute = useMemo(
+    () => extractProjectIdFromSlug(rawRouteProjectSlug),
+    [rawRouteProjectSlug]
+  );
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [codexActiveTab, setCodexActiveTab] = useState<
@@ -800,6 +852,24 @@ export function MainApp({
   const [headerModelMenuOpen, setHeaderModelMenuOpen] = useState(false);
   const [otherModelsMenuOpen, setOtherModelsMenuOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const projectSlugMap = useMemo(() => {
+    const map = new Map<string, string>();
+    projects.forEach((project) => {
+      if (project.id) {
+        map.set(project.id, buildProjectSlug(project));
+      }
+    });
+    return map;
+  }, [projects]);
+  const getProjectSlugForId = useCallback(
+    (projectId: string | null | undefined) => {
+      if (!projectId) {
+        return null;
+      }
+      return projectSlugMap.get(projectId) ?? projectId;
+    },
+    [projectSlugMap]
+  );
   useEffect(() => {
     console.log("[ROUTE] conversationIdFromRoute:", conversationIdFromRoute);
   }, [conversationIdFromRoute]);
@@ -1092,6 +1162,20 @@ export function MainApp({
     [debugPush, isAgentsView, isMainChatExperience, rawRouteConversationId]
   );
 
+  const navigateToProject = useCallback(
+    (projectId: string, opts?: { replace?: boolean }) => {
+      if (!allowProjectSections) {
+        return;
+      }
+      const slug = getProjectSlugForId(projectId);
+      if (!slug) {
+        return;
+      }
+      debugPush(`/p/${encodeURIComponent(slug)}`, opts);
+    },
+    [allowProjectSections, debugPush, getProjectSlugForId]
+  );
+
   const navigateToMainChatHome = useCallback(() => {
     if (!isMainChatExperience) {
       return;
@@ -1356,13 +1440,66 @@ export function MainApp({
       setSelectedProjectId(null);
     }
     setViewMode("chat");
+    if (
+      isStreaming &&
+      streamingConversationId &&
+      streamingConversationId === conversationIdFromRoute
+    ) {
+      return;
+    }
     loadMessages(TEST_USER_ID, conversationIdFromRoute, { force: true });
   }, [
     allowProjectSections,
     conversationIdFromRoute,
     conversations,
+    isStreaming,
     loadMessages,
+    streamingConversationId,
     selectedConversationId,
+  ]);
+
+  useEffect(() => {
+    if (!allowProjectSections) {
+      return;
+    }
+    if (conversationIdFromRoute) {
+      return;
+    }
+    if (!projectIdFromRoute) {
+      return;
+    }
+
+    const projectExists = projects.some((project) => project.id === projectIdFromRoute);
+    const resolvedProjectId = projectExists ? projectIdFromRoute : null;
+
+    if (resolvedProjectId && selectedProjectId !== resolvedProjectId) {
+      setSelectedProjectId(resolvedProjectId);
+    } else if (!resolvedProjectId && selectedProjectId) {
+      setSelectedProjectId(null);
+    }
+
+    setViewMode("project");
+    setPendingNewChat(false);
+    setPendingNewChatProjectId(resolvedProjectId);
+    if (selectedConversationId !== null) {
+      setSelectedConversationId(null);
+    }
+    setMessages((prev) => (prev.length === 0 ? prev : []));
+    setIsLoadingMessages(false);
+  }, [
+    allowProjectSections,
+    conversationIdFromRoute,
+    projectIdFromRoute,
+    projects,
+    selectedConversationId,
+    selectedProjectId,
+    setIsLoadingMessages,
+    setMessages,
+    setPendingNewChat,
+    setPendingNewChatProjectId,
+    setSelectedConversationId,
+    setSelectedProjectId,
+    setViewMode,
   ]);
 
   useEffect(() => {
@@ -2178,6 +2315,10 @@ export function MainApp({
                 const showSourceChips = sourceChips.length > 0;
                 const isStreamingAssistantMessage =
                   isAssistant && activeAssistantMessageId === messageId;
+                const assistantHasContent =
+                  isAssistant && typeof m.content === "string"
+                    ? m.content.trim().length > 0
+                    : false;
                 const derivedThoughtSeconds =
                   typeof m.metadata?.thinking?.durationSeconds === "number"
                     ? m.metadata?.thinking?.durationSeconds
@@ -2401,7 +2542,7 @@ export function MainApp({
                           )}
                         </div>
 
-                        {!isStreamingAssistantMessage && (
+                        {!isStreamingAssistantMessage && assistantHasContent && (
                           <div className={metadataRowClass}>
                             <button
                               onClick={(event) => {
@@ -3139,11 +3280,14 @@ export function MainApp({
     if (!allowProjectSections) {
       return;
     }
-    ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
+    navigateToProject(id);
     setPendingNewChat(false);
-    setPendingNewChatProjectId(null);
+    setPendingNewChatProjectId(id);
+    setSelectedConversationId(null);
     setSelectedProjectId(id);
     setViewMode("project");
+    setMessages([]);
+    setIsLoadingMessages(false);
     setSidebarOpen(false);
   };
 
@@ -4477,14 +4621,19 @@ type RetryOptions = {
 
   useEffect(() => {
     const previousConversationId = previousConversationIdRef.current;
-    if (previousConversationId !== selectedConversationId) {
-      if (
-        previousConversationId &&
-        streamingConversationId === previousConversationId &&
-        isStreaming
-      ) {
-        handleStopGeneration();
-      }
+    const switchingConversation =
+      previousConversationId !== null &&
+      previousConversationId !== selectedConversationId;
+    const leavingActiveStream =
+      switchingConversation &&
+      streamingConversationId === previousConversationId &&
+      isStreaming;
+
+    if (leavingActiveStream) {
+      handleStopGeneration();
+    }
+
+    if (switchingConversation) {
       setThinkingStatus(null);
       setSearchIndicator(null);
       setFileReadingIndicator(null);
@@ -4610,9 +4759,13 @@ type RetryOptions = {
     if (!error && data) {
       setProjects((prev) => [data, ...prev]);
       setSelectedProjectId(data.id);
+      setSelectedConversationId(null);
+      setPendingNewChat(false);
+      setPendingNewChatProjectId(data.id);
       setViewMode("project");
       setShowProjectModal(false);
       setNewProjectName("");
+      navigateToProject(data.id);
     }
   }
 
@@ -5832,6 +5985,10 @@ type RetryOptions = {
                       "flex w-full max-w-[95%] flex-col md:max-w-[85%]";
                     const userWrapperClass =
                       "inline-flex max-w-[90%] flex-col md:max-w-[70%]";
+                    const assistantHasContent =
+                      isAssistant && typeof m.content === "string"
+                        ? m.content.trim().length > 0
+                        : false;
 
                     return (
                       <div
@@ -5968,7 +6125,7 @@ type RetryOptions = {
                               </div>
                             )}
 
-                            {!isStreamingAssistantMessage && (
+                            {!isStreamingAssistantMessage && assistantHasContent && (
                               <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
                                 <button
                                   onClick={(event) => {
