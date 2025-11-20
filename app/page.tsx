@@ -997,9 +997,15 @@ export function MainApp({
     }
   }, [headerModelMenuOpen]);
 
-  useEffect(() => () => cleanupWaveformVisualizer(), [
-    cleanupWaveformVisualizer,
-  ]);
+  useEffect(
+    () => () => {
+      cancelActiveStream("unmount");
+      transcriptionAbortRef.current?.abort();
+      transcriptionAbortRef.current = null;
+      cleanupWaveformVisualizer();
+    },
+    [cancelActiveStream, cleanupWaveformVisualizer]
+  );
 
   useEffect(() => {
     if (isRecording || isTranscribing) {
@@ -1130,9 +1136,28 @@ export function MainApp({
     setShowScrollButton(false);
   }
 
+  const prevPathnameRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = prevPathnameRef.current;
+    prevPathnameRef.current = pathname;
+    if (previous && previous !== pathname) {
+      cancelActiveStream("route-change");
+      transcriptionAbortRef.current?.abort();
+      transcriptionAbortRef.current = null;
+    }
+  }, [cancelActiveStream, pathname]);
+
   const cancelActiveStream = useCallback(
     (reason?: string) => {
-      if (!isStreaming && !abortControllerRef.current) {
+      const hadAbortController = Boolean(abortControllerRef.current);
+      const hadStreamingState =
+        isStreaming || hadAbortController || activeAssistantMessageId;
+      if (!hadStreamingState) {
+        // Even when nothing is actively streaming, ensure global indicators reset.
+        setThinkingStatus(null);
+        setSearchIndicator(null);
+        setFileReadingIndicator(null);
+        setLiveSearchDomains([]);
         return;
       }
       console.log("[STREAM] cancelling active stream", reason || "user-navigation");
@@ -1151,7 +1176,7 @@ export function MainApp({
         assistantMessageId: null,
       };
     },
-    [isStreaming]
+    [activeAssistantMessageId, isStreaming]
   );
 
   const rememberCodexLandingScroll = useCallback(() => {
@@ -1411,9 +1436,17 @@ export function MainApp({
             content: m.content,
             attachments,
             files,
-            usedModel: sanitizedMetadata.usedModel,
+            usedModel:
+              sanitizedMetadata.usedModel ??
+              (typeof sanitizedMetadata.model === "string"
+                ? sanitizedMetadata.model
+                : undefined),
             usedModelMode: sanitizedMetadata.usedModelMode,
-            usedModelFamily: sanitizedMetadata.usedModelFamily,
+            usedModelFamily:
+              sanitizedMetadata.usedModelFamily ??
+              (typeof sanitizedMetadata.modelFamily === "string"
+                ? sanitizedMetadata.modelFamily
+                : undefined),
             requestedModelFamily: sanitizedMetadata.requestedModelFamily,
             speedMode: sanitizedMetadata.speedMode,
             reasoningEffort: sanitizedMetadata.reasoningEffort,
@@ -2332,7 +2365,9 @@ export function MainApp({
                   m.usedModel ??
                   (typeof m.metadata?.usedModel === "string"
                     ? m.metadata.usedModel
-                    : undefined);
+                    : typeof m.metadata?.model === "string"
+                      ? m.metadata.model
+                      : undefined);
                 const imageModelLabel =
                   isImageMessage && typeof resolvedUsedModel === "string"
                     ? IMAGE_MODEL_LABELS[
