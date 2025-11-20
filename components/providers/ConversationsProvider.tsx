@@ -271,14 +271,6 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     mergeConversationLists,
   ]);
 
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      void refreshConversations();
-    }, 0);
-
-    return () => clearTimeout(handle);
-  }, [refreshConversations]);
-
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const value = useMemo<ConversationsContextValue>(
     () => ({
