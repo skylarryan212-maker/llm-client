@@ -1130,6 +1130,30 @@ export function MainApp({
     setShowScrollButton(false);
   }
 
+  const cancelActiveStream = useCallback(
+    (reason?: string) => {
+      if (!isStreaming && !abortControllerRef.current) {
+        return;
+      }
+      console.log("[STREAM] cancelling active stream", reason || "user-navigation");
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setIsStreaming(false);
+      setStreamingConversationId(null);
+      setActiveAssistantMessageId(null);
+      setThinkingStatus(null);
+      setSearchIndicator(null);
+      setFileReadingIndicator(null);
+      setLiveSearchDomains([]);
+      responseTimingRef.current = {
+        start: null,
+        firstToken: null,
+        assistantMessageId: null,
+      };
+    },
+    [isStreaming]
+  );
+
   const rememberCodexLandingScroll = useCallback(() => {
     if (!isCodexMode) return;
     if (codexLandingScrollRef.current) {
@@ -1269,7 +1293,8 @@ export function MainApp({
     ) => {
       if (!conversationId) return;
       if (!userId) return;
-      if (!opts.silent) setIsLoadingMessages(true);
+      const manageLoading = !opts.silent;
+      if (manageLoading) setIsLoadingMessages(true);
 
       type ApiMessageRow = {
         id?: string;
@@ -1278,143 +1303,148 @@ export function MainApp({
         metadata?: MessageMetadata | null;
       };
 
-      let rows: ApiMessageRow[] = [];
       try {
-        const response = await fetch(
-          `/api/messages?conversationId=${encodeURIComponent(
-            conversationId
-          )}&userId=${encodeURIComponent(userId)}`,
-          { cache: "no-store" }
-        );
-        if (!response.ok) {
-          throw new Error(
-            `Failed to load messages (${response.status} ${response.statusText})`
+        let rows: ApiMessageRow[] = [];
+        try {
+          const response = await fetch(
+            `/api/messages?conversationId=${encodeURIComponent(
+              conversationId
+            )}&userId=${encodeURIComponent(userId)}`,
+            { cache: "no-store" }
           );
-        }
-        const payload = (await response.json()) as {
-          messages?: ApiMessageRow[];
-        };
-        rows = Array.isArray(payload.messages) ? payload.messages : [];
-      } catch (error) {
-        console.error("Load messages error", error);
-        if (!(conversationHistoryRef.current.get(conversationId)?.length ?? 0)) {
-          setMessages([]);
-        }
-        if (!opts.silent) setIsLoadingMessages(false);
-        return;
-      }
-
-      if (!opts.force && selectedConversationId !== conversationId) {
-        if (!opts.silent) setIsLoadingMessages(false);
-        return;
-      }
-
-      if (!opts.force && skipAutoLoadRef.current === conversationId) {
-        skipAutoLoadRef.current = null;
-        if (!opts.silent) setIsLoadingMessages(false);
-        return;
-      }
-
-      console.log(
-        `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId} userId=${userId}`
-      );
-      const nextMessages = rows.map((m) => {
-        const rawMetadata = (m.metadata || {}) as MessageMetadata;
-        const sanitizedMetadata: MessageMetadata = {
-          ...rawMetadata,
-        };
-        delete sanitizedMetadata.thinking;
-        const sanitizedDomains = Array.isArray(rawMetadata.searchedDomains)
-          ? rawMetadata.searchedDomains
-              .map((label) => (typeof label === "string" ? label.trim() : ""))
-              .filter((label) => label.length > 0)
-          : [];
-        if (sanitizedDomains.length > 0) {
-          sanitizedMetadata.searchedDomains = sanitizedDomains;
-        }
-        if (rawMetadata.thinking) {
-          const sanitizedThinking: NonNullable<MessageMetadata["thinking"]> = {};
-          if (rawMetadata.thinking.effort === null) {
-            sanitizedThinking.effort = null;
-          } else if (isReasoningEffort(rawMetadata.thinking.effort)) {
-            sanitizedThinking.effort = rawMetadata.thinking.effort;
+          if (!response.ok) {
+            throw new Error(
+              `Failed to load messages (${response.status} ${response.statusText})`
+            );
           }
-          if (typeof rawMetadata.thinking.durationMs === "number") {
-            sanitizedThinking.durationMs = rawMetadata.thinking.durationMs;
-          }
-          if (typeof rawMetadata.thinking.durationSeconds === "number") {
-            sanitizedThinking.durationSeconds =
-              rawMetadata.thinking.durationSeconds;
-          }
+          const payload = (await response.json()) as {
+            messages?: ApiMessageRow[];
+          };
+          rows = Array.isArray(payload.messages) ? payload.messages : [];
+        } catch (error) {
+          console.error("Load messages error", error);
           if (
-            typeof sanitizedThinking.durationMs === "number" ||
-            typeof sanitizedThinking.durationSeconds === "number" ||
-            typeof sanitizedThinking.effort !== "undefined"
+            !(conversationHistoryRef.current.get(conversationId)?.length ?? 0)
           ) {
-            sanitizedMetadata.thinking = sanitizedThinking;
+            setMessages([]);
           }
+          return;
         }
-        const attachments = Array.isArray(sanitizedMetadata.attachments)
-          ? sanitizedMetadata.attachments
-          : [];
-        const files = Array.isArray(sanitizedMetadata.files)
-          ? sanitizedMetadata.files
-          : [];
-        const timingMs =
-          typeof sanitizedMetadata.thinking?.durationMs === "number"
-            ? sanitizedMetadata.thinking.durationMs
-            : typeof sanitizedMetadata.thinkingDurationMs === "number"
-              ? sanitizedMetadata.thinkingDurationMs
-              : null;
-        const thoughtSeconds =
-          typeof sanitizedMetadata.thinking?.durationSeconds === "number"
-            ? sanitizedMetadata.thinking.durationSeconds
-            : typeof timingMs === "number"
-              ? timingMs / 1000
-              : sanitizedMetadata.thoughtDurationSeconds;
-        const thoughtLabel =
-          sanitizedMetadata.thoughtDurationLabel &&
-          sanitizedMetadata.thoughtDurationLabel.trim().length > 0
-            ? sanitizedMetadata.thoughtDurationLabel
-            : typeof thoughtSeconds === "number"
-              ? formatThoughtDurationLabel(thoughtSeconds)
-              : undefined;
-        return {
-          id: m.id,
-          persistedId: m.id,
-          role: m.role,
-          content: m.content,
-          attachments,
-          files,
-          usedModel: sanitizedMetadata.usedModel,
-          usedModelMode: sanitizedMetadata.usedModelMode,
-          usedModelFamily: sanitizedMetadata.usedModelFamily,
-          requestedModelFamily: sanitizedMetadata.requestedModelFamily,
-          speedMode: sanitizedMetadata.speedMode,
-          reasoningEffort: sanitizedMetadata.reasoningEffort,
-          usedWebSearch: sanitizedMetadata.usedWebSearch,
-          searchRecords: sanitizedMetadata.searchRecords || [],
-          metadata: sanitizedMetadata,
-          thoughtDurationSeconds: thoughtSeconds,
-          thoughtDurationLabel: thoughtLabel,
-        } as ChatMessage;
-      });
 
-      if (
-        nextMessages.length === 0 &&
-        (conversationHistoryRef.current.get(conversationId)?.length ?? 0) > 0
-      ) {
-        console.warn(
-          "Skipping empty history update because cached messages exist",
-          conversationId
+        if (!opts.force && selectedConversationId !== conversationId) {
+          return;
+        }
+
+        if (!opts.force && skipAutoLoadRef.current === conversationId) {
+          skipAutoLoadRef.current = null;
+          return;
+        }
+
+        console.log(
+          `[historyDebug] loaded ${rows.length} messages for conversationId=${conversationId} userId=${userId}`
         );
-      } else {
-        setMessagesForConversation(conversationId, nextMessages);
-      }
+        const nextMessages = rows.map((m) => {
+          const rawMetadata = (m.metadata || {}) as MessageMetadata;
+          const sanitizedMetadata: MessageMetadata = {
+            ...rawMetadata,
+          };
+          delete sanitizedMetadata.thinking;
+          const sanitizedDomains = Array.isArray(rawMetadata.searchedDomains)
+            ? rawMetadata.searchedDomains
+                .map((label) => (typeof label === "string" ? label.trim() : ""))
+                .filter((label) => label.length > 0)
+            : [];
+          if (sanitizedDomains.length > 0) {
+            sanitizedMetadata.searchedDomains = sanitizedDomains;
+          }
+          if (rawMetadata.thinking) {
+            const sanitizedThinking: NonNullable<MessageMetadata["thinking"]> = {};
+            if (rawMetadata.thinking.effort === null) {
+              sanitizedThinking.effort = null;
+            } else if (isReasoningEffort(rawMetadata.thinking.effort)) {
+              sanitizedThinking.effort = rawMetadata.thinking.effort;
+            }
+            if (typeof rawMetadata.thinking.durationMs === "number") {
+              sanitizedThinking.durationMs = rawMetadata.thinking.durationMs;
+            }
+            if (typeof rawMetadata.thinking.durationSeconds === "number") {
+              sanitizedThinking.durationSeconds =
+                rawMetadata.thinking.durationSeconds;
+            }
+            if (
+              typeof sanitizedThinking.durationMs === "number" ||
+              typeof sanitizedThinking.durationSeconds === "number" ||
+              typeof sanitizedThinking.effort !== "undefined"
+            ) {
+              sanitizedMetadata.thinking = sanitizedThinking;
+            }
+          }
+          const attachments = Array.isArray(sanitizedMetadata.attachments)
+            ? sanitizedMetadata.attachments
+            : [];
+          const files = Array.isArray(sanitizedMetadata.files)
+            ? sanitizedMetadata.files
+            : [];
+          const timingMs =
+            typeof sanitizedMetadata.thinking?.durationMs === "number"
+              ? sanitizedMetadata.thinking.durationMs
+              : typeof sanitizedMetadata.thinkingDurationMs === "number"
+                ? sanitizedMetadata.thinkingDurationMs
+                : null;
+          const thoughtSeconds =
+            typeof sanitizedMetadata.thinking?.durationSeconds === "number"
+              ? sanitizedMetadata.thinking.durationSeconds
+              : typeof timingMs === "number"
+                ? timingMs / 1000
+                : sanitizedMetadata.thoughtDurationSeconds;
+          const thoughtLabel =
+            sanitizedMetadata.thoughtDurationLabel &&
+            sanitizedMetadata.thoughtDurationLabel.trim().length > 0
+              ? sanitizedMetadata.thoughtDurationLabel
+              : typeof thoughtSeconds === "number"
+                ? formatThoughtDurationLabel(thoughtSeconds)
+                : undefined;
+          return {
+            id: m.id,
+            persistedId: m.id,
+            role: m.role,
+            content: m.content,
+            attachments,
+            files,
+            usedModel: sanitizedMetadata.usedModel,
+            usedModelMode: sanitizedMetadata.usedModelMode,
+            usedModelFamily: sanitizedMetadata.usedModelFamily,
+            requestedModelFamily: sanitizedMetadata.requestedModelFamily,
+            speedMode: sanitizedMetadata.speedMode,
+            reasoningEffort: sanitizedMetadata.reasoningEffort,
+            usedWebSearch: sanitizedMetadata.usedWebSearch,
+            searchRecords: sanitizedMetadata.searchRecords || [],
+            metadata: sanitizedMetadata,
+            thoughtDurationSeconds: thoughtSeconds,
+            thoughtDurationLabel: thoughtLabel,
+          } as ChatMessage;
+        });
 
-      if (!opts.silent) setIsLoadingMessages(false);
+        if (
+          nextMessages.length === 0 &&
+          (conversationHistoryRef.current.get(conversationId)?.length ?? 0) > 0
+        ) {
+          console.warn(
+            "Skipping empty history update because cached messages exist",
+            conversationId
+          );
+        } else {
+          setMessagesForConversation(conversationId, nextMessages);
+        }
+      } catch (error) {
+        console.error("Failed to process loaded messages", error);
+      } finally {
+        if (manageLoading) {
+          setIsLoadingMessages(false);
+        }
+      }
     },
-    [selectedConversationId]
+    [selectedConversationId, setMessages, setMessagesForConversation]
   );
 
   useEffect(() => {
@@ -2298,10 +2328,16 @@ export function MainApp({
                 const isImageMessage =
                   m.metadata?.generationType === "image" &&
                   generatedImages.length > 0;
+                const resolvedUsedModel =
+                  m.usedModel ??
+                  (typeof m.metadata?.usedModel === "string"
+                    ? m.metadata.usedModel
+                    : undefined);
                 const imageModelLabel =
-                  isImageMessage && typeof m.usedModel === "string"
-                    ? IMAGE_MODEL_LABELS[m.usedModel as ImageModelKey] ||
-                      m.usedModel
+                  isImageMessage && typeof resolvedUsedModel === "string"
+                    ? IMAGE_MODEL_LABELS[
+                        resolvedUsedModel as ImageModelKey
+                      ] || resolvedUsedModel
                     : null;
                 const sourceChips = ensureArray<SourceChip>(
                   m.metadata?.sources
@@ -2574,7 +2610,11 @@ export function MainApp({
                               </>
                             )}
 
-                            {m.usedModel && (
+                            {(
+                              imageModelLabel ||
+                              resolvedUsedModel ||
+                              m.usedModelFamily
+                            ) && (
                               <>
                                 <span className={metadataSeparatorClass} aria-hidden />
                                 <div className="relative">
@@ -2592,7 +2632,7 @@ export function MainApp({
                                       ? imageModelLabel
                                       : m.usedModelFamily
                                         ? describeModelFamily(m.usedModelFamily)
-                                        : m.usedModel}
+                                        : resolvedUsedModel}
                                   </button>
 
                                   {openModelMenuId === messageId && (
@@ -3254,6 +3294,9 @@ export function MainApp({
   }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
+    if (isStreaming && streamingConversationId !== id) {
+      cancelActiveStream("conversation-switch");
+    }
     ensureChatRoute(`/c/${encodeURIComponent(id)}`);
     if (isCodexMode && !selectedConversationId) {
       rememberCodexLandingScroll();
@@ -3279,6 +3322,9 @@ export function MainApp({
   const handleProjectSelect = (id: string) => {
     if (!allowProjectSections) {
       return;
+    }
+    if (isStreaming) {
+      cancelActiveStream("project-switch");
     }
     navigateToProject(id);
     setPendingNewChat(false);
@@ -4710,6 +4756,9 @@ type RetryOptions = {
   );
 
   function handleNewChat(options?: { global?: boolean; projectId?: string | null }) {
+    if (isStreaming) {
+      cancelActiveStream("new-chat");
+    }
     ensureChatRoute(`/c/${NEW_CHAT_DRAFT_ID}`);
     if (!isAgentsView && !isCodexMode && rawRouteConversationId !== NEW_CHAT_DRAFT_ID) {
       debugPush(`/c/${NEW_CHAT_DRAFT_ID}`);
