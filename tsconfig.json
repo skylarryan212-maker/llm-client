@@ -19,6 +19,8 @@
       }
     ],
     "paths": {
+      "@/components/*": ["./components/*", "./components/v0/components/*"],
+      "@/lib/*": ["./lib/*", "./components/v0/lib/*"],
       "@/*": ["./*"],
       "rehype-raw": ["./lib/rehypeRaw.ts"]
     }
