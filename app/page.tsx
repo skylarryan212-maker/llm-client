@@ -1246,6 +1246,8 @@ export function MainApp({
     setViewMode((prev) => (prev === "chat" ? prev : "chat"));
   }, [isNewConversationRoute]);
 
+  const globalNewChatRef = useRef(false);
+
   useEffect(() => {
     console.log("[AUTO-OPEN] effect fired, mode:", mode);
     const logSkip = (reason: string) => {
@@ -1461,7 +1463,7 @@ export function MainApp({
             conversationId
           );
         } else {
-          setMessagesForConversation(conversationId, nextMessages);
+          applyMessagesForConversation(conversationId, nextMessages);
         }
       } catch (error) {
         console.error("Failed to process loaded messages", error);
@@ -1471,7 +1473,7 @@ export function MainApp({
         }
       }
     },
-    [selectedConversationId, setMessages, setMessagesForConversation]
+    [applyMessagesForConversation, selectedConversationId, setMessages]
   );
 
   useEffect(() => {
@@ -3329,6 +3331,7 @@ export function MainApp({
   }, [isRecording, stopRecording, transcribeAudio]);
 
   const handleConversationSelect = (id: string) => {
+    globalNewChatRef.current = false;
     if (isStreaming && streamingConversationId !== id) {
       cancelActiveStream("conversation-switch");
     }
@@ -3358,6 +3361,7 @@ export function MainApp({
     if (!allowProjectSections) {
       return;
     }
+    globalNewChatRef.current = false;
     if (isStreaming) {
       cancelActiveStream("project-switch");
     }
@@ -3389,6 +3393,22 @@ export function MainApp({
       }
     },
     []
+  );
+
+  const applyMessagesForConversation = useCallback(
+    (conversationId: string, updater: React.SetStateAction<ChatMessage[]>) => {
+      setMessagesForConversation(conversationId, (prev) => {
+        const nextMessages =
+          typeof updater === "function"
+            ? (updater as (value: ChatMessage[]) => ChatMessage[])(prev)
+            : updater;
+        if (conversationId === selectedConversationId) {
+          setMessages(nextMessages);
+        }
+        return nextMessages;
+      });
+    },
+    [selectedConversationId, setMessages, setMessagesForConversation]
   );
 
   const persistConversationTitle = useCallback(async (id: string, title: string) => {
@@ -3555,7 +3575,7 @@ type RetryOptions = {
       if (!conversationId) {
         return;
       }
-      setMessagesForConversation(conversationId, updater);
+      applyMessagesForConversation(conversationId, updater);
     };
     if (!options?.messageOverride) {
       setInput("");
@@ -3591,9 +3611,11 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChat
-            ? pendingNewChatProjectId ?? null
-            : pendingNewChatProjectId ?? selectedProjectId ?? null
+          ? globalNewChatRef.current
+            ? null
+            : pendingNewChat
+              ? pendingNewChatProjectId ?? selectedProjectId ?? null
+              : pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -3618,6 +3640,7 @@ type RetryOptions = {
         skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
         setPendingNewChatProjectId(null);
+        globalNewChatRef.current = false;
       }
 
       const targetConversationId = conversationId;
@@ -4415,7 +4438,7 @@ type RetryOptions = {
       if (!conversationId) {
         return;
       }
-      setMessagesForConversation(conversationId, updater);
+      applyMessagesForConversation(conversationId, updater);
     };
 
     try {
@@ -4424,9 +4447,11 @@ type RetryOptions = {
       }
       if (!conversationId) {
         const projectTarget = allowProjectSections
-          ? pendingNewChat
-            ? pendingNewChatProjectId ?? null
-            : pendingNewChatProjectId ?? selectedProjectId ?? null
+          ? globalNewChatRef.current
+            ? null
+            : pendingNewChat
+              ? pendingNewChatProjectId ?? selectedProjectId ?? null
+              : pendingNewChatProjectId ?? selectedProjectId ?? null
           : null;
         const conv = await createConversation({
           projectId: projectTarget,
@@ -4447,6 +4472,7 @@ type RetryOptions = {
         skipAutoLoadRef.current = conv.id;
         setPendingNewChat(false);
         setPendingNewChatProjectId(null);
+        globalNewChatRef.current = false;
       }
 
       if (!assistantMessageId) {
@@ -4797,6 +4823,7 @@ type RetryOptions = {
   );
 
   function handleNewChat(options?: { global?: boolean; projectId?: string | null }) {
+    globalNewChatRef.current = !!options?.global;
     if (isStreaming) {
       cancelActiveStream("new-chat");
     }
