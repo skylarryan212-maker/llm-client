@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import "@/components/v0/styles/globals.css";
 
@@ -15,9 +16,19 @@ import { Button } from "@/components/v0/components/ui/button";
 import { ScrollArea } from "@/components/v0/components/ui/scroll-area";
 import { useChatSession } from "@/components/v0/lib/use-chat-session";
 
-export default function V0RootPage() {
+export default function V0RootPageWrapper() {
+  return (
+    <Suspense>
+      <V0RootPage />
+    </Suspense>
+  );
+}
+
+function V0RootPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const {
     messages,
@@ -27,6 +38,22 @@ export default function V0RootPage() {
     selectConversation,
     startNewChat,
   } = useChatSession();
+
+  const urlConversationId = searchParams?.get("conversationId");
+
+  useEffect(() => {
+    if (urlConversationId && urlConversationId !== selectedConversationId) {
+      selectConversation(urlConversationId);
+    }
+  }, [urlConversationId, selectedConversationId, selectConversation]);
+
+  useEffect(() => {
+    if (selectedConversationId) {
+      router.replace(`/v0?conversationId=${encodeURIComponent(selectedConversationId)}`);
+    } else {
+      router.replace("/v0");
+    }
+  }, [selectedConversationId, router]);
 
   const sidebarConversations = useMemo(
     () =>
@@ -47,7 +74,10 @@ export default function V0RootPage() {
           conversations={sidebarConversations}
           selectedChatId={selectedConversationId ?? undefined}
           onChatSelect={(id) => selectConversation(id)}
-          onNewChat={() => startNewChat()}
+          onNewChat={() => {
+            startNewChat();
+            router.replace("/v0");
+          }}
           onNewProject={() => {}}
           onProjectSelect={() => {}}
           selectedProjectId={undefined}

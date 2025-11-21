@@ -54,7 +54,7 @@ export function ChatSidebar({
   onSettingsOpen
 }: ChatSidebarProps) {
   const pathname = usePathname()
-  const isAgentsPage = pathname === '/agents'
+  const isAgentsPage = pathname?.startsWith('/v0/agents')
   const [projectsCollapsed, setProjectsCollapsed] = useState(false)
   const [chatsCollapsed, setChatsCollapsed] = useState(false)
   const [showMoreProjects, setShowMoreProjects] = useState(false)
@@ -115,7 +115,7 @@ export function ChatSidebar({
               {isOpen && "New Chat"}
             </Button>
             
-            <Link href="/agents" className="block">
+            <Link href="/v0/agents" className="block">
               <Button 
                 variant="ghost" 
                 className={`${isOpen ? 'w-full justify-start' : 'w-10 h-10 p-0 justify-center'} gap-2 ${
