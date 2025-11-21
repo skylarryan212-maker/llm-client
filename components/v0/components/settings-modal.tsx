@@ -2,17 +2,17 @@
 
 import { useState, useEffect } from 'react'
 import { X, Settings, Bell, User, Grid3x3, Calendar, ShoppingCart, Database, Shield, Users2, UserCircle } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { Input } from '@/components/ui/input'
+import { Button } from '@/components/v0/components/ui/button'
+import { Label } from '@/components/v0/components/ui/label'
+import { Textarea } from '@/components/v0/components/ui/textarea'
+import { Input } from '@/components/v0/components/ui/input'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select'
+} from '@/components/v0/components/ui/select'
 
 interface SettingsModalProps {
   isOpen: boolean

@@ -1,12 +1,12 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@/components/v0/components/ui/dropdown-menu'
 import { Copy, ExternalLink, Check } from 'lucide-react'
 import Image from 'next/image'
 import { useState } from 'react'

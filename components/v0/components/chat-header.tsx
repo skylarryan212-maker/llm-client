@@ -1,6 +1,6 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 import { Archive, Menu, Share2 } from 'lucide-react'
 
 interface ChatHeaderProps {

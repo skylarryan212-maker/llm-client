@@ -1,0 +1,6 @@
+{
+  "name": "@radix-ui/react-label",
+  "version": "2.1.8",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

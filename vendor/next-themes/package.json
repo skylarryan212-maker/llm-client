@@ -1,0 +1,6 @@
+{
+  "name": "next-themes",
+  "version": "0.4.6",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

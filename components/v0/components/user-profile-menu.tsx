@@ -1,7 +1,6 @@
 'use client'
 
-import { useState } from 'react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 import { ChevronUp, Crown } from 'lucide-react'
 import {
   DropdownMenu,
@@ -9,8 +8,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { SettingsModal } from '@/components/settings-modal'
+} from '@/components/v0/components/ui/dropdown-menu'
 
 interface UserProfileMenuProps {
   isCompressed?: boolean

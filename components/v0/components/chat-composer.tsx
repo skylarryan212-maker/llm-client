@@ -1,10 +1,11 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
+import { useState, type KeyboardEvent } from 'react'
 import { Plus, Mic, ArrowUp } from 'lucide-react'
-import { useState } from 'react'
-import { AttachmentMenu } from '@/components/attachment-menu'
+
+import { AttachmentMenu } from '@/components/v0/components/attachment-menu'
+import { Button } from '@/components/v0/components/ui/button'
+import { Textarea } from '@/components/v0/components/ui/textarea'
 
 interface ChatComposerProps {
   onSubmit?: (message: string) => void
@@ -24,7 +25,7 @@ export function ChatComposer({ onSubmit, onSend, placeholder = "Message LLM Clie
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSubmit()
