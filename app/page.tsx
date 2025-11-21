@@ -5478,15 +5478,13 @@ type RetryOptions = {
             )}
           </div>
           <div className="flex items-center gap-3">
-            {!isCodexMode && (
-              <button
-                type="button"
-                className="rounded-md border border-white/10 px-3 py-1 text-xs font-medium text-white/80 transition hover:border-white/30 hover:text-white"
-                onClick={() => router.push("/v0")}
-              >
-                Try new UI
-              </button>
-            )}
+            <button
+              type="button"
+              className="rounded-md border border-white/10 px-3 py-1 text-xs font-medium text-white/80 transition hover:border-white/30 hover:text-white"
+              onClick={() => router.push("/v0")}
+            >
+              Open new V0 UI
+            </button>
             {isCodexMode &&
               codexHeaderActions.map(({ label, Icon }) => (
                 <button
