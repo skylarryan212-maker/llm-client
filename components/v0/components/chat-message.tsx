@@ -1,12 +1,6 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { Button } from '@/components/v0/components/ui/button'
 import { Copy, ExternalLink, Check } from 'lucide-react'
 import Image from 'next/image'
 import { useState } from 'react'
@@ -87,22 +81,9 @@ export function ChatMessage({ role, content, model, hasImage, imageUrl, hasSourc
             )}
             
             {model && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground hover:text-foreground flex-shrink-0">
-                    {model}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-56">
-                  <DropdownMenuItem className="flex items-center justify-between">
-                    <span>Retry with GPT-4</span>
-                    <span className="text-xs text-muted-foreground">current</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem>Retry with GPT-4 Turbo</DropdownMenuItem>
-                  <DropdownMenuItem>Retry with GPT-3.5</DropdownMenuItem>
-                  <DropdownMenuItem>Retry with Claude 3</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <span className="rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                {model}
+              </span>
             )}
           </div>
         </div>

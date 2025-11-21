@@ -1,0 +1,6 @@
+{
+  "name": "clsx",
+  "version": "2.1.1",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

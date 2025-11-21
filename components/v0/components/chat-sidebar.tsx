@@ -1,19 +1,20 @@
 'use client'
 
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { Plus, Sparkles, ChevronDown, ChevronRight, FolderPlus, X } from 'lucide-react'
 import Link from 'next/link'
-import { UserProfileMenu } from '@/components/user-profile-menu'
 import { usePathname } from 'next/navigation'
-import { ChatContextMenu } from '@/components/chat-context-menu'
-import { ProjectContextMenu } from '@/components/project-context-menu'
+import { Plus, Sparkles, ChevronDown, ChevronRight, FolderPlus, X } from 'lucide-react'
+
+import { ChatContextMenu } from '@/components/v0/components/chat-context-menu'
+import { ProjectContextMenu } from '@/components/v0/components/project-context-menu'
+import { UserProfileMenu } from '@/components/v0/components/user-profile-menu'
+import { Button } from '@/components/v0/components/ui/button'
+import { ScrollArea } from '@/components/v0/components/ui/scroll-area'
 
 interface Conversation {
   id: string
   title: string
-  timestamp: string
+  timestamp?: string
 }
 
 interface Project {
@@ -43,7 +44,7 @@ export function ChatSidebar({
   onToggle, 
   currentModel = 'GPT-4', 
   onModelSelect, 
-  selectedChatId = '4',
+  selectedChatId,
   conversations: propConversations,
   onChatSelect,
   onNewChat,
@@ -53,7 +54,7 @@ export function ChatSidebar({
   onSettingsOpen
 }: ChatSidebarProps) {
   const pathname = usePathname()
-  const isAgentsPage = pathname === '/agents'
+  const isAgentsPage = pathname?.startsWith('/v0/agents')
   const [projectsCollapsed, setProjectsCollapsed] = useState(false)
   const [chatsCollapsed, setChatsCollapsed] = useState(false)
   const [showMoreProjects, setShowMoreProjects] = useState(false)
@@ -114,7 +115,7 @@ export function ChatSidebar({
               {isOpen && "New Chat"}
             </Button>
             
-            <Link href="/agents" className="block">
+            <Link href="/v0/agents" className="block">
               <Button 
                 variant="ghost" 
                 className={`${isOpen ? 'w-full justify-start' : 'w-10 h-10 p-0 justify-center'} gap-2 ${
@@ -245,7 +246,7 @@ export function ChatSidebar({
                             <div className="py-2 px-3 flex items-start justify-between gap-2">
                               <div className="flex-1 min-w-0">
                                 <div className="truncate text-sm text-sidebar-foreground pr-8">{conv.title}</div>
-                                <div className="text-xs text-muted-foreground">{conv.timestamp}</div>
+                                <div className="text-xs text-muted-foreground">{conv.timestamp || ''}</div>
                               </div>
                               <ChatContextMenu
                                 onShare={() => console.log('Share', conv.id)}

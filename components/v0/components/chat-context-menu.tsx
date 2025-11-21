@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { MoreHorizontal, Share, Edit3, FolderInput, Archive, Trash2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 
 interface ChatContextMenuProps {
   onShare?: () => void

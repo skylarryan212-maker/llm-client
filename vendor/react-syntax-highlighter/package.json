@@ -1,0 +1,6 @@
+{
+  "name": "react-syntax-highlighter",
+  "version": "16.1.0",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

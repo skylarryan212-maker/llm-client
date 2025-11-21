@@ -1,6 +1,6 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 import { ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 

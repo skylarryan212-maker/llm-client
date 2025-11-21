@@ -1,0 +1,6 @@
+{
+  "name": "class-variance-authority",
+  "version": "0.7.1",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

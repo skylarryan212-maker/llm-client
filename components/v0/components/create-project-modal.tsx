@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { X, Settings } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@/components/v0/components/ui/button'
 
 interface CreateProjectModalProps {
   isOpen: boolean
